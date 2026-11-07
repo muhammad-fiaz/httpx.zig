@@ -256,17 +256,9 @@ const httpx_dep = b.dependency("httpx", .{
 exe.root_module.addImport("httpx", httpx_dep.module("httpx"));
 ```
 
-> [!NOTE]
-> If you encounter `file exists in modules 'X' and 'X0'`, try removing `.target = target` and `.optimize = optimize` from your dependency options in the root `build.zig` and use `.{}` instead. This can help prevent duplicate module instances when multiple dependencies resolve the same module. See [Zig issue #36694](https://codeberg.org/ziglang/zig/issues/36694).
-
 ## Quick Start
 
-
-`httpx.Server` serves the inbound side and `httpx.Client` handles outbound
-calls; both are created with the same allocator and `std.Io` and configured
-with a single `.{}` literal. The program below exercises the complete
-surface — typed REST, a raw route, the GraphQL endpoint, every docs UI, and
-the client verbs — and was verified end-to-end (every route returns HTTP 200).
+Typed REST, one raw route, GraphQL, docs UIs, and client verbs — one program.
 
 ```zig
 const std = @import("std");
@@ -430,17 +422,6 @@ pub fn main() !void {
     var gql_res = try client.graphql(gql_url, "{ me { id name } }", null, .{});
     defer gql_res.deinit();
     std.debug.print("POST /graphql -> {d}: {s}\n", .{ gql_res.status, gql_res.bytes() });
-
-    // The server is now serving typed REST at /health and /users, GraphQL at
-    // /graphql, the OpenAPI document at /openapi.json, and the docs UIs at
-    // /docs (Swagger UI), /redoc (ReDoc), /scalar (Scalar), and /graphiql
-    // (GraphiQL IDE) — open any of them in a browser.
-
-    // Download and FTP reuse their initialized owners:
-    // _ = try client.download(health_url, .{ .path = "downloads/health.txt" });
-    // var ftp = try httpx.client.ftp.init(allocator, io, .{ .host = "ftp.example.com" });
-    // defer ftp.deinit();
-    // _ = try ftp.download(.{ .remotePath = "/pub/file.txt", .destinationPath = "downloads/file.txt" });
 }
 ```
 

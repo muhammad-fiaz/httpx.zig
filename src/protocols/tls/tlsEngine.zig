@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const configCoerce = @import("../../common/configCoerce.zig");
 const tls = std.crypto.tls;
 const x25519 = std.crypto.dh.X25519;
 
@@ -131,6 +132,16 @@ pub const Callbacks = struct {
     }.noOp,
 };
 
+/// Engine role: which side of the handshake this engine drives.
+pub const Role = enum { client, server };
+
+/// Engine configuration. `role` selects the handshake side; `cbs` carries
+/// the key/alert callbacks. `.{}` is a client engine with default callbacks.
+pub const Config = struct {
+    role: Role = .client,
+    cbs: Callbacks = .{},
+};
+
 // Derived keys
 
 pub const DerivedKeys = struct {
@@ -238,7 +249,7 @@ pub const Engine = struct {
     /// generates. Supplied by the caller because the whole TLS layer is
     /// already Io-based; there is no global to fall back on.
     io: std.Io,
-    role: enum { client, server },
+    role: Role,
     cbs: Callbacks,
 
     // ECDHE state
@@ -353,22 +364,13 @@ pub const Engine = struct {
         serverFinishedSent,
     };
 
-    pub fn initClient(io: std.Io, allocator: Allocator, cbs: Callbacks) Engine {
+    pub fn init(allocator: Allocator, io: std.Io, cfg_in: anytype) Engine {
+        const cfg = configCoerce.to(Config, cfg_in);
         return .{
             .io = io,
             .allocator = allocator,
-            .role = .client,
-            .cbs = cbs,
-            .transcript = Transcript.init(),
-        };
-    }
-
-    pub fn initServer(io: std.Io, allocator: Allocator, cbs: Callbacks) Engine {
-        return .{
-            .io = io,
-            .allocator = allocator,
-            .role = .server,
-            .cbs = cbs,
+            .role = cfg.role,
+            .cbs = cfg.cbs,
             .transcript = Transcript.init(),
         };
     }
@@ -2061,7 +2063,7 @@ pub const ServerFlight = struct {
 
 test "client produces valid ClientHello" {
     const a = std.testing.allocator;
-    var engine = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var engine = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client });
 
     const ch = try engine.produceClientHello(&.{"h2"}, &.{}, null, null);
     defer a.free(ch);
@@ -2075,7 +2077,7 @@ test "client produces valid ClientHello" {
 
 test "QUIC ClientHello offers only a cipher suite supported by QUIC key derivation" {
     const a = std.testing.allocator;
-    var engine = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var engine = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client });
     const ch = try engine.produceClientHello(&.{"h3"}, &.{}, "example.test", "");
     defer a.free(ch);
 
@@ -2091,8 +2093,8 @@ test "QUIC ClientHello offers only a cipher suite supported by QUIC key derivati
 test "handshake engine client-server key exchange" {
     const a = std.testing.allocator;
 
-    var client = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
-    var server = Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var client = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client });
+    var server = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server });
 
     // Client produces ClientHello
     const ch = try client.produceClientHello(&.{"h2"}, &.{}, null, null);
@@ -2161,8 +2163,8 @@ test "mutual TLS client certificate round trip" {
     const clientKeyPem = @embedFile("testdata/localhostKey.pem");
     const nowSec: i64 = @divFloor(clockMod.millisNow(io), 1000);
 
-    var client = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
-    var server = Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var client = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client });
+    var server = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server });
     server.requestClientCert = true;
 
     const ch = try client.produceClientHello(&.{}, &.{}, null, null);
@@ -2255,7 +2257,7 @@ test "mutual TLS rejects untrusted client certificate" {
 
 test "mutual TLS rejects malformed client Certificate framing" {
     const a = std.testing.allocator;
-    var server = Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var server = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server });
 
     // Truncated DER entry: structural guard fails closed, no panic.
     const bad = [_]u8{ 0x0B, 0x00, 0x00, 0x0C, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x05, 0x30, 0x05, 0x00, 0x01, 0x02 };
@@ -2272,8 +2274,8 @@ test "mutual TLS rejects forged client CertificateVerify" {
     const clientCertPem = @embedFile("testdata/localhostCert.pem");
     const clientKeyPem = @embedFile("testdata/localhostKey.pem");
 
-    var client = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
-    var server = Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var client = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client });
+    var server = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server });
     server.requestClientCert = true;
 
     const ch = try client.produceClientHello(&.{}, &.{}, null, null);
@@ -2324,7 +2326,7 @@ test "mutual TLS rejects forged client CertificateVerify" {
 
 test "alpn negotiation through handshake" {
     const a = std.testing.allocator;
-    var client = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var client = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client });
 
     const ch = try client.produceClientHello(&.{ "h2", "http/1.1" }, &.{}, null, null);
     defer a.free(ch);
@@ -2344,9 +2346,9 @@ test "alpn negotiation through handshake" {
 
 test "server flight carries negotiated alpn selection" {
     const a = std.testing.allocator;
-    var client = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var client = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client });
     defer client.deinit();
-    var server = Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var server = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server });
     defer server.deinit();
 
     const ch = try client.produceClientHello(&.{ "h2", "http/1.1" }, &.{}, null, null);
@@ -2387,9 +2389,9 @@ test "psk abbreviated handshake resynchronizes application keys" {
     const now: u64 = 1_000_000;
 
     // --- Full handshake first (mirrors the key-exchange test) ---
-    var client = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var client = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client });
     defer client.deinit();
-    var server = Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var server = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server });
     defer server.deinit();
     server.ticketKeys = sessionMod.TicketKeys{ .current = (@as([32]u8, @splat(0x1A))) };
 
@@ -2430,9 +2432,9 @@ test "psk abbreviated handshake resynchronizes application keys" {
     try std.testing.expect(!session.isUsable("other.com", now + 1000));
 
     // --- Abbreviated handshake with the captured session ---
-    var client2 = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var client2 = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client });
     defer client2.deinit();
-    var server2 = Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var server2 = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server });
     defer server2.deinit();
     server2.ticketKeys = server.ticketKeys;
     const ch2 = try client2.produceClientHelloResumption(&.{"h2"}, &.{}, "example.com", &session, now + 2000, null);
@@ -2459,9 +2461,9 @@ test "psk abbreviated handshake resynchronizes application keys" {
     try std.testing.expectEqualSlices(u8, client2.apKeys.?.serverKeySlice(), server2.apKeys.?.serverKeySlice());
 
     // --- Negative paths: tampered binder and expired ticket fall back ---
-    var client3 = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var client3 = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client });
     defer client3.deinit();
-    var server3 = Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var server3 = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server });
     defer server3.deinit();
     server3.ticketKeys = server.ticketKeys;
     const ch3 = try client3.produceClientHelloResumption(&.{"h2"}, &.{}, "example.com", &session, now + 3000, null);
@@ -2480,8 +2482,8 @@ test "psk abbreviated handshake resynchronizes application keys" {
 test "hello retry request completes a full handshake after retry" {
     const a = std.testing.allocator;
 
-    var client = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
-    var server = Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var client = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client });
+    var server = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server });
 
     // Shareless ClientHello1 (crafted directly: the normal producer
     // always offers x25519). The predicate must spot the gap.
@@ -2535,9 +2537,9 @@ test "hello retry request completes a full handshake after retry" {
 }
 test "quic transport parameters roundtrip through hello and ee" {
     const a = std.testing.allocator;
-    var client = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var client = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client });
     defer client.deinit();
-    var server = Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var server = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server });
     defer server.deinit();
 
     // Hand-rolled TP block: initialMaxData = 2MiB, maxIdleTimeout = 30s.
@@ -2584,9 +2586,9 @@ test "server certificate verify binds transcript and rejects tampering" {
     const serverCertPem = @embedFile("testdata/localhostCert.pem");
     const serverKeyPem = @embedFile("testdata/localhostKey.pem");
 
-    var client = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var client = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client });
     defer client.deinit();
-    var server = Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var server = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server });
     defer server.deinit();
 
     const ch = try client.produceClientHello(&.{"h3"}, &.{}, "example.com", null);
@@ -2623,7 +2625,7 @@ test "server certificate verify binds transcript and rejects tampering" {
 
 test "X25519MLKEM768 hybrid share is offered first, with x25519 as fallback" {
     const a = std.testing.allocator;
-    var client = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var client = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client });
     defer client.deinit();
 
     // No transport parameters => TCP mode, so the hybrid is offered.
@@ -2672,7 +2674,7 @@ test "X25519MLKEM768 hybrid share is offered first, with x25519 as fallback" {
 
 test "hybrid decapsulation matches the peer's encapsulated secret" {
     const a = std.testing.allocator;
-    var client = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var client = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client });
     defer client.deinit();
 
     const ch = try client.produceClientHello(&.{"h2"}, &.{}, "example.com", null);
@@ -2707,7 +2709,7 @@ test "hybrid decapsulation matches the peer's encapsulated secret" {
 
 test "a group we never offered is rejected instead of silently downgraded" {
     const a = std.testing.allocator;
-    var client = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var client = Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client });
     defer client.deinit();
 
     // QUIC mode: only x25519 is offered.
@@ -2744,7 +2746,7 @@ test "server answers a hybrid-only ClientHello with a hybrid key share" {
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = Engine.initServer(io, a, .{});
+    var server = Engine.init(a, io, .{ .role = .server });
     defer server.deinit();
 
     const xKp = x25519.KeyPair.generateDeterministic(@as([32]u8, @splat(0x77)));
@@ -2791,7 +2793,7 @@ test "server answers a hybrid-only ClientHello with a hybrid key share" {
 
     // And a client that offered only the hybrid accepts that ServerHello and
     // lands on the same secret.
-    var client = Engine.initClient(io, a, .{});
+    var client = Engine.init(a, io, .{ .role = .client });
     defer client.deinit();
     client.hybridMlKem = mlKp;
     client.hybridOffered = true;

@@ -779,7 +779,7 @@ pub const Server = struct {
             .io = io,
             .allocator = allocator,
             .listener = listener,
-            .router = Router.init(allocator),
+            .router = Router.init(allocator, .{}),
             .cfg = effectiveCfg,
             .eventCallback = cfg.logging.callback,
             .ownsIo = ownsIo,
@@ -1773,7 +1773,8 @@ pub const Server = struct {
             std.crypto.secureZero(u8, &generatedKeys.?.current);
         };
 
-        var drv = quicHs.Driver.initServer(self.io, self.allocator, .{
+        var drv = quicHs.Handshake.init(self.allocator, self.io, .{
+            .role = .server,
             .certChainPem = certPem,
             .privateKeyPem = keyPem,
             .ticketKeys = ticketKeys,
@@ -1782,13 +1783,9 @@ pub const Server = struct {
         });
         defer drv.deinit();
 
-        qconn.tls = .{
-            .ctx = &drv,
-            .start = quicHs.Driver.clientStart,
-            .onData = quicHs.Driver.onData,
-        };
+        drv.attach(qconn);
 
-        var h3 = http3Conn.Connection.init(self.allocator, .server);
+        var h3 = http3Conn.Connection.init(self.allocator, .{ .role = .server });
         defer h3.deinit();
 
         var requests = std.AutoHashMap(u64, *H3Request).init(self.allocator);
@@ -1834,7 +1831,7 @@ pub const Server = struct {
         // data must not be dropped for want of a reader.
         self.h3Ready.store(true, .release);
         defer self.h3Ready.store(false, .release);
-        try quicHs.serveHandshake(ep, pump, &drv, 10_000);
+        try quicHs.serve(.{ .ep = ep, .pump = pump, .hs = &drv, .deadlineMs = 10_000 });
 
         // The control stream carries 1-RTT data, so it can only be sent
         // once the handshake keys are in place.
@@ -1848,7 +1845,7 @@ pub const Server = struct {
             // reclaim it once it has been idle with no active streams.
             if (requests.count() == 0 and nowMs -| lastActivityMs > 30_000) return error.Timeout;
             if (nowMs -| startMs > 300_000) return error.Timeout;
-            try quicHs.feedPumped(ep, pump, null, 200, nowMs);
+            try quicHs.feedPumped(.{ .ep = ep, .pump = pump, .dest = null, .quantumMs = 200, .nowMs = nowMs });
             if (pumpCtx.err) |e| return e;
             // A peer CONNECTION_CLOSE leaves the connection draining. Stop
             // owning the endpoint immediately so the next client's Initial

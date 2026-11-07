@@ -758,18 +758,26 @@ pub const Listener = struct {
         winsock: if (isWindows) ws.SOCKET else void,
         stream: net.Server,
     },
+    /// Owner allocator, stored by `init` for explicit ownership. Listeners
+    /// built with the lower-level `bind`/`bindAddress` carry no allocator;
+    /// prefer `init(allocator, io, .{})` so ownership is always explicit.
+    allocator: Allocator = undefined,
     address: net.IpAddress,
     boundPort: u16,
     family: addressMod.Family = .ip4,
     closed: bool = false,
 
-    /// Creates a listener from an explicit `std.Io` and one inline `.{}`.
-    /// `.{}` binds an ephemeral port on all interfaces; `.port` picks a
-    /// fixed port; `.address` binds that address.
-    pub fn init(io: std.Io, cfg_in: anytype) !Listener {
+    /// Creates a listener from an explicit allocator, `std.Io`, and one
+    /// inline `.{}`. `.{}` binds an ephemeral port on all interfaces;
+    /// `.port` picks a fixed port; `.address` binds that address.
+    pub fn init(allocator: Allocator, io: std.Io, cfg_in: anytype) !Listener {
         const cfg = configCoerce.to(Config, cfg_in);
-        if (cfg.address) |addr| return bindAddress(io, &addr);
-        return bind(io, cfg.port);
+        var listener = if (cfg.address) |addr| blk: {
+            var a = addr;
+            break :blk try bindAddress(io, &a);
+        } else try bind(io, cfg.port);
+        listener.allocator = allocator;
+        return listener;
     }
 
     /// Bind 0.0.0.0:port. port=0 lets OS choose an ephemeral port.

@@ -1,7 +1,7 @@
 # UDP Local
 
 Local UDP send/receive round trip over loopback with
-`httpx.udp.Socket`.
+`httpx.socket.udp.Socket`.
 
 ```zig
 const std = @import("std");
@@ -10,10 +10,10 @@ const httpx = @import("httpx");
 pub fn main() !void {
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var recvSock = try httpx.udp.Socket.init(io, .{});
+    var recvSock = try httpx.socket.udp.init(allocator, io, .{});
     defer recvSock.close();
 
-    var sendSock = try httpx.udp.Socket.init(io, .{});
+    var sendSock = try httpx.socket.udp.init(allocator, io, .{});
     defer sendSock.close();
 
     const recvPort = switch (recvSock.socket.address) {

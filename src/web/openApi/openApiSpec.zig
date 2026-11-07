@@ -522,7 +522,7 @@ fn h(ctx: *routerMod.Context) anyerror!routerMod.Response {
 
 test "generates valid spec for mixed routes" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/", h, .{});
@@ -556,7 +556,7 @@ test "generates valid spec for mixed routes" {
 
 test "empty router yields empty paths object" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     const jsonData = try generate(&router, .{});
@@ -569,7 +569,7 @@ test "empty router yields empty paths object" {
 
 test "operation ids are de-duplicated on sanitizer collision" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     // Distinct shapes -> both allowed by the router; both sanitize to getAB.
@@ -615,7 +615,7 @@ fn hMeta(ctx: *Context) anyerror!Response {
 
 test "typed converters synthesize path parameters" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/users/{id:int}", hMeta, .{});
@@ -645,7 +645,7 @@ test "typed converters synthesize path parameters" {
 
 test "explicit meta params take precedence over synthesis" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/users/{id:int}", hMeta, .{ .meta = .{
@@ -668,7 +668,7 @@ test "explicit meta params take precedence over synthesis" {
 
 test "metadata flows into full operation object" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     const pageParam = tmeta.Param{
@@ -734,7 +734,7 @@ test "metadata flows into full operation object" {
 
 test "explicit duplicate operation ids are rejected" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.add(.GET, "/one", hMeta, .{ .meta = .{ .operationId = "dup" } });
@@ -746,7 +746,7 @@ test "explicit duplicate operation ids are rejected" {
 
 test "nullable object field emits anyOf null union" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.add(.POST, "/nicknames", hMeta, .{ .meta = .{
@@ -761,7 +761,7 @@ test "nullable object field emits anyOf null union" {
 
 test "docs prefix filter uses slash boundary and internal flag" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     // User routes that merely share a prefix must NOT be filtered.

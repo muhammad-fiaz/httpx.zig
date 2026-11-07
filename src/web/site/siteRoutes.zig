@@ -29,6 +29,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const uri = @import("../../common/uri.zig");
+const parseMod = @import("../../common/parse.zig");
 const patternMod = @import("../router/routePattern.zig");
 
 pub const UrlStyle = enum { clean, extension, both };
@@ -195,7 +196,7 @@ fn shapeKey(allocator: Allocator, pattern: []const u8) ![]u8 {
 }
 
 fn encodeSegment(allocator: Allocator, seg: []const u8) ![]u8 {
-    return uri.percentEncodeAlloc(allocator, seg);
+    return parseMod.percentEncodeAlloc(allocator, seg);
 }
 
 const ParsedFile = struct {

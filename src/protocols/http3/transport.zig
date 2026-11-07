@@ -121,7 +121,7 @@ pub const Client = struct {
         return .{
             .allocator = allocator,
             .ep = ep,
-            .h3 = h3conn.Connection.init(allocator, .client),
+            .h3 = h3conn.Connection.init(allocator, .{ .role = .client }),
             .responses = std.AutoHashMap(u64, RespState).init(allocator),
         };
     }
@@ -303,7 +303,7 @@ pub const Client = struct {
                     error.SendBlocked => {
                         _ = try self.ep.flush(dest);
                         if (pump) |p| {
-                            try quicHs.feedPumped(self.ep, p, dest, 50, nowMs);
+                            try quicHs.feedPumped(.{ .ep = self.ep, .pump = p, .dest = dest, .quantumMs = 50, .nowMs = nowMs });
                             try self.pumpQpack(nowMs);
                         } else {
                             return error.SendBlocked;
@@ -332,7 +332,7 @@ pub const Client = struct {
             if (credit == 0) {
                 _ = try self.ep.flush(dest);
                 if (pump) |p| {
-                    try quicHs.feedPumped(self.ep, p, dest, 50, nowMs);
+                    try quicHs.feedPumped(.{ .ep = self.ep, .pump = p, .dest = dest, .quantumMs = 50, .nowMs = nowMs });
                     try self.pumpQpack(nowMs);
                     if (conn.state == .closed or conn.state == .draining) return error.ConnectionClosed;
                     continue;
@@ -349,7 +349,7 @@ pub const Client = struct {
                 error.SendBlocked => {
                     _ = try self.ep.flush(dest);
                     if (pump) |p| {
-                        try quicHs.feedPumped(self.ep, p, dest, 50, nowMs);
+                        try quicHs.feedPumped(.{ .ep = self.ep, .pump = p, .dest = dest, .quantumMs = 50, .nowMs = nowMs });
                         try self.pumpQpack(nowMs);
                         if (conn.state == .closed or conn.state == .draining) return error.ConnectionClosed;
                         continue;
@@ -605,7 +605,7 @@ pub const Client = struct {
             const now: u64 = @intCast(clockMod.monotonicMillis(self.ep.io));
             if (now -| start > deadlineMs) return error.Timeout;
             const remain = deadlineMs -| (now -| start);
-            try quicHs.feedPumped(self.ep, pump, dest, @min(remain, 100), now);
+            try quicHs.feedPumped(.{ .ep = self.ep, .pump = pump, .dest = dest, .quantumMs = @min(remain, 100), .nowMs = now });
 
             // Flush encoder instructions and decoder acknowledgments
             // produced by the bytes just fed, then put them on the wire.
@@ -742,7 +742,7 @@ pub const PooledConn = struct {
     io: std.Io,
     conn: *quicConn.Connection,
     ep: quicEp.Endpoint,
-    driver: *quicHs.Driver,
+    driver: *quicHs.Handshake,
     pump: quicEp.Pump,
     client: *Client,
     dest: std.Io.net.IpAddress,
@@ -779,9 +779,10 @@ pub const PooledConn = struct {
 
         const ep = try quicEp.Endpoint.init(allocator, io, conn, .{});
 
-        const driver = try allocator.create(quicHs.Driver);
+        const driver = try allocator.create(quicHs.Handshake);
         errdefer allocator.destroy(driver);
-        driver.* = quicHs.Driver.initClient(io, allocator, .{
+        driver.* = quicHs.Handshake.init(allocator, io, .{
+            .role = .client,
             .host = host,
             .verify = opts.verify,
             .caPem = opts.caPem,
@@ -791,11 +792,7 @@ pub const PooledConn = struct {
         });
         errdefer driver.deinit();
 
-        conn.tls = .{
-            .ctx = driver,
-            .start = quicHs.Driver.clientStart,
-            .onData = quicHs.Driver.onData,
-        };
+        driver.attach(conn);
 
         const client = try allocator.create(Client);
         errdefer allocator.destroy(client);

@@ -60,9 +60,9 @@ pub fn main() !void {
     std.debug.print("3. QPACK encoded 5 HTTP/3 headers into {d} bytes\n", .{fieldSection.items.len});
 
     // 4. HTTP/3 Client-Server Connection Lifecycle
-    var clientConn = httpx.http3.Connection.init(allocator, .client);
+    var clientConn = httpx.http3.Connection.init(allocator, .{ .role = .client });
     defer clientConn.deinit();
-    var serverConn = httpx.http3.Connection.init(allocator, .server);
+    var serverConn = httpx.http3.Connection.init(allocator, .{ .role = .server });
     defer serverConn.deinit();
 
     const clientCtrl = try clientConn.buildControlStream();

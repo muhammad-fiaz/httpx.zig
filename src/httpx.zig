@@ -23,8 +23,6 @@ pub const env = @import("common/env.zig");
 pub const regex = @import("regex");
 
 // Common primitives
-pub const ioCtx = @import("common/io.zig");
-pub const IoContext = ioCtx.IoContext;
 pub const versionInfo = @import("common/version.zig");
 pub const name = versionInfo.name;
 pub const version = versionInfo.version;
@@ -41,7 +39,6 @@ pub const common = struct {
     pub const sync = @import("common/sync.zig");
     pub const version = @import("common/version.zig");
     pub const httpVersion = @import("common/httpVersion.zig");
-    pub const io = @import("common/io.zig");
     pub const parse = @import("common/parse.zig");
     pub const mediaType = @import("common/mediaType.zig");
     pub const bodySource = @import("common/bodySource.zig");
@@ -65,11 +62,28 @@ pub const concurrency = struct {
 };
 pub const logging = @import("common/logging.zig");
 
-// Sockets
-pub const tcp = @import("sockets/tcp.zig");
-/// Raw socket syscall layer: exhaustive platform error mapping (Phase 2).
+// Sockets: one `socket` namespace over TCP and UDP. The short primary
+// form is `httpx.socket.tcp.init(...)` / `httpx.socket.udp.init(...)`;
+// `Socket` (connection) and `Listener` (TCP backlog) remain reachable
+// for explicit type references.
+pub const socket = struct {
+    pub const tcp = struct {
+        const inner = @import("sockets/tcp.zig");
+        pub const init = inner.Listener.init;
+        pub const Listener = inner.Listener;
+        pub const Socket = inner.Socket;
+        pub const connect = inner.connect;
+        pub const connectAddress = inner.connectAddress;
+        pub const connectAddressStream = inner.connectAddressStream;
+    };
+    pub const udp = struct {
+        const inner = @import("sockets/udp.zig");
+        pub const init = inner.Socket.init;
+        pub const Socket = inner.Socket;
+    };
+};
+/// Winsock syscall layer.
 pub const sys = @import("sockets/sys.zig");
-pub const udp = @import("sockets/udp.zig");
 
 // Network layer
 pub const net = struct {
@@ -142,7 +156,7 @@ pub const protocols = struct {
         pub const Endpoint = transport.Endpoint;
         pub const Pump = transport.Pump;
         pub const handshake = @import("protocols/quic/handshake.zig");
-        pub const HandshakeDriver = handshake.Driver;
+        pub const Handshake = handshake.Handshake;
 
         pub fn encodeFrame(allocator: std.mem.Allocator, f: frames.Frame) !std.ArrayList(u8) {
             var out = std.ArrayList(u8).empty;
@@ -521,7 +535,6 @@ test {
     // Module references make `zig build test` discover nested tests.
     _ = common.clock;
     _ = common.sync;
-    _ = common.io;
     _ = common.json;
     _ = errors;
     _ = status;
@@ -533,9 +546,8 @@ test {
     _ = logging;
     _ = concurrency.queue;
     _ = concurrency.workerPool;
-    _ = tcp;
+    _ = socket;
     _ = sys;
-    _ = udp;
     _ = net.address;
     _ = net.dns;
     _ = net.dnsCache;

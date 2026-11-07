@@ -22,10 +22,10 @@ pub fn main() !void {
     std.debug.print("1. HTTP/3 client configured: protocol={s}\n", .{@tagName(client.config.httpVersion.?)});
 
     // 2. Client & Server HTTP/3 Connection Engines (RFC 9114)
-    var clientConn = httpx.http3.Connection.init(allocator, .client);
+    var clientConn = httpx.http3.Connection.init(allocator, .{ .role = .client });
     defer clientConn.deinit();
 
-    var serverConn = httpx.http3.Connection.init(allocator, .server);
+    var serverConn = httpx.http3.Connection.init(allocator, .{ .role = .server });
     defer serverConn.deinit();
 
     // Exchange control stream SETTINGS

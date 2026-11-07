@@ -748,7 +748,7 @@ fn invoke(router: *Router, method: Method, path: []const u8, a: Allocator) !?Res
 
 test "mount registers spec, pages, and local assets" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/hello", helloHandler, .{});
 
@@ -802,7 +802,7 @@ test "mount registers spec, pages, and local assets" {
 
 test "scalar opt-in mounts its page and bundle" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/users/{id}", helloHandler, .{});
 
@@ -822,7 +822,7 @@ test "scalar opt-in mounts its page and bundle" {
 
 test "disabled config registers nothing" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try mount(a, &router, .{ .enabled = false }, null);
@@ -831,7 +831,7 @@ test "disabled config registers nothing" {
 
 test "disabled docs releases routes to the application" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try mount(a, &router, .{ .enabled = false }, null);
@@ -844,7 +844,7 @@ test "disabled docs releases routes to the application" {
 
 test "openapi disabled option suppresses /openapi.json only" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/ping", helloHandler, .{});
 
@@ -857,7 +857,7 @@ test "openapi disabled option suppresses /openapi.json only" {
 
 test "conflicting user route is reported, not overwritten" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/docs", helloHandler, .{}); // user already owns /docs
 
@@ -867,7 +867,7 @@ test "conflicting user route is reported, not overwritten" {
 
 test "graphiql opt-in mounts its page and all worker assets" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/graphql", helloHandler, .{});
 
@@ -894,7 +894,7 @@ test "graphiql opt-in mounts its page and all worker assets" {
 
 test "graphiql codicon font resolves under a custom mount route" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/graphql", helloHandler, .{});
 
@@ -915,7 +915,7 @@ test "graphiql codicon font resolves under a custom mount route" {
 
 test "every ui option reaches the rendered page" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/ping", helloHandler, .{});
 
@@ -988,7 +988,7 @@ test "every ui option reaches the rendered page" {
 
 test "all documentation pages are self-hosted and offline" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/hello", helloHandler, .{});
 
@@ -1014,7 +1014,7 @@ test "all documentation pages are self-hosted and offline" {
 
 test "all vendored assets serve with correct mime and markers" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/hello", helloHandler, .{});
 
@@ -1072,7 +1072,7 @@ test "all vendored assets serve with correct mime and markers" {
 
 test "disabling swagger and redoc leaves scalar and spec" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/ping", helloHandler, .{});
 
@@ -1087,9 +1087,9 @@ test "disabling swagger and redoc leaves scalar and spec" {
 
 test "docs mounts are isolated per router and unmount removes routes" {
     const a = std.testing.allocator;
-    var first = Router.init(a);
+    var first = Router.init(a, .{});
     defer first.deinit();
-    var second = Router.init(a);
+    var second = Router.init(a, .{});
     defer second.deinit();
 
     try first.get("/first", helloHandler, .{});
@@ -1115,7 +1115,7 @@ test "docs mounts are isolated per router and unmount removes routes" {
 
 test "openapi document is a stable mount-time snapshot" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/before", helloHandler, .{});
 

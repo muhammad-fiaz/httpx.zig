@@ -72,7 +72,7 @@ pub fn main() !void {
     try api.get("/users/{userId:int}/posts/{postId:int}", postHandler, .{ .name = "api-post" });
 
     // Mounted sub-router.
-    var blog = httpx.Router.init(allocator);
+    var blog = httpx.Router.init(allocator, .{});
     defer blog.deinit();
     try blog.get("/{slug:slug}", slugHandler, .{});
     try server.mount("/blog", &blog, .{});

@@ -23,6 +23,7 @@ const udpMod = @import("../../sockets/udp.zig");
 const connMod = @import("connection.zig");
 const syncMod = @import("../../common/sync.zig");
 const clockMod = @import("../../common/clock.zig");
+const configCoerce = @import("../../common/configCoerce.zig");
 const Connection = connMod.Connection;
 
 /// Background datagram pump for deadline-driven QUIC code.
@@ -178,9 +179,9 @@ pub const Endpoint = struct {
 
     /// Binds `options.port` (0 = ephemeral by default) for `conn`. Servers bind a known
     /// port so clients can address them; clients use ephemeral ports.
-    pub fn init(allocator: Allocator, io: std.Io, conn: *Connection, options: Options) !Endpoint {
-        _ = allocator;
-        const sock = try udpMod.Socket.bind(io, options.port);
+    pub fn init(allocator: Allocator, io: std.Io, conn: *Connection, options: anytype) !Endpoint {
+        const opts = configCoerce.to(Options, options);
+        const sock = try udpMod.Socket.init(allocator, io, .{ .port = opts.port });
         // No SO_RCVTIMEO on purpose: a receive timeout surfaces as
         // error.WouldBlock, which the Threaded std.Io backend treats as
         // unreachable and aborts the process. The socket stays fully

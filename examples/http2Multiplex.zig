@@ -30,7 +30,7 @@ fn handle(
     return .{ .status = 200, .body = response_buf[0 .. head.len + 1 + body.len] };
 }
 
-fn runServer(lst: *httpx.tcp.Listener, io: std.Io) void {
+fn runServer(lst: *httpx.socket.tcp.Listener, io: std.Io) void {
     var conn = lst.accept(io) catch return;
     defer conn.close();
     httpx.http2.transport.serveConnection(std.heap.page_allocator, &conn, handle, null) catch {};
@@ -83,16 +83,16 @@ pub fn main() !void {
     }
 
     // 2. A real h2c connection with three concurrent streams.
-    var ctx = try httpx.tcp.IoContext.init(allocator);
+    var ctx = try httpx.socket.tcp.IoContext.init(allocator);
     defer ctx.deinit();
-    var listener = try httpx.tcp.Listener.init(ctx.io, .{});
+    var listener = try httpx.socket.tcp.init(allocator, ctx.io, .{});
     defer listener.close(ctx.io);
     const port = listener.localPort();
 
     const thread = try std.Thread.spawn(.{}, runServer, .{ &listener, ctx.io });
     defer thread.join();
 
-    const sock = try httpx.tcp.connect(ctx.io, "127.0.0.1", port);
+    const sock = try httpx.socket.tcp.connect(ctx.io, "127.0.0.1", port);
     var client = try httpx.http2.transport.Client.connect(allocator, sock);
     defer client.deinit();
 

@@ -1,25 +1,13 @@
-# I/O Context API
+# I/O API
 
-`httpx` owns one `std.Io.Threaded` per top-level client, server, or pool and shares it across sockets, TLS, and protocol I/O. The helper lives in `src/common/io.zig`.
-
-## IoContext
-
-- `init(allocator)` — allocate and initialize a `std.Io.Threaded`, returning an `IoContext`
-- `deinit()` — shut down the threaded backend and release it
-- `io` — the `std.Io` value passed to socket, TLS, and timing APIs
-- `threaded` — the owned `*std.Io.Threaded`
-- `allocator` — the allocator used for the context itself
+`httpx` takes `std.Io` explicitly on every `init(allocator, io, .{})` and
+reuses it internally. Obtain one threaded context for the program:
 
 ```zig
-var ctx = try httpx.IoContext.init(allocator);
-defer ctx.deinit();
-
-const io = ctx.io;
+const io = std.Io.Threaded.global_single_threaded.io();
 ```
 
-Create one context for the lifetime of a `Client`, `Server`, or `Pool`; do not initialize a new `IoContext` per request or per connection. `deinit()` must run only after all operations using `ctx.io` have finished.
-
-Root-level aliases: `httpx.IoContext` and `httpx.ioCtx`.
+Do not create a new context per request or per connection.
 
 ## Time Helpers
 
@@ -42,15 +30,13 @@ httpx.clock.sleepMillis(ctx.io, 10);
 - `Uri.effectivePort()` / `defaultPort(scheme)` — resolve the default service port
 - `percentDecode(buf, input)` — decode into a caller buffer; malformed escapes are copied verbatim
 - `percentEncode(buf, input)` — encode into a caller buffer, keeping RFC 3986 unreserved bytes
-- `percentEncodeAlloc(allocator, input)` — encode into an owned slice
 - `hasPathTraversal(decodedPath)` — reject `.`/`..`, NUL, and drive/UNC prefixes
 
 ```zig
 var buf: [64]u8 = undefined;
 const decoded = try httpx.uri.percentDecode(&buf, "hello%20world");
 
-const encoded = try httpx.uri.percentEncodeAlloc(allocator, "hello world");
-defer allocator.free(encoded);
+const encoded = try httpx.uri.percentEncode(&buf, "hello world");
 ```
 
 For Base64 and hexadecimal conversion, use `std.base64` and `std.fmt` directly; `httpx` does not export wrapper types for them.

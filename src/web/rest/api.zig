@@ -677,7 +677,7 @@ test "endpoint options expose params, custom responses, request overrides, and i
     const testing = std.testing;
     const a = testing.allocator;
 
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     var rest = Rest.init(a, std.Io.Threaded.global_single_threaded.io(), &router);
 
@@ -743,7 +743,7 @@ test "typed REST endpoint: JSON body, Schema result, OpenAPI, quoted identifiers
     const testing = std.testing;
     const a = testing.allocator;
 
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     var rest = Rest.init(testing.allocator, std.Io.Threaded.global_single_threaded.io(), &router);
 
@@ -837,7 +837,7 @@ test "typed REST endpoint: JSON body, Schema result, OpenAPI, quoted identifiers
 
 test "typed REST accepts dynamic JSON for arbitrary string keys" {
     const testing = std.testing;
-    var router = Router.init(testing.allocator);
+    var router = Router.init(testing.allocator, .{});
     defer router.deinit();
     var rest = Rest.init(testing.allocator, std.Io.Threaded.global_single_threaded.io(), &router);
 
@@ -875,7 +875,7 @@ test "typed REST accepts dynamic JSON for arbitrary string keys" {
 
 test "raw REST handlers return untyped responses" {
     const testing = std.testing;
-    var router = Router.init(testing.allocator);
+    var router = Router.init(testing.allocator, .{});
     defer router.deinit();
     var rest = Rest.init(testing.allocator, std.Io.Threaded.global_single_threaded.io(), &router);
 
@@ -904,7 +904,7 @@ test "raw REST handlers return untyped responses" {
 
 test "dynamic JSON request and response types derive a free-form OpenAPI schema" {
     const testing = std.testing;
-    var router = Router.init(testing.allocator);
+    var router = Router.init(testing.allocator, .{});
     defer router.deinit();
     var rest = Rest.init(testing.allocator, std.Io.Threaded.global_single_threaded.io(), &router);
 
@@ -932,7 +932,7 @@ test "dynamic JSON request and response types derive a free-form OpenAPI schema"
 
 test "malformed JSON bodies produce a 400 JSON error envelope" {
     const testing = std.testing;
-    var router = Router.init(testing.allocator);
+    var router = Router.init(testing.allocator, .{});
     defer router.deinit();
     var rest = Rest.init(testing.allocator, std.Io.Threaded.global_single_threaded.io(), &router);
 

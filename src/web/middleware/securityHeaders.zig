@@ -328,7 +328,7 @@ pub fn csrfMiddlewareConfig(ctx: *Context, next: NextFn, cfg: CsrfConfig) anyerr
 
 test "middleware pipeline execution and headers" {
     const a = std.testing.allocator;
-    var router = routerMod.Router.init(a);
+    var router = routerMod.Router.init(a, .{});
     defer router.deinit();
 
     try router.use(corsMiddleware);
@@ -381,7 +381,7 @@ test "middleware pipeline execution and headers" {
 test "csrfMiddleware sets cookie on safe methods and enforces on POST" {
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
-    var router = routerMod.Router.init(a);
+    var router = routerMod.Router.init(a, .{});
     defer router.deinit();
 
     try router.use(csrfMiddleware);

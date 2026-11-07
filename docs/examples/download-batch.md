@@ -42,10 +42,9 @@ pub fn main() !void {
         .{ .taskId = 3, .url = sampleUrl, .dest = "downloads/batch_file3.bin" },
     };
 
-    var ctx = try httpx.IoContext.init(allocator);
-    defer ctx.deinit();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var pool = try httpx.concurrency.Pool.init(allocator, ctx.io, .{
+    var pool = try httpx.concurrency.Pool.init(allocator, io, .{
         .workers = 4,
     });
     defer pool.deinit();

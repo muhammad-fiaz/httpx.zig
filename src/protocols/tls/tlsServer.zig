@@ -450,7 +450,7 @@ pub const Server = struct {
     pub fn acceptBuffered(self: *Server, socket: *tcp.Socket, initial: []const u8) !Connection {
         const a = self.allocator;
 
-        var engine = engineMod.Engine.initServer(self.io, a, .{});
+        var engine = engineMod.Engine.init(a, self.io, .{ .role = .server });
         defer engine.deinit();
         engine.ticketKeys = self.config.ticketKeys;
 
@@ -1093,14 +1093,14 @@ test "tls server handshake processes client hello" {
     const a = std.testing.allocator;
 
     // Create a client that produces a ClientHello
-    var client = engineMod.Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var client = engineMod.Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client });
     const ch = try client.produceClientHello(&.{"h2"}, &.{}, null, null);
     defer a.free(ch);
 
     try std.testing.expectEqual(@as(u8, 0x01), ch[0]);
 
     // Process it through a server engine
-    var serverEngine = engineMod.Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var serverEngine = engineMod.Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server });
     try serverEngine.processClientHello(ch);
     try std.testing.expectEqual(engineMod.Engine.State.clientHelloReceived, serverEngine.state);
 }
@@ -1116,7 +1116,7 @@ test "alpn negotiation in server config" {
 test "ClientHello SNI parsing" {
     const a = std.testing.allocator;
 
-    var client = engineMod.Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var client = engineMod.Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client });
     const ch = try client.produceClientHello(&.{"h2"}, &.{}, "example.com", null);
     defer a.free(ch);
 
@@ -1136,7 +1136,7 @@ test "TLS extension parsers reject malformed SNI and ALPN" {
 }
 test "clienthello single-entry alpn offer parses back" {
     const a = std.testing.allocator;
-    var eng = engineMod.Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var eng = engineMod.Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client });
     defer eng.deinit();
     const ch = try eng.produceClientHello(&.{"h2"}, &.{}, null, null);
     defer a.free(ch);
@@ -1180,7 +1180,7 @@ test "server without certificate fails fast with MissingCertificate" {
     // Client side: real engine-produced ClientHello over loopback.
     var clientSock = try tcp.connect(ctx.io, "127.0.0.1", port);
     defer clientSock.close();
-    var clientEngine = engineMod.Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var clientEngine = engineMod.Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client });
     defer clientEngine.deinit();
     const ch = try clientEngine.produceClientHello(&.{"http/1.1"}, &.{}, null, null);
     defer a.free(ch);
@@ -1207,7 +1207,7 @@ const MtlsScript = struct {
     fn dial(a: Allocator, io: std.Io, port: u16) !MtlsScript {
         var sock = try tcp.connect(io, "127.0.0.1", port);
         errdefer sock.close();
-        var eng = engineMod.Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
+        var eng = engineMod.Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client });
         errdefer eng.deinit();
         const ch = try eng.produceClientHello(&.{}, &.{}, null, null);
         defer a.free(ch);

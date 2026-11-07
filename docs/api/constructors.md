@@ -92,7 +92,7 @@ the [Server API](/api/server) and [Router API](/api/router).
 | `src/common` | `httpx.common`, `httpx.headers`, `httpx.uri`, `httpx.errors` | [Core](/api/core), [Headers](/api/headers), [Utilities](/api/utils) |
 | `src/compression` | `httpx.compression` | [Compression](/api/compression) |
 | `src/concurrency` | `httpx.concurrency` | [Concurrency](/api/concurrency) |
-| `src/net` | `httpx.net`, `httpx.tcp`, `httpx.udp` | [Network](/api/net), [DNS](/api/dns) |
+| `src/net` | `httpx.net`, `httpx.socket.tcp`, `httpx.socket.udp` | [Network](/api/net), [DNS](/api/dns) |
 | `src/parsing` | `httpx.parsing` | [Parsing](/api/parsing) |
 | `src/protocols` | `httpx.http1`, `httpx.http2`, `httpx.http3`, `httpx.quic`, `httpx.tls`, `httpx.protocols.ftp` | [Protocols](/api/protocol), [TLS](/api/tls), [FTP](/api/ftp) |
 | `src/server` | `httpx.Server` | [Server](/api/server) |

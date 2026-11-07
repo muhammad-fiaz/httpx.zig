@@ -47,7 +47,7 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 
 - `client.resolve(host, options)` / `client.resolveUrl(url, options)`
 - `httpx.net.resolve.Resolver`, `httpx.net.dns`, `httpx.net.socks5`, `httpx.net.proxy`
-- `httpx.tcp`, `httpx.udp`, `httpx.Address`, `httpx.net.connectivity`
+- `httpx.socket.tcp`, `httpx.socket.udp`, `httpx.Address`, `httpx.net.connectivity`
 
 ### Utility Aliases
 
@@ -98,5 +98,5 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 - Server event callbacks via `.logging = .{ .callback = onEvent }` in the options passed to `httpx.Server.init`
 - Client event callbacks via `.eventCallback` in the `Client.init` options
 - Response JSON helpers: `Response.json(T)`, `Response.jsonAlloc(T, allocator)`
-- Socket primitives: `httpx.tcp.Socket` / `httpx.tcp.Listener`, `httpx.udp`
+- Socket primitives: `httpx.socket.tcp.Socket` / `httpx.socket.tcp.Listener`, `httpx.socket.udp`
 - Custom middleware: `fn (ctx: *Context, next: NextFn) anyerror!Response`

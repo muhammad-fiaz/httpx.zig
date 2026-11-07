@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const configCoerce = @import("../../common/configCoerce.zig");
 const mimeMod = @import("../../common/mime.zig");
 const mediaTypeMod = @import("../../common/mediaType.zig");
 const Method = @import("../../common/method.zig").Method;
@@ -958,11 +959,9 @@ pub const Router = struct {
     templateEngine: ?*anyopaque = null,
     trailingSlash: TrailingSlash = .serveBoth,
 
-    pub fn init(allocator: Allocator) Router {
-        return initWithConfig(allocator, .{});
-    }
-
-    pub fn initWithConfig(allocator: Allocator, config: RouterConfig) Router {
+    /// Creates a router from an explicit allocator and one inline `.{}`.
+    pub fn init(allocator: Allocator, cfg_in: anytype) Router {
+        const config = configCoerce.to(RouterConfig, cfg_in);
         return .{
             .allocator = allocator,
             .statusHandlers = std.AutoHashMap(u16, HandlerFn).init(allocator),
@@ -1619,7 +1618,7 @@ fn dummyHandler(ctx: *Context) anyerror!Response {
 
 test "matches exact route" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/hello", dummyHandler, .{});
@@ -1630,7 +1629,7 @@ test "matches exact route" {
 
 test "rejects duplicate GET route" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/users", dummyHandler, .{});
@@ -1639,7 +1638,7 @@ test "rejects duplicate GET route" {
 
 test "allows same path different methods" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/users", dummyHandler, .{});
@@ -1648,7 +1647,7 @@ test "allows same path different methods" {
 
 test "static beats parameter precedence" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/users/me", dummyHandler, .{});
@@ -1663,7 +1662,7 @@ test "static beats parameter precedence" {
 
 test "extracts path parameters" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/users/{id}/posts/{post_id}", dummyHandler, .{});
@@ -1679,7 +1678,7 @@ test "router owns registered path memory" {
     // buffers; registering a heap path and freeing it must leave the router
     // fully functional (matching, shapes, duplicate detection).
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     const temp = try a.dupe(u8, "/tmp/{name}");
@@ -1748,7 +1747,7 @@ test "context trusted proxy and scheme detection" {
 
 test "matches with query string and exposes queryParam" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/users/{id}", dummyHandler, .{});
@@ -1763,7 +1762,7 @@ test "matches with query string and exposes queryParam" {
 
 test "transport query field survives match on clean path" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/search", dummyHandler, .{});
@@ -1776,7 +1775,7 @@ test "transport query field survives match on clean path" {
 
 test "HEAD falls back to GET handler" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/asset", dummyHandler, .{});
@@ -1789,7 +1788,7 @@ test "HEAD falls back to GET handler" {
 
 test "registration rejects query and fragment in patterns" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try std.testing.expectError(RouteError.InvalidPattern, router.get("/users?x=1", dummyHandler, .{}));
@@ -1798,7 +1797,7 @@ test "registration rejects query and fragment in patterns" {
 
 test "duplicate detection ignores query strings" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/users/{id}", dummyHandler, .{});
@@ -1809,7 +1808,7 @@ test "duplicate detection ignores query strings" {
 
 test "nested slugs and wildcard remainder" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/a/{x}/c/{y}", dummyHandler, .{});
@@ -1830,7 +1829,7 @@ test "nested slugs and wildcard remainder" {
 
 test "match preserves TLS and peer fields" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/secure", dummyHandler, .{});
@@ -1855,7 +1854,7 @@ fn idHandler(ctx: *Context) anyerror!Response {
 
 test "typed int parameter converts and rejects" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/users/{id:int}", idHandler, .{});
 
@@ -1874,7 +1873,7 @@ test "typed int parameter converts and rejects" {
 
 test "uint/float/bool converters" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/u/{n:uint}", dummyHandler, .{});
     try router.get("/f/{v:float}", dummyHandler, .{});
@@ -1899,7 +1898,7 @@ test "uint/float/bool converters" {
 
 test "uuid and slug converters" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/o/{id:uuid}", dummyHandler, .{});
     try router.get("/blog/{slug:slug}", dummyHandler, .{});
@@ -1921,7 +1920,7 @@ test "uuid and slug converters" {
 
 test "catch-all path converter spans segments" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/files/{path:path}", dummyHandler, .{});
 
@@ -1935,7 +1934,7 @@ test "catch-all path converter spans segments" {
 
 test "multiple typed parameters" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/users/{userId:int}/posts/{postId:int}", dummyHandler, .{});
 
@@ -1947,7 +1946,7 @@ test "multiple typed parameters" {
 
 test "int route does not swallow static sibling" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/users/{id:int}", dummyHandler, .{});
     try router.get("/users/me", dummyHandler, .{});
@@ -1959,7 +1958,7 @@ test "int route does not swallow static sibling" {
 
 test "int and generic overlap is allowed, typed wins" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/w/{name}", dummyHandler, .{});
     try router.get("/w/{id:int}", dummyHandler, .{});
@@ -1974,7 +1973,7 @@ test "int and generic overlap is allowed, typed wins" {
 
 test "generic duplicates conflict" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/users/{id}", dummyHandler, .{});
     try std.testing.expectError(RouteError.DuplicateRoute, router.get("/users/{name}", dummyHandler, .{}));
@@ -1984,7 +1983,7 @@ test "generic duplicates conflict" {
 
 test "duplicate names rejected" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/a", dummyHandler, .{ .name = "home" });
     try std.testing.expectError(RouteError.DuplicateName, router.get("/b", dummyHandler, .{ .name = "home" }));
@@ -1992,7 +1991,7 @@ test "duplicate names rejected" {
 
 test "groups compose prefixes and middleware" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     // Order log lives in the same arena the dispatched request uses, so a
     // single allocator owns it (never freed with a different one).
@@ -2027,9 +2026,9 @@ test "groups compose prefixes and middleware" {
 
 test "mount preserves routes, params, names" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
-    var admin = Router.init(a);
+    var admin = Router.init(a, .{});
     defer admin.deinit();
     try admin.get("/stats", dummyHandler, .{ .name = "stats" });
     try admin.get("/users/{id:int}", dummyHandler, .{});
@@ -2045,7 +2044,7 @@ test "mount preserves routes, params, names" {
 
 test "dispatch distinguishes 404 and 405 with Allow" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/users", dummyHandler, .{});
     try router.post("/users", dummyHandler, .{});
@@ -2070,7 +2069,7 @@ test "dispatch distinguishes 404 and 405 with Allow" {
 
 test "dispatch auto-OPTIONS and HEAD fallback" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/asset", dummyHandler, .{});
 
@@ -2087,7 +2086,7 @@ test "dispatch auto-OPTIONS and HEAD fallback" {
 
 test "url reversing covers params, nesting, errors" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/users/{id:int}", dummyHandler, .{ .name = "user" });
     try router.get("/users/{userId:int}/posts/{postId:int}", dummyHandler, .{ .name = "userPost" });
@@ -2113,7 +2112,7 @@ test "url reversing covers params, nesting, errors" {
 
 test "trailing slash is lenient" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/users", dummyHandler, .{});
     var ctx = Context{ .allocator = a };
@@ -2124,7 +2123,7 @@ test "trailing slash is lenient" {
 
 test "encoded and UTF-8 segments match as raw text" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/f/{name}", dummyHandler, .{});
     var ctx = Context{ .allocator = a };
@@ -2137,7 +2136,7 @@ test "encoded and UTF-8 segments match as raw text" {
 
 test "query params stay separate from path params" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/users/{id:int}", dummyHandler, .{});
     var ctx = Context{ .allocator = a };
@@ -2149,7 +2148,7 @@ test "query params stay separate from path params" {
 
 test "struct binding validates fields and types" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/users/{userId:int}/posts/{postId:int}", dummyHandler, .{});
 
@@ -2186,7 +2185,7 @@ test "struct binding validates fields and types" {
 
 test "struct binding rejects bad values" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/n/{v:int}", dummyHandler, .{});
     // Bypass converter by matching the sibling generic route's params.
@@ -2201,7 +2200,7 @@ test "struct binding rejects bad values" {
 
 test "route middleware runs global, router, route in order" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -2236,7 +2235,7 @@ test "route middleware runs global, router, route in order" {
 
 test "removeByName releases the route" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/tmp", dummyHandler, .{ .name = "tmp" });
     try std.testing.expect(router.removeByName("tmp"));
@@ -2247,7 +2246,7 @@ test "removeByName releases the route" {
 
 test "dynamic websocket-style route matches" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/ws/{roomId}", dummyHandler, .{});
     var ctx = Context{ .allocator = a };
@@ -2260,7 +2259,7 @@ test "router trailing slash policies: redirectSlash, redirectNoSlash, strict" {
 
     // redirectSlash policy
     {
-        var r = Router.initWithConfig(a, .{ .trailingSlash = .redirectSlash });
+        var r = Router.init(a, .{ .trailingSlash = .redirectSlash });
         defer r.deinit();
         try r.get("/users", dummyHandler, .{});
 
@@ -2280,7 +2279,7 @@ test "router trailing slash policies: redirectSlash, redirectNoSlash, strict" {
 
     // redirectNoSlash policy
     {
-        var r = Router.initWithConfig(a, .{ .trailingSlash = .redirectNoSlash });
+        var r = Router.init(a, .{ .trailingSlash = .redirectNoSlash });
         defer r.deinit();
         try r.get("/about", dummyHandler, .{});
 
@@ -2300,7 +2299,7 @@ test "router trailing slash policies: redirectSlash, redirectNoSlash, strict" {
 
     // strict policy
     {
-        var r = Router.initWithConfig(a, .{ .trailingSlash = .strict });
+        var r = Router.init(a, .{ .trailingSlash = .strict });
         defer r.deinit();
         try r.get("/api/v1", dummyHandler, .{});
 
@@ -2320,7 +2319,7 @@ test "router trailing slash policies: redirectSlash, redirectNoSlash, strict" {
 
 test "comptime and static route registration with compile-time conflict detection" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     const staticRoutes = [_]RouteDecl{
@@ -2454,7 +2453,7 @@ test "route conflict validation catches duplicate paths, shape collisions, and i
 
 test "registerRouteTable rejects conflicting update without corrupting table" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     const good = [_]RouteDecl{

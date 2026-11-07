@@ -2,7 +2,7 @@
 //!
 //! Quick start (every UI explicitly enabled):
 //! ```zig
-//! var router = httpx.Router.init(allocator);
+//! var router = httpx.Router.init(allocator, .{});
 //! try router.get("/hello", hello, .{});
 //! try httpx.docs.mount(allocator, &router, .{
 //!     .enabled = true,

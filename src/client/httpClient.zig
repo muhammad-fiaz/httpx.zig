@@ -191,14 +191,6 @@ pub const Config = struct {
     };
 };
 
-/// Options for `Client.isOnline`.
-pub const OnlineOptions = struct {
-    /// Milliseconds allowed for each TCP probe.
-    timeoutMs: u32 = 3_000,
-    /// Number of probe targets to try before reporting offline.
-    maxProbes: u8 = 4,
-};
-
 /// Canonical description of every per-request client option.
 ///
 /// Request calls still accept a struct literal (`client.get(url, .{ ... })`)
@@ -679,27 +671,7 @@ pub const Client = struct {
     }
 
     fn coerceDownloadOptions(opts: anytype) DownloadOptions {
-        if (@TypeOf(opts) == DownloadOptions) return opts;
-        var o = DownloadOptions{};
-        const downloadOptsInfo = @typeInfo(@TypeOf(opts)).@"struct";
-        inline for (downloadOptsInfo.field_names) |fname| {
-            if (comptime std.mem.eql(u8, fname, "verify")) {
-                const v = @field(opts, fname);
-                if (@TypeOf(v) == VerifyOptions) {
-                    o.verify = v;
-                } else {
-                    const verifyInfo = @typeInfo(@TypeOf(v)).@"struct";
-                    inline for (verifyInfo.field_names) |vfname| {
-                        if (@hasField(VerifyOptions, vfname)) {
-                            @field(o.verify, vfname) = @field(v, vfname);
-                        }
-                    }
-                }
-            } else if (@hasField(DownloadOptions, fname)) {
-                @field(o, fname) = @field(opts, fname);
-            }
-        }
-        return o;
+        return configCoerce.to(DownloadOptions, opts);
     }
 
     /// Streams a download to disk with progress reporting, resume, and verification.
@@ -964,11 +936,8 @@ pub const Client = struct {
     /// if (!client.isOnline(.{})) return error.NoInternet;
     /// ```
     pub fn isOnline(self: *Client, opts: anytype) bool {
-        const o: OnlineOptions = if (@TypeOf(opts) == OnlineOptions) opts else .{};
-        return connectivity.checkConnectivity(self.io, .{
-            .timeoutMs = o.timeoutMs,
-            .maxProbes = o.maxProbes,
-        }).online;
+        const o = configCoerce.to(ConnectivityOptions, opts);
+        return connectivity.checkConnectivity(self.io, o).online;
     }
 
     /// Probes internet connectivity and returns detailed results.
@@ -981,8 +950,8 @@ pub const Client = struct {
     /// const r = client.checkConnectivity(.{ .timeoutMs = 2000 });
     /// if (r.online) std.debug.print("online via {s} ({?d}ms)\n", .{ r.endpointStr(), r.latencyMs });
     /// ```
-    pub fn checkConnectivity(self: *Client, opts: ConnectivityOptions) ConnectivityResult {
-        return connectivity.checkConnectivity(self.io, opts);
+    pub fn checkConnectivity(self: *Client, opts: anytype) ConnectivityResult {
+        return connectivity.checkConnectivity(self.io, configCoerce.to(ConnectivityOptions, opts));
     }
 
     /// Resolves a hostname or IP address to structured Address results,
@@ -1000,17 +969,7 @@ pub const Client = struct {
     ///   var addresses = try client.resolve("httpbun.com", .{ .family = .ipv4 });
     ///   defer addresses.deinit();
     pub fn resolve(self: *Client, host: []const u8, opts: anytype) Error!ResolvedAddresses {
-        const resolveOpts: ResolveOptions = blk: {
-            if (@TypeOf(opts) == ResolveOptions) break :blk opts;
-            var r = ResolveOptions{};
-            const resolveOptsInfo = @typeInfo(@TypeOf(opts)).@"struct";
-            inline for (resolveOptsInfo.field_names) |fname| {
-                if (@hasField(ResolveOptions, fname)) {
-                    @field(r, fname) = @field(opts, fname);
-                }
-            }
-            break :blk r;
-        };
+        const resolveOpts = configCoerce.to(ResolveOptions, opts);
 
         var outList = std.ArrayList(addressMod.Address).empty;
         errdefer outList.deinit(self.allocator);
@@ -2785,12 +2744,12 @@ test "client get over http3 serves loopback over real udp" {
             });
             defer qconn.deinit();
             srv.ep.conn = qconn;
-            var drv = quicHs.Driver.initServer(std.Io.Threaded.global_single_threaded.io(), alloc, .{ .certChainPem = certPem, .privateKeyPem = keyPem });
+            var drv = quicHs.Handshake.init(alloc, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server, .certChainPem = certPem, .privateKeyPem = keyPem });
             defer drv.deinit();
-            qconn.tls = .{ .ctx = &drv, .start = quicHs.Driver.clientStart, .onData = quicHs.Driver.onData };
-            try quicHs.serveHandshake(&srv.ep, &srv.pump, &drv, deadlineMs);
+            qconn.tls = .{ .ctx = &drv, .start = quicHs.Handshake.clientStart, .onData = quicHs.Handshake.onData };
+            try quicHs.serve(.{ .ep = &srv.ep, .pump = &srv.pump, .hs = &drv, .deadlineMs = deadlineMs });
 
-            var h3 = h3conn.Connection.init(alloc, .server);
+            var h3 = h3conn.Connection.init(alloc, .{ .role = .server });
             defer h3.deinit();
             var acc = Acc{};
             defer acc.buf.deinit(alloc);
@@ -2800,7 +2759,7 @@ test "client get over http3 serves loopback over real udp" {
             while (served < targetRequests) {
                 const now: u64 = @intCast(clock.millisNow(srv.ep.io));
                 if (now -| start > deadlineMs) return error.Timeout;
-                try quicHs.feedPumped(&srv.ep, &srv.pump, null, 500, now);
+                try quicHs.feedPumped(.{ .ep = &srv.ep, .pump = &srv.pump, .dest = null, .quantumMs = 500, .nowMs = now });
                 if (!acc.fin) continue;
                 // Decode request HEADERS, route by :path, respond.
                 var off: usize = 0;
@@ -2845,17 +2804,17 @@ test "client get over http3 serves loopback over real udp" {
             }
         }
 
-        fn serveHandshakeOnly(srv: *@This(), deadlineMs: u64) !void {
+        fn serveOnly(srv: *@This(), deadlineMs: u64) !void {
             const alloc = std.testing.allocator;
             var qconn = try quicConn.Connection.init(alloc, std.Io.Threaded.global_single_threaded.io(), .{
                 .role = .server,
             });
             defer qconn.deinit();
             srv.ep.conn = qconn;
-            var drv = quicHs.Driver.initServer(std.Io.Threaded.global_single_threaded.io(), alloc, .{ .certChainPem = certPem, .privateKeyPem = keyPem });
+            var drv = quicHs.Handshake.init(alloc, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server, .certChainPem = certPem, .privateKeyPem = keyPem });
             defer drv.deinit();
-            qconn.tls = .{ .ctx = &drv, .start = quicHs.Driver.clientStart, .onData = quicHs.Driver.onData };
-            try quicHs.serveHandshake(&srv.ep, &srv.pump, &drv, deadlineMs);
+            qconn.tls = .{ .ctx = &drv, .start = quicHs.Handshake.clientStart, .onData = quicHs.Handshake.onData };
+            try quicHs.serve(.{ .ep = &srv.ep, .pump = &srv.pump, .hs = &drv, .deadlineMs = deadlineMs });
         }
 
         fn run(srv: *@This(), out: *?anyerror) void {
@@ -2867,7 +2826,7 @@ test "client get over http3 serves loopback over real udp" {
             // verification and goes quiet, so the server must time out
             // (never complete). A completed third handshake would mean
             // the client accepted a forged chain — catastrophic.
-            if (serveHandshakeOnly(srv, 5_000)) {
+            if (serveOnly(srv, 5_000)) {
                 out.* = error.UnexpectedSuccess;
             } else |e| {
                 out.* = if (e == error.HandshakeTimeout) null else e;
@@ -3243,7 +3202,8 @@ test "client get over http3 with 0-rtt early data resumes session" {
             });
             defer qconn.deinit();
             srv.ep.conn = qconn;
-            var drv = quicHs.Driver.initServer(std.Io.Threaded.global_single_threaded.io(), alloc, .{
+            var drv = quicHs.Handshake.init(alloc, std.Io.Threaded.global_single_threaded.io(), .{
+                .role = .server,
                 .certChainPem = certPem,
                 .privateKeyPem = keyPem,
                 .ticketKeys = tkeys,
@@ -3251,10 +3211,10 @@ test "client get over http3 with 0-rtt early data resumes session" {
                 .replayCache = rcache,
             });
             defer drv.deinit();
-            qconn.tls = .{ .ctx = &drv, .start = quicHs.Driver.clientStart, .onData = quicHs.Driver.onData };
-            try quicHs.serveHandshake(&srv.ep, &srv.pump, &drv, deadlineMs);
+            qconn.tls = .{ .ctx = &drv, .start = quicHs.Handshake.clientStart, .onData = quicHs.Handshake.onData };
+            try quicHs.serve(.{ .ep = &srv.ep, .pump = &srv.pump, .hs = &drv, .deadlineMs = deadlineMs });
 
-            var h3 = h3conn.Connection.init(alloc, .server);
+            var h3 = h3conn.Connection.init(alloc, .{ .role = .server });
             defer h3.deinit();
             var acc = Acc{};
             defer acc.buf.deinit(alloc);
@@ -3263,7 +3223,7 @@ test "client get over http3 with 0-rtt early data resumes session" {
             while (true) {
                 const now: u64 = @intCast(clock.millisNow(srv.ep.io));
                 if (now -| start > deadlineMs) return error.Timeout;
-                try quicHs.feedPumped(&srv.ep, &srv.pump, null, 500, now);
+                try quicHs.feedPumped(.{ .ep = &srv.ep, .pump = &srv.pump, .dest = null, .quantumMs = 500, .nowMs = now });
                 if (!acc.fin) continue;
                 var off: usize = 0;
                 const fr = try h3frame.parseFrame(acc.buf.items, &off);

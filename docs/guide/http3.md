@@ -23,7 +23,7 @@ The HTTP/3 runtime has loopback integration coverage on the native test host. Cr
 
 - **High-level Client Runtime** - `Client` performs QUIC + TLS 1.3 with ALPN `h3`, certificate verification, QPACK dynamic-table encoding, response trailers, and loss recovery.
 - **High-level Server Runtime** - `httpx.Server` can bind a UDP endpoint when `.http3 = true` and a default certificate/key identity are provided. It routes supported H3 requests through server handlers. The handshake requires that default identity; selector-only TLS configuration does not initialize the H3 endpoint.
-- **Protocol-level Server Runtime** - serve H3 over QUIC directly with `httpx.protocols.quic` (Endpoint + Pump + HandshakeDriver) and `httpx.protocols.http3` builders; see `examples/http3Client.zig` for a complete loopback server.
+- **Protocol-level Server Runtime** - serve H3 over QUIC directly with `httpx.protocols.quic` (Endpoint + Pump + Handshake) and `httpx.protocols.http3` builders; see `examples/http3Client.zig` for a complete loopback server.
 - **Handshake Lifecycle** - the server confirms the handshake after verifying the client Finished and sends `HANDSHAKE_DONE`; the client confirms on that frame or on a 1-RTT acknowledgment. Confirmation discards the Handshake keys on both ends and late Handshake packets are ignored (RFC 9001 Sections 4.1.2 and 4.9.2).
 
 ### Finding the HTTP/3 port
@@ -122,13 +122,14 @@ var ep = try httpx.quic.transport.Endpoint.init(allocator, io, conn, .{ .port = 
 var pump = httpx.quic.Pump{};
 try pump.start(&ep, allocator);
 defer pump.stop();
-var drv = httpx.quic.HandshakeDriver.initServer(io, allocator, .{
+var drv = httpx.quic.Handshake.init(allocator, io, .{
+    .role = .server,
     .certChainPem = cert_pem,
     .privateKeyPem = key_pem,
 });
 defer drv.deinit();
-conn.tls = .{ .ctx = &drv, .onData = httpx.quic.HandshakeDriver.onData };
-try httpx.quic.handshake.serveHandshake(&ep, &pump, &drv, 15_000);
+drv.attach(conn);
+try httpx.quic.handshake.serve(.{ .ep = &ep, .pump = &pump, .hs = &drv, .deadlineMs = 15_000 });
 // ... read request HEADERS on a bidi stream, route, respond ...
 ```
 

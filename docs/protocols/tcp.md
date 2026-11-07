@@ -1,6 +1,6 @@
 # TCP Sockets
 
-HTTPX provides zero-allocation abstractions over native OS Transmission Control Protocol (TCP) sockets, utilizing Zig's `std.Io` framework (`httpx.tcp`).
+HTTPX provides zero-allocation abstractions over native OS Transmission Control Protocol (TCP) sockets, utilizing Zig's `std.Io` framework (`httpx.socket.tcp`).
 
 ## Platform Backends
 
@@ -8,10 +8,10 @@ HTTPX provides zero-allocation abstractions over native OS Transmission Control 
 * **Linux**: POSIX stream sockets.
 * **macOS**: BSD sockets.
 
-## Socket Operations (`httpx.tcp.Socket`)
+## Socket Operations (`httpx.socket.tcp`)
 
 ```zig
-var socket = try httpx.tcp.connect(io, "93.184.216.34", 80);
+var socket = try httpx.socket.tcp.connect(io, "93.184.216.34", 80);
 defer socket.close();
 
 try socket.writeAll("GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n");
@@ -29,10 +29,10 @@ const n = try socket.read(&buf);
 | `isAlive()` | Local close-guard state |
 | `netSocketHandle()` | Raw handle for tuning |
 
-## Listener (`httpx.tcp.Listener`)
+## Listening (`httpx.socket.tcp.init`)
 
 ```zig
-var listener = try httpx.tcp.Listener.init(io, .{});
+var listener = try httpx.socket.tcp.init(allocator, io, .{});
 defer listener.close(io);
 const port = listener.localPort();
 var conn = try listener.accept(io);

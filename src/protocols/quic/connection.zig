@@ -10,7 +10,7 @@
 //!   * idle timeout, closing/draining terminal states
 //!   * CRYPTO stream reassembly handed to a pluggable TLS driver
 //!
-//! The TlsDriver interface lets the transport be fully exercised without
+//! The Tls interface lets the transport be fully exercised without
 //! the TLS 1.3 engine; the loopback tests below wire the TLS engine
 //! (protocols/tls/engine.zig) through CRYPTO frames, with QUIC packet
 //! keys derived via protocols/tls/quicTls.zig (RFC 9001).
@@ -35,6 +35,7 @@ const ths = @import("../tls/tlsHandshake.zig");
 const h3conn = @import("../http3/connection.zig");
 const h3frame = @import("../http3/frame.zig");
 const h3qpack = @import("../http3/qpack.zig");
+const configCoerce = @import("../../common/configCoerce.zig");
 
 pub const Error = error{
     ProtocolViolation,
@@ -175,7 +176,7 @@ pub const PnSpace = struct {
 /// bytes to transmit and installs keys when levels complete. `nowMs`
 /// threads the connection clock through so handshake sends carry real
 /// timestamps for loss recovery (never wall-clock-skewed literals).
-pub const TlsDriver = struct {
+pub const Tls = struct {
     ctx: ?*anyopaque = null,
     /// Feed handshake data received from the peer.
     onData: ?*const fn (ctx: ?*anyopaque, conn: *Connection, data: []const u8, nowMs: u64) Error!void = null,
@@ -287,7 +288,7 @@ pub const Connection = struct {
     role: Role,
     cfg: Config,
     cbs: Callbacks = .{},
-    tls: TlsDriver = .{},
+    tls: Tls = .{},
 
     state: State = .initial,
     /// TLS has both sent our Finished and verified the peer's Finished
@@ -457,7 +458,8 @@ pub const Connection = struct {
     /// deliberately no seed parameter: one invites callers to pass a
     /// clock value, and a predictable CID lets an off-path attacker
     /// correlate or hijack a flow (RFC 9000 Section 8.2).
-    pub fn init(allocator: Allocator, io: std.Io, cfg: Config) !*Connection {
+    pub fn init(allocator: Allocator, io: std.Io, cfg_in: anytype) !*Connection {
+        const cfg = configCoerce.to(Config, cfg_in);
         const role = cfg.role;
         if (!packetMod.Version.isSupported(cfg.version)) return Error.UnsupportedVersion;
         if (cfg.maxUdpPayload < MIN_INITIAL_DATAGRAM or cfg.maxUdpPayload > MAX_DATAGRAM)
@@ -2454,7 +2456,7 @@ const TruncatedPacket = struct {};
 // throughout; the TLS message layer below is a deterministic driver
 // standing in for tls13.zig.
 
-const TestDriverCtx = struct {
+const TestCtx = struct {
     role: Role,
     doneInstalled: bool = false,
 
@@ -2493,8 +2495,8 @@ test "loopback connection pair completes protected handshake and stream" {
         fn serverOnData(ctx: ?*anyopaque, conn: *Connection, data: []const u8, nowMs: u64) Error!void {
             const role: *Role = @ptrCast(@alignCast(ctx.?));
             _ = role;
-            const t = TestDriverCtx.transcript();
-            if (std.mem.eql(u8, data, TestDriverCtx.clientHello)) {
+            const t = TestCtx.transcript();
+            if (std.mem.eql(u8, data, TestCtx.clientHello)) {
                 const srvTx = crypto.deriveSecret(t, "server in");
                 const srvRx = crypto.deriveSecret(t, "client in");
                 try conn.installKeys(.handshake, srvTx, srvRx);
@@ -2503,7 +2505,7 @@ test "loopback connection pair completes protected handshake and stream" {
                 // Reply flight in Handshake space.
                 const B = struct {
                     pub fn build(gpa: Allocator, payload: *std.ArrayList(u8)) Error!void {
-                        try fe(gpa, payload, .{ .crypto = .{ .offset = 0, .data = TestDriverCtx.serverHello } });
+                        try fe(gpa, payload, .{ .crypto = .{ .offset = 0, .data = TestCtx.serverHello } });
                     }
                 };
                 try conn.sendFrames(.handshake, B.build, nowMs);
@@ -2512,7 +2514,7 @@ test "loopback connection pair completes protected handshake and stream" {
                 try conn.installKeys(.application, appBase, appBase);
                 return;
             }
-            if (std.mem.eql(u8, data, TestDriverCtx.clientFinished)) {
+            if (std.mem.eql(u8, data, TestCtx.clientFinished)) {
                 // The synthetic Finished stands in for TLS 1.3
                 // verify_data; confirmation itself follows the RFC.
                 conn.handshakeComplete = true;
@@ -2531,14 +2533,14 @@ test "loopback connection pair completes protected handshake and stream" {
         fn clientStart(ctx: ?*anyopaque, conn: *Connection, nowMs: u64) Error!void {
             _ = ctx;
             try conn.installInitialKeys();
-            const t = TestDriverCtx.transcript();
+            const t = TestCtx.transcript();
             const cliTx = crypto.deriveSecret(t, "client in");
             const cliRx = crypto.deriveSecret(t, "server in");
             try conn.installKeys(.handshake, cliTx, cliRx);
 
             const B = struct {
                 pub fn build(gpa: Allocator, payload: *std.ArrayList(u8)) Error!void {
-                    try fe(gpa, payload, .{ .crypto = .{ .offset = 0, .data = TestDriverCtx.clientHello } });
+                    try fe(gpa, payload, .{ .crypto = .{ .offset = 0, .data = TestCtx.clientHello } });
                 }
             };
             try conn.sendFrames(.initial, B.build, nowMs);
@@ -2546,15 +2548,15 @@ test "loopback connection pair completes protected handshake and stream" {
 
         fn clientOnData(ctx: ?*anyopaque, conn: *Connection, data: []const u8, nowMs: u64) Error!void {
             _ = ctx;
-            if (!std.mem.eql(u8, data, TestDriverCtx.serverHello)) return;
+            if (!std.mem.eql(u8, data, TestCtx.serverHello)) return;
             // App keys arrive mirrored from the server's choice.
-            const t = TestDriverCtx.transcript();
+            const t = TestCtx.transcript();
             const appBase = crypto.deriveSecret(t, "quic ap");
             conn.installKeys(.application, appBase, appBase) catch return Error.TlsDriverFailed;
             conn.handshakeComplete = true;
             const F = struct {
                 pub fn build(gpa: Allocator, payload: *std.ArrayList(u8)) Error!void {
-                    try fe(gpa, payload, .{ .crypto = .{ .offset = 0, .data = TestDriverCtx.clientFinished } });
+                    try fe(gpa, payload, .{ .crypto = .{ .offset = 0, .data = TestCtx.clientFinished } });
                 }
             };
             try conn.sendFrames(.handshake, F.build, nowMs);
@@ -2646,7 +2648,7 @@ test "loopback connection pair completes protected handshake and stream" {
 // protocols/tls/verify.zig); the server flight carries an empty
 // certificate list and an ECDSA signature from a deterministic test key.
 
-const TlsHandshakeDriver = struct {
+const TlsHandshake = struct {
     engine: tlsEngine.Engine,
     /// Our own flight bytes (client: ClientHello; server: SH..Fin).
     flight: std.ArrayList(u8) = .empty,
@@ -2690,7 +2692,7 @@ const TlsHandshakeDriver = struct {
     }
 
     fn clientStart(ctx: ?*anyopaque, conn: *Connection, nowMs: u64) Error!void {
-        const d: *TlsHandshakeDriver = @ptrCast(@alignCast(ctx.?));
+        const d: *TlsHandshake = @ptrCast(@alignCast(ctx.?));
         const ch = d.engine.produceClientHello(&.{"h2"}, &.{}, null, null) catch return Error.TlsDriverFailed;
         defer conn.allocator.free(ch);
         d.flight.appendSlice(conn.allocator, ch) catch return Error.OutOfMemory;
@@ -2712,7 +2714,7 @@ const TlsHandshakeDriver = struct {
     }
 
     fn serverOnData(ctx: ?*anyopaque, conn: *Connection, data: []const u8, nowMs: u64) Error!void {
-        const d: *TlsHandshakeDriver = @ptrCast(@alignCast(ctx.?));
+        const d: *TlsHandshake = @ptrCast(@alignCast(ctx.?));
         if (d.finishedVerified) return;
         d.incoming.appendSlice(conn.allocator, data) catch return Error.OutOfMemory;
         if (d.flightDone) {
@@ -2790,7 +2792,7 @@ const TlsHandshakeDriver = struct {
     }
 
     fn clientOnData(ctx: ?*anyopaque, conn: *Connection, data: []const u8, nowMs: u64) Error!void {
-        const d: *TlsHandshakeDriver = @ptrCast(@alignCast(ctx.?));
+        const d: *TlsHandshake = @ptrCast(@alignCast(ctx.?));
         d.incoming.appendSlice(conn.allocator, data) catch return Error.OutOfMemory;
         d.peerFlight.appendSlice(conn.allocator, data) catch return Error.OutOfMemory;
         while (takeRecord(&d.incoming)) |rec| {
@@ -2840,7 +2842,7 @@ const TlsHandshakeDriver = struct {
 };
 
 /// Runs a complete TLS 1.3 handshake between two QUIC Connections through
-/// the TlsHandshakeDriver: Initial + Handshake + 1-RTT keys installed,
+/// the TlsHandshake: Initial + Handshake + 1-RTT keys installed,
 /// client Finished exchanged, and HANDSHAKE_DONE confirming the client.
 /// Shared by the QUIC/TLS and HTTP/3 loopback tests so the handshake pump
 /// has one definition.
@@ -2848,8 +2850,8 @@ fn runTlsHandshake(
     a: Allocator,
     client: *Connection,
     server: *Connection,
-    cliD: *TlsHandshakeDriver,
-    srvD: *TlsHandshakeDriver,
+    cliD: *TlsHandshake,
+    srvD: *TlsHandshake,
 ) !void {
     // Deterministic P-256 signing identity (same construction as the
     // engine unit test): ECDSA signatures without PKI involvement.
@@ -2867,8 +2869,8 @@ fn runTlsHandshake(
     @memcpy(sec1[7..], &ecSec);
     srvD.sec1 = sec1;
 
-    client.tls = .{ .ctx = cliD, .start = TlsHandshakeDriver.clientStart, .onData = TlsHandshakeDriver.clientOnData };
-    server.tls = .{ .ctx = srvD, .onData = TlsHandshakeDriver.serverOnData };
+    client.tls = .{ .ctx = cliD, .start = TlsHandshake.clientStart, .onData = TlsHandshake.clientOnData };
+    server.tls = .{ .ctx = srvD, .onData = TlsHandshake.serverOnData };
 
     try client.startHandshake(50);
     const c0 = try client.takeOutput(a);
@@ -2906,11 +2908,11 @@ fn runTlsHandshake(
 test "quic carries TLS 1.3 handshake end to end" {
     const a = std.testing.allocator;
 
-    var cliD = TlsHandshakeDriver{ .engine = tlsEngine.Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{}) };
+    var cliD = TlsHandshake{ .engine = tlsEngine.Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client }) };
     defer cliD.flight.deinit(a);
     defer cliD.incoming.deinit(a);
     defer cliD.peerFlight.deinit(a);
-    var srvD = TlsHandshakeDriver{ .engine = tlsEngine.Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{}) };
+    var srvD = TlsHandshake{ .engine = tlsEngine.Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server }) };
     defer srvD.flight.deinit(a);
     defer srvD.incoming.deinit(a);
     defer srvD.peerFlight.deinit(a);
@@ -3072,11 +3074,11 @@ test "http3 request over quic loopback reaches handler and returns response" {
     const a = std.testing.allocator;
     H3LoopSink.reset();
 
-    var cliD = TlsHandshakeDriver{ .engine = tlsEngine.Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{}) };
+    var cliD = TlsHandshake{ .engine = tlsEngine.Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client }) };
     defer cliD.flight.deinit(a);
     defer cliD.incoming.deinit(a);
     defer cliD.peerFlight.deinit(a);
-    var srvD = TlsHandshakeDriver{ .engine = tlsEngine.Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{}) };
+    var srvD = TlsHandshake{ .engine = tlsEngine.Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server }) };
     defer srvD.flight.deinit(a);
     defer srvD.incoming.deinit(a);
     defer srvD.peerFlight.deinit(a);
@@ -3093,9 +3095,9 @@ test "http3 request over quic loopback reaches handler and returns response" {
     try runTlsHandshake(a, client, server, &cliD, &srvD);
     try std.testing.expectEqual(State.established, client.state);
 
-    var cliH3 = h3conn.Connection.init(a, .client);
+    var cliH3 = h3conn.Connection.init(a, .{ .role = .client });
     defer cliH3.deinit();
-    var srvH3 = h3conn.Connection.init(a, .server);
+    var srvH3 = h3conn.Connection.init(a, .{ .role = .server });
     defer srvH3.deinit();
 
     // 1. Control streams: SETTINGS both directions on uni streams 2 / 3.

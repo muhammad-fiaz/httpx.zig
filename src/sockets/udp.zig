@@ -28,14 +28,20 @@ pub const Socket = struct {
 
     socket: net.Socket,
     io: std.Io,
+    /// Owner allocator, stored by `init` for explicit ownership. Sockets
+    /// built with the lower-level `bind`/`bindAddress` carry no allocator;
+    /// prefer `init(allocator, io, .{})` so ownership is always explicit.
+    allocator: Allocator = undefined,
     defaultDest: ?net.IpAddress = null,
     closed: std.atomic.Value(bool) = .init(false),
 
-    /// Creates a UDP socket from an explicit `std.Io` and one inline `.{}`.
-    pub fn init(io: std.Io, cfg_in: anytype) !Socket {
+    /// Creates a UDP socket from an explicit allocator, `std.Io`, and one
+    /// inline `.{}`.
+    pub fn init(allocator: Allocator, io: std.Io, cfg_in: anytype) !Socket {
         const cfg = configCoerce.to(Config, cfg_in);
-        if (cfg.address) |addr| return bindAddress(io, &addr);
-        return bind(io, cfg.port);
+        var sock = if (cfg.address) |addr| try bindAddress(io, &addr) else try bind(io, cfg.port);
+        sock.allocator = allocator;
+        return sock;
     }
 
     /// Binds to 0.0.0.0:port. port=0 lets the OS choose (typical for clients).

@@ -222,9 +222,6 @@ pub const percentEncode = parseMod.percentEncode;
 
 pub const isUnreserved = parseMod.isUnreservedChar;
 
-/// Percent-encodes into an owned slice in a single pass.
-pub const percentEncodeAlloc = parseMod.percentEncodeAlloc;
-
 /// Checks whether a path contains traversal sequences after decoding.
 pub fn hasPathTraversal(decodedPath: []const u8) bool {
     if (decodedPath.len == 0) return false;

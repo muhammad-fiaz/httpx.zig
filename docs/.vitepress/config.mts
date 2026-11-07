@@ -323,6 +323,7 @@ gtag('config', '${GA_ID}');`,
           items: [
             { text: "Getting Started", link: "/guide/getting-started" },
             { text: "Installation", link: "/guide/installation" },
+            { text: "Troubleshooting", link: "/guide/troubleshooting" },
           ],
         },
         {

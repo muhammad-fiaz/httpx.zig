@@ -5,10 +5,9 @@ serve results from normal handlers. See `examples/concurrentDemo.zig` for
 parallel client requests.
 
 ```zig
-var ctx = try httpx.IoContext.init(allocator);
-defer ctx.deinit();
+const io = std.Io.Threaded.global_single_threaded.io();
 
-var pool = try httpx.concurrency.Pool.init(allocator, ctx.io, .{
+var pool = try httpx.concurrency.Pool.init(allocator, io, .{
     .workers = 4,
     .queueCapacity = 1024,
     .autoStart = true,

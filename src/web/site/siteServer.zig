@@ -24,6 +24,7 @@ const routerMod = @import("../router/router.zig");
 const Context = routerMod.Context;
 const Response = routerMod.Response;
 const uri = @import("../../common/uri.zig");
+const parseMod = @import("../../common/parse.zig");
 const assetsMod = @import("../assets/assetStore.zig");
 const templatesMod = @import("../templates/templates.zig");
 const staticFiles = @import("../staticFiles/staticFileServer.zig");
@@ -545,7 +546,7 @@ fn encodeParamValue(allocator: Allocator, v: anytype) ![]u8 {
 }
 
 fn encodeOwned(allocator: Allocator, s: []const u8) ![]u8 {
-    return uri.percentEncodeAlloc(allocator, s);
+    return parseMod.percentEncodeAlloc(allocator, s);
 }
 
 fn appendQuery(allocator: Allocator, out: *std.ArrayList(u8), query: anytype) !void {

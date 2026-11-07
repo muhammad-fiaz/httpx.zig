@@ -518,7 +518,7 @@ Path parameters use `{name}` segments and are read with `ctx.param("id")`.
 ### Custom 404 Handler
 
 ```zig
-var router = httpx.Router.init(allocator);
+var router = httpx.Router.init(allocator, .{});
 defer router.deinit();
 router.setNotFoundHandler(notFound);
 

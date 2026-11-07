@@ -40,7 +40,7 @@ fn handle(
     return .{ .status = 404, .body = "nope" };
 }
 
-fn runServer(lst: *httpx.tcp.Listener, io: std.Io) void {
+fn runServer(lst: *httpx.socket.tcp.Listener, io: std.Io) void {
     var conn = lst.accept(io) catch return;
     defer conn.close();
     var srv = httpx.tls.Server.init(std.heap.page_allocator, io, .{
@@ -59,9 +59,9 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var ctx = try httpx.tcp.IoContext.init(allocator);
+    var ctx = try httpx.socket.tcp.IoContext.init(allocator);
     defer ctx.deinit();
-    var listener = try httpx.tcp.Listener.init(ctx.io, .{});
+    var listener = try httpx.socket.tcp.init(allocator, ctx.io, .{});
     defer listener.close(ctx.io);
     const port = listener.localPort();
 

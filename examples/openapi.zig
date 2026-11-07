@@ -28,7 +28,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var router = httpx.Router.init(allocator);
+    var router = httpx.Router.init(allocator, .{});
     defer router.deinit();
     try router.add(.GET, "/widgets", listHandler, .{ .meta = .{
         .summary = "List all widgets",

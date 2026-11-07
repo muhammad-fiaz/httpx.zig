@@ -11,9 +11,10 @@ macOS (`src/sockets/`, `src/net/`).
 | Windows | ✅ | ✅ | ✅ | Winsock-native connects with full error mapping |
 | macOS | ✅ | ✅ | ✅ | |
 
-## TCP (`httpx.tcp`)
+## TCP (`httpx.socket.tcp`)
 
-Cross-platform stream socket abstraction (`Socket`, `Listener`, `IoContext`).
+Cross-platform stream sockets (`init` for the listening side, `connect`
+for the client side; use `std.Io.Threaded.global_single_threaded.io()` in tests).
 
 ### Basic Usage
 
@@ -21,7 +22,7 @@ Cross-platform stream socket abstraction (`Socket`, `Listener`, `IoContext`).
 const std = @import("std");
 const httpx = @import("httpx");
 
-var socket = try httpx.tcp.connect(io, "93.184.216.34", 80);
+var socket = try httpx.socket.tcp.connect(io, "93.184.216.34", 80);
 defer socket.close();
 
 try socket.writeAll("GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n");
@@ -43,11 +44,11 @@ std.debug.print("{s}\n", .{buf[0..n]});
 | `Socket.isAlive()` | Local close-guard state |
 | `Socket.netSocketHandle()` | Raw handle for tuning |
 | `setTimeouts(sock, ms)` / `setNoDelay(sock)` / `setKeepAlive(sock, idleSecs)` | Socket tuning |
-| `Listener.init(io, .{ .port = 0 })` / `init(io, .{ .address = addr })` | Bind (`0` = ephemeral) |
+| `init(allocator, io, .{ .port = 0 })` / `init(allocator, io, .{ .address = addr })` | Bind (`0` = ephemeral) |
 | `Listener.accept(listener, io)` | Accept one connection |
 | `Listener.localPort(listener)` | Actual bound port |
 | `Listener.close(listener, io)` | Close listener |
-| `IoContext.init(gpa)` / `deinit()` | Runtime IO context for tests and tools |
+| `io` | `std.Io` | Explicit I/O, obtained as `std.Io.Threaded.global_single_threaded.io()` |
 
 ### Connect Errors
 
@@ -59,12 +60,12 @@ std.debug.print("{s}\n", .{buf[0..n]});
 | `PermissionDenied` | Operation not permitted |
 | `Unexpected` | Unmapped platform error |
 
-## UDP (`httpx.udp.Socket`)
+## UDP (`httpx.socket.udp`)
 
 Connectionless datagrams (used by DNS/QUIC/custom protocols).
 
 ```zig
-var sock = try httpx.udp.Socket.init(io, .{});
+var sock = try httpx.socket.udp.init(allocator, io, .{});
 defer sock.close();
 try sock.sendTo(&dest, "ping");
 const msg = try sock.receive(&buf);
@@ -72,7 +73,7 @@ const msg = try sock.receive(&buf);
 
 | Method | Description |
 |--------|-------------|
-| `init(io, .{})` / `init(io, .{ .port = 53 })` | Bind `0.0.0.0:port` (`0` = ephemeral); `.{}` is the default |
+| `init(allocator, io, .{})` / `init(allocator, io, .{ .port = 53 })` | Bind `0.0.0.0:port` (`0` = ephemeral); `.{}` is the default |
 | `bindIp6(io, port)` | Bind `[::]:port` for IPv6 peers |
 | `bindAddress(io, addr)` | Bind an explicit IPv4 or IPv6 `Address` |
 | `sendTo(dest, data)` / `send(data)` | Send (explicit or default destination) |
