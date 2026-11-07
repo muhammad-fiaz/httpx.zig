@@ -214,6 +214,57 @@ pub const Context = struct {
         return multipartServerMod.parse(self.allocator, self.io, self.body, ct, parsedOpts);
     }
 
+    /// One field from an `application/x-www-form-urlencoded` request body,
+    /// returned raw (allocation-free, like `queryParam`).
+    pub fn formValue(self: *const Context, name: []const u8) ?[]const u8 {
+        return lookupQuery(self.body, name);
+    }
+
+    /// Decodes an `application/x-www-form-urlencoded` body into struct `T`,
+    /// percent-decoding each value. Field names are matched exactly (quoted
+    /// identifiers included); missing required fields are an error, unknown
+    /// keys are ignored. Decoded strings borrow `ctx.allocator` and stay
+    /// valid until the request ends.
+    pub fn form(self: *const Context, comptime T: type) !T {
+        const info = @typeInfo(T);
+        if (info != .@"struct") @compileError("form requires a struct type");
+        const structInfo = info.@"struct";
+        var out: T = undefined;
+        const scratch = try self.allocator.alloc(u8, self.body.len);
+        var cursor: usize = 0;
+        inline for (structInfo.field_names, structInfo.field_types, structInfo.field_attrs) |fname, FType, fattrs| {
+            const FT = FType;
+            const fti = @typeInfo(FT);
+            const isOptional = fti == .optional;
+            const raw = self.formValue(fname);
+            if (raw == null and isOptional) {
+                @field(out, fname) = null;
+            } else if (raw == null and fattrs.default_value_ptr != null) {
+                const dvPtr: *const FT = @ptrCast(@alignCast(fattrs.default_value_ptr.?));
+                @field(out, fname) = dvPtr.*;
+            } else if (raw == null) {
+                return error.MissingField;
+            } else {
+                const spaced = if (std.mem.indexOfScalar(u8, raw.?, '+')) |_| blk: {
+                    const src = raw.?;
+                    const tmp = scratch[cursor .. cursor + src.len];
+                    for (src, 0..) |c, idx| tmp[idx] = if (c == '+') ' ' else c;
+                    break :blk tmp;
+                } else raw.?;
+                const decoded = try parseMod.percentDecode(scratch[cursor..], spaced);
+                cursor += spaced.len;
+                const ChildT = if (isOptional) fti.optional.child else FT;
+                @field(out, fname) = switch (@typeInfo(ChildT)) {
+                    .int => try std.fmt.parseInt(ChildT, decoded, 10),
+                    .float => try std.fmt.parseFloat(ChildT, decoded),
+                    .bool => if (std.mem.eql(u8, decoded, "true")) true else if (std.mem.eql(u8, decoded, "false")) false else return error.InvalidValue,
+                    else => decoded,
+                };
+            }
+        }
+        return out;
+    }
+
     /// Extracts Bearer token from Authorization header if present.
     pub fn bearerToken(self: *const Context) ?[]const u8 {
         const hv = self.header("Authorization") orelse return null;
@@ -1643,6 +1694,48 @@ test "allows same path different methods" {
 
     try router.get("/users", dummyHandler, .{});
     try router.post("/users", dummyHandler, .{});
+}
+
+test "submits and decodes form bodies" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var router = Router.init(a, .{});
+    defer router.deinit();
+
+    const Form = struct {
+        name: []const u8,
+        age: u32,
+        active: bool,
+        @"x-token": ?[]const u8 = null,
+    };
+
+    const handler = struct {
+        fn handle(ctx: *Context) anyerror!Response {
+            const f = ctx.form(Form) catch return ctx.textStatus(400, "bad form");
+            return ctx.json(.{ .name = f.name, .age = f.age, .active = f.active, .token = f.@"x-token" orelse "" });
+        }
+    }.handle;
+
+    try router.post("/submit", handler, .{});
+
+    var ctx = Context{
+        .allocator = arena.allocator(),
+        .path = "/submit",
+        .method = .POST,
+        .body = "name=Alice+Ng&age=30&active=true&x-token=a%26b",
+        .headers = &.{.{ .name = "Content-Type", .value = "application/x-www-form-urlencoded" }},
+    };
+    const h = router.match(.POST, "/submit", &ctx).?;
+    const res = try h(&ctx);
+    try std.testing.expectEqual(@as(u16, 200), res.status);
+    try std.testing.expect(std.mem.indexOf(u8, res.body, "\"name\":\"Alice Ng\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.body, "\"age\":30") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.body, "\"active\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.body, "\"token\":\"a&b\"") != null);
+
+    try std.testing.expectEqualStrings("Alice+Ng", ctx.formValue("name").?);
+    try std.testing.expect(ctx.formValue("missing") == null);
 }
 
 test "static beats parameter precedence" {

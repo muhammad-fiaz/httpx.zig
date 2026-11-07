@@ -29,7 +29,7 @@ const graphqlEndpoint = "/graphql";
 const Role = enum { ADMIN, USER };
 const RoleEnum = httpx.graphql.Enum("Role", &.{ "ADMIN", "USER" });
 
-// Struct-based type: fields map one-to-one onto the Zig struct.
+/// User payload returned by resolvers.
 const User = struct {
     id: []const u8,
     name: []const u8,
@@ -80,16 +80,9 @@ const resolvers = struct {
             },
         };
     }
-
-    // Loose (untyped) resolvers are also supported: `Context` by value with
-    // a `std.json.Value` result. Both styles share the same `Context`.
-    pub fn getServerName(ctx: httpx.graphql.Context) !std.json.Value {
-        return ctx.value(httpx.name);
-    }
 };
 
 const QueryRoot = httpx.graphql.Query(.{
-    .serverName = .{ .type = Scalar.string, .resolve = resolvers.getServerName },
     .me = .{ .type = UserType, .description = "Current authenticated user", .resolve = resolvers.getMe },
     .users = .{
         .type = UserType,
@@ -103,14 +96,8 @@ const QueryRoot = httpx.graphql.Query(.{
     },
 });
 
-// Typed REST endpoint next to GraphQL. Field names are the exact JSON keys.
-const StatusResponse = struct {
-    @"server-name": []const u8,
-    @"uptime-seconds": u64,
-};
-
-fn statusHandler(_: *httpx.router.Context) !httpx.Schema(StatusResponse) {
-    return httpx.Schema(StatusResponse).ok(.{ .@"server-name" = httpx.name, .@"uptime-seconds" = 42 });
+fn statusHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
+    return ctx.json(.{ .@"server-name" = httpx.name, .@"uptime-seconds" = 42 });
 }
 
 fn helloHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
