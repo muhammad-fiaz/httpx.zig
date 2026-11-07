@@ -12,18 +12,34 @@ const std = @import("std");
 const builtin = @import("builtin");
 const net = std.Io.net;
 const Allocator = std.mem.Allocator;
+const configCoerce = @import("../common/configCoerce.zig");
 const sysMod = @import("sys.zig");
 
 pub const MAX_DATAGRAM: usize = 65527; // max UDP payload (64KiB - 8 header - 20 IP)
 
-pub const UdpSocket = struct {
+pub const Socket = struct {
+    /// Socket configuration. `address` binds that explicit local address;
+    /// null binds the `port` on all IPv4 interfaces. `port = 0` lets the
+    /// OS choose an ephemeral port.
+    pub const Config = struct {
+        address: ?net.IpAddress = null,
+        port: u16 = 0,
+    };
+
     socket: net.Socket,
     io: std.Io,
     defaultDest: ?net.IpAddress = null,
     closed: std.atomic.Value(bool) = .init(false),
 
+    /// Creates a UDP socket from an explicit `std.Io` and one inline `.{}`.
+    pub fn init(io: std.Io, cfg_in: anytype) !Socket {
+        const cfg = configCoerce.to(Config, cfg_in);
+        if (cfg.address) |addr| return bindAddress(io, &addr);
+        return bind(io, cfg.port);
+    }
+
     /// Binds to 0.0.0.0:port. port=0 lets the OS choose (typical for clients).
-    pub fn bind(io: std.Io, port: u16) !UdpSocket {
+    pub fn bind(io: std.Io, port: u16) !Socket {
         const addr = try net.IpAddress.parseIp4("0.0.0.0", port);
         return bindAddress(io, &addr);
     }
@@ -31,13 +47,13 @@ pub const UdpSocket = struct {
     /// Binds the IPv6 wildcard address `[::]:port`. Useful for DNS/QUIC
     /// endpoints that must accept IPv6 peers; separate from `bind` so the
     /// default remains an IPv4 socket on hosts where IPv6 is unavailable.
-    pub fn bindIp6(io: std.Io, port: u16) !UdpSocket {
+    pub fn bindIp6(io: std.Io, port: u16) !Socket {
         const addr = try net.IpAddress.parseIp6("::", port);
         return bindAddress(io, &addr);
     }
 
     /// Binds an explicit local address (IPv4 or IPv6).
-    pub fn bindAddress(io: std.Io, addr: *const net.IpAddress) !UdpSocket {
+    pub fn bindAddress(io: std.Io, addr: *const net.IpAddress) !Socket {
         const sock = try addr.bind(io, .{ .mode = .dgram });
         return .{ .socket = sock, .io = io };
     }
@@ -45,18 +61,18 @@ pub const UdpSocket = struct {
     /// Idempotent close: QUIC pump shutdown and endpoint teardown both
     /// close the same socket, and a second OS close could otherwise
     /// release an unrelated recycled descriptor.
-    pub fn close(self: *UdpSocket) void {
+    pub fn close(self: *Socket) void {
         if (self.closed.swap(true, .acq_rel)) return;
         self.socket.close(self.io);
     }
 
     /// Sends one datagram to dest.
-    pub fn sendTo(self: *UdpSocket, dest: *const net.IpAddress, data: []const u8) !void {
+    pub fn sendTo(self: *Socket, dest: *const net.IpAddress, data: []const u8) !void {
         try self.socket.send(self.io, dest, data);
     }
 
     /// Sends using the configured default destination.
-    pub fn send(self: *UdpSocket, data: []const u8) !void {
+    pub fn send(self: *Socket, data: []const u8) !void {
         const d = self.defaultDest orelse error.NoDefaultDestination;
         try self.sendTo(&d, data);
     }
@@ -73,7 +89,7 @@ pub const UdpSocket = struct {
     /// unsupported by some `std.Io` backends). Deadline-driven code must
     /// receive on a `quic Pump` reader thread instead — never call this
     /// where a quiet peer could stall the caller forever.
-    pub fn receive(self: *UdpSocket, buffer: []u8) !struct { data: []const u8, from: net.IpAddress } {
+    pub fn receive(self: *Socket, buffer: []u8) !struct { data: []const u8, from: net.IpAddress } {
         const msg = self.socket.receive(self.io, buffer) catch |err| switch (err) {
             error.ConnectionResetByPeer, error.PortUnreachable => return error.ConnectionReset,
             else => return error.ReadFailed,
@@ -86,7 +102,7 @@ pub const UdpSocket = struct {
     /// readiness poll before `std.Io` receive; Windows delegates to its timed
     /// I/O backend and reports `TimeoutUnsupported` when concurrency is absent.
     pub fn receiveTimeout(
-        self: *UdpSocket,
+        self: *Socket,
         buffer: []u8,
         timeout: std.Io.Timeout,
     ) !struct { data: []const u8, from: net.IpAddress } {
@@ -131,9 +147,9 @@ test "udp bind and local datagram echo" {
     var ctx = @import("../sockets/tcp.zig").IoContext.init(gpa) catch return;
     defer ctx.deinit();
 
-    var a = UdpSocket.bind(ctx.io, 0) catch return;
+    var a = Socket.bind(ctx.io, 0) catch return;
     defer a.close();
-    var b = UdpSocket.bind(ctx.io, 0) catch return;
+    var b = Socket.bind(ctx.io, 0) catch return;
     defer b.close();
 
     const bPort = switch (b.socket.address) {
@@ -154,7 +170,7 @@ test "udp ipv6 bind accepts loopback datagrams" {
     var ctx = @import("../sockets/tcp.zig").IoContext.init(std.testing.allocator) catch return;
     defer ctx.deinit();
 
-    var server = UdpSocket.bindIp6(ctx.io, 0) catch |err| switch (err) {
+    var server = Socket.bindIp6(ctx.io, 0) catch |err| switch (err) {
         error.AddressFamilyUnsupported,
         error.ProtocolUnsupportedBySystem,
         error.ProtocolUnsupportedByAddressFamily,
@@ -170,7 +186,7 @@ test "udp ipv6 bind accepts loopback datagrams" {
     };
     try std.testing.expect(server.socket.address == .ip6);
 
-    var client = UdpSocket.bindIp6(ctx.io, 0) catch return;
+    var client = Socket.bindIp6(ctx.io, 0) catch return;
     defer client.close();
     const dest = try net.IpAddress.parseIp6("::1", port);
     // Hosts without a usable IPv6 loopback may fail at bind/send time;
@@ -187,9 +203,9 @@ test "udp receive rejects a datagram larger than the supplied buffer" {
     var ctx = @import("../sockets/tcp.zig").IoContext.init(std.testing.allocator) catch return;
     defer ctx.deinit();
 
-    var server = try UdpSocket.bind(ctx.io, 0);
+    var server = try Socket.bind(ctx.io, 0);
     defer server.close();
-    var client = try UdpSocket.bind(ctx.io, 0);
+    var client = try Socket.bind(ctx.io, 0);
     defer client.close();
 
     const port = switch (server.socket.address) {
@@ -206,7 +222,7 @@ test "udp receive rejects a datagram larger than the supplied buffer" {
 test "udp receive timeout is bounded or reports unsupported operation" {
     var ctx = @import("../sockets/tcp.zig").IoContext.init(std.testing.allocator) catch return;
     defer ctx.deinit();
-    var socket = UdpSocket.bind(ctx.io, 0) catch return;
+    var socket = Socket.bind(ctx.io, 0) catch return;
     defer socket.close();
 
     var buf: [16]u8 = undefined;

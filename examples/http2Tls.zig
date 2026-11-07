@@ -61,7 +61,7 @@ pub fn main() !void {
 
     var ctx = try httpx.tcp.IoContext.init(allocator);
     defer ctx.deinit();
-    var listener = try httpx.tcp.Listener.bind(ctx.io, 0);
+    var listener = try httpx.tcp.Listener.init(ctx.io, .{});
     defer listener.close(ctx.io);
     const port = listener.localPort();
 

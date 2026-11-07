@@ -28,6 +28,7 @@ const std = @import("std");
 const net = std.Io.net;
 const Allocator = std.mem.Allocator;
 const addressMod = @import("../net/address.zig");
+const configCoerce = @import("../common/configCoerce.zig");
 const sysMod = @import("sys.zig");
 const clock = @import("../common/clock.zig");
 const posix = std.posix;
@@ -766,6 +767,14 @@ pub const Socket = struct {
 // Listener
 
 pub const Listener = struct {
+    /// Listener configuration. `address` binds an explicit address (its
+    /// family selects IPv4/IPv6); null binds the `port` on all interfaces.
+    /// `port = 0` lets the OS choose an ephemeral port.
+    pub const Config = struct {
+        address: ?addressMod.Address = null,
+        port: u16 = 0,
+    };
+
     inner: union(enum) {
         winsock: if (isWindows) ws.SOCKET else void,
         stream: net.Server,
@@ -774,6 +783,15 @@ pub const Listener = struct {
     boundPort: u16,
     family: addressMod.Family = .ip4,
     closed: bool = false,
+
+    /// Creates a listener from an explicit `std.Io` and one inline `.{}`.
+    /// `.{}` binds an ephemeral port on all interfaces; `.port` picks a
+    /// fixed port; `.address` binds that address.
+    pub fn init(io: std.Io, cfg_in: anytype) !Listener {
+        const cfg = configCoerce.to(Config, cfg_in);
+        if (cfg.address) |addr| return bindAddress(io, &addr);
+        return bind(io, cfg.port);
+    }
 
     /// Bind 0.0.0.0:port. port=0 lets OS choose an ephemeral port.
     pub fn bind(io: std.Io, port: u16) !Listener {

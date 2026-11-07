@@ -164,7 +164,7 @@ pub const MAX_DATAGRAM: usize = 1500;
 
 pub const Endpoint = struct {
     conn: *Connection,
-    sock: udpMod.UdpSocket,
+    sock: udpMod.Socket,
     /// Active peer address. Once established by an explicit destination or
     /// the first received datagram, it is pinned until path validation can
     /// safely promote a candidate address.
@@ -180,7 +180,7 @@ pub const Endpoint = struct {
     /// port so clients can address them; clients use ephemeral ports.
     pub fn init(allocator: Allocator, io: std.Io, conn: *Connection, options: Options) !Endpoint {
         _ = allocator;
-        const sock = try udpMod.UdpSocket.bind(io, options.port);
+        const sock = try udpMod.Socket.bind(io, options.port);
         // No SO_RCVTIMEO on purpose: a receive timeout surfaces as
         // error.WouldBlock, which the Threaded std.Io backend treats as
         // unreachable and aborts the process. The socket stays fully
@@ -219,7 +219,7 @@ pub const Endpoint = struct {
 
     /// Receives up to `max` datagrams into the connection. Returns the
     /// number processed. Blocks indefinitely when the peer is quiet (see
-    /// `UdpSocket.receive`), so only call this where progress is
+    /// `Socket.receive`), so only call this where progress is
     /// guaranteed (data known present, as in the Initial-ping test).
     /// Deadline-driven code uses `Pump.next` instead.
     /// Non-fatal per-datagram errors are counted and skipped

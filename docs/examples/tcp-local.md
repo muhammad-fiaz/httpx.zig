@@ -10,7 +10,7 @@ pub fn main() !void {
     const io = std.Io.Threaded.global_single_threaded.io();
 
     var addr = httpx.Address.loopback4(0);
-    var listener = try httpx.tcp.Listener.bindAddress(io, &addr);
+    var listener = try httpx.tcp.Listener.init(io, .{ .address = httpx.Address.loopback4(0) });
     defer listener.close(io);
     const port = listener.localPort();
     std.debug.print("listening on 127.0.0.1:{d}\n", .{port});

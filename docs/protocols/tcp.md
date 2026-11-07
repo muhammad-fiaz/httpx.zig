@@ -32,7 +32,7 @@ const n = try socket.read(&buf);
 ## Listener (`httpx.tcp.Listener`)
 
 ```zig
-var listener = try httpx.tcp.Listener.bind(io, 0);
+var listener = try httpx.tcp.Listener.init(io, .{});
 defer listener.close(io);
 const port = listener.localPort();
 var conn = try listener.accept(io);

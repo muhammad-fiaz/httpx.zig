@@ -3854,7 +3854,7 @@ test "Server shares one port number between HTTP/1.1 and HTTP/3 when the port is
     // and UDP separate, so a TCP-chosen port can land in a range the UDP
     // stack refuses to bind, which is exactly the port HTTP/3 needs.
     const freePort = blk: {
-        var probe = udpMod.UdpSocket.bind(ctx.io, 0) catch break :blk @as(u16, 0);
+        var probe = udpMod.Socket.bind(ctx.io, 0) catch break :blk @as(u16, 0);
         defer probe.close();
         break :blk switch (probe.socket.address) {
             .ip4 => |v| v.port,
@@ -3887,7 +3887,7 @@ test "explicit HTTP/3 port conflict fails instead of silently rebinding" {
     var ctx = tcp.IoContext.init(a) catch return;
     defer ctx.deinit();
 
-    var probe = udpMod.UdpSocket.bind(ctx.io, 0) catch return;
+    var probe = udpMod.Socket.bind(ctx.io, 0) catch return;
     defer probe.close();
     const port = switch (probe.socket.address) {
         .ip4 => |v| v.port,
