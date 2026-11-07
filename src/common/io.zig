@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const sysMod = @import("../sockets/sys.zig");
 
 pub const IoContext = struct {
     io: std.Io,
@@ -18,6 +19,9 @@ pub const IoContext = struct {
     allocator: Allocator,
 
     pub fn init(allocator: Allocator) !IoContext {
+        // The std.Io networking layer ultimately uses Winsock on Windows,
+        // which requires process-level startup before bind/connect/accept.
+        sysMod.init();
         const threaded = try allocator.create(std.Io.Threaded);
         errdefer allocator.destroy(threaded);
         threaded.* = .init(allocator, .{});

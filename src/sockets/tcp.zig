@@ -257,30 +257,9 @@ pub const ConnectError = error{
 
 // IoContext
 
-/// Runtime IO context - one per application.
-pub const IoContext = struct {
-    io: std.Io,
-    threaded: *std.Io.Threaded,
-    allocator: Allocator,
-
-    pub fn init(gpa: Allocator) !IoContext {
-        // The std.Io networking layer ultimately uses Winsock on Windows,
-        // which requires process-level startup before bind/connect/accept.
-        // Initialize it here so every TCP/UDP user of a shared IoContext has
-        // the same deterministic prerequisite and cannot strand an accept
-        // worker when the first client connection fails.
-        initWinsock();
-        const threaded = try gpa.create(std.Io.Threaded);
-        errdefer gpa.destroy(threaded);
-        threaded.* = .init(gpa, .{});
-        return .{ .io = threaded.io(), .threaded = threaded, .allocator = gpa };
-    }
-
-    pub fn deinit(self: *IoContext) void {
-        self.threaded.deinit();
-        self.allocator.destroy(self.threaded);
-    }
-};
+/// Runtime IO context - one per application. Single definition, shared
+/// with `httpx.IoContext` (see `common/io.zig`).
+pub const IoContext = @import("../common/io.zig").IoContext;
 
 // Socket
 //
