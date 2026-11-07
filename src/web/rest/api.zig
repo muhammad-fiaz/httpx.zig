@@ -19,7 +19,7 @@
 //!     });
 //! }
 //!
-//! try app.post("/users", .{
+//! try server.post("/users", .{
 //!     .handler = createUser,
 //!     .summary = "Create a new user",
 //!     .tags = &.{"users"},
@@ -53,7 +53,7 @@
 //!     @"user-name": []const u8,
 //! };
 //!
-//! try app.post("/users", .{
+//! try server.post("/users", .{
 //!     .handler = createUser,
 //!     .summary = "Create a new user",
 //! });
@@ -65,6 +65,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const configCoerce = @import("../../common/configCoerce.zig");
 const routerMod = @import("../router/router.zig");
 const Context = routerMod.Context;
 const Response = routerMod.Response;
@@ -138,7 +139,9 @@ pub fn Schema(comptime T: type) type {
             var out: Self = .{};
             if (@typeInfo(@TypeOf(spec)) == .@"struct") {
                 inline for (@typeInfo(@TypeOf(spec)).@"struct".field_names) |fname| {
-                    if (!@hasField(Self, fname)) continue;
+                    if (comptime !@hasField(Self, fname)) {
+                        @compileError("unknown Schema.result option `." ++ fname ++ "`");
+                    }
                     const value = @field(spec, fname);
                     if (comptime std.mem.eql(u8, fname, "status")) {
                         out.status = statusValue(value);
@@ -198,11 +201,7 @@ fn coerceTo(comptime Dest: type, value: anytype) Dest {
     if (@typeInfo(Dest) == .optional) return coerceTo(@typeInfo(Dest).optional.child, value);
     if (@typeInfo(Src) == .@"struct" and @typeInfo(Dest) == .@"struct") {
         if (@typeInfo(Src).@"struct".is_tuple or @typeInfo(Dest).@"struct".is_tuple) return value;
-        var out: Dest = undefined;
-        inline for (@typeInfo(Dest).@"struct".field_names) |fname| {
-            @field(out, fname) = coerceTo(@FieldType(Dest, fname), @field(value, fname));
-        }
-        return out;
+        return configCoerce.to(Dest, value);
     }
     return value;
 }
@@ -213,6 +212,11 @@ fn paramList(comptime items: anytype) []const metaMod.Param {
     const out = comptime blk: {
         var tmp: [items.len]metaMod.Param = undefined;
         for (items, 0..) |item, i| {
+            for (@typeInfo(@TypeOf(item)).@"struct".field_names) |fname| {
+                if (!@hasField(metaMod.Param, fname)) {
+                    @compileError("unknown parameter option `." ++ fname ++ "`");
+                }
+            }
             tmp[i] = .{
                 .name = item.name,
                 .in = item.in,
@@ -232,6 +236,11 @@ fn responseList(comptime items: anytype) []const metaMod.ResponseDesc {
     const out = comptime blk: {
         var tmp: [items.len]metaMod.ResponseDesc = undefined;
         for (items, 0..) |item, i| {
+            for (@typeInfo(@TypeOf(item)).@"struct".field_names) |fname| {
+                if (!@hasField(metaMod.ResponseDesc, fname)) {
+                    @compileError("unknown response option `." ++ fname ++ "`");
+                }
+            }
             tmp[i] = .{
                 .status = item.status,
                 .description = if (@hasField(@TypeOf(item), "description")) item.description else "",
@@ -245,6 +254,11 @@ fn responseList(comptime items: anytype) []const metaMod.ResponseDesc {
 
 /// Coerces a request-body literal onto the typed descriptor.
 fn requestDef(comptime value: anytype) metaMod.RequestBody {
+    inline for (@typeInfo(@TypeOf(value)).@"struct".field_names) |fname| {
+        if (comptime !@hasField(metaMod.RequestBody, fname)) {
+            @compileError("unknown request option `." ++ fname ++ "`");
+        }
+    }
     return .{
         .content = value.content,
         .schema = if (@hasField(@TypeOf(value), "schema")) value.schema else null,
