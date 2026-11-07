@@ -253,7 +253,7 @@ exe.root_module.addImport("httpx", httpx_dep.module("httpx"));
 
 ## Quick Start
 
-simple HTTP client and server example with REST and GraphQL:
+REST and GraphQL in one program:
 
 ```zig
 const std = @import("std");
