@@ -496,8 +496,8 @@ pub const parsing = struct {
     pub const SitemapUrl = sitemap.SitemapUrl;
     pub const ChangeFreq = sitemap.ChangeFreq;
     pub const Selector = selector.Selector;
-    pub fn init(allocator: std.mem.Allocator, config: Config) document.Parser {
-        return document.Parser.init(allocator, config);
+    pub fn init(allocator: std.mem.Allocator, cfg_in: anytype) document.Parser {
+        return document.Parser.init(allocator, cfg_in);
     }
     pub const detectKind = document.detectKind;
 };

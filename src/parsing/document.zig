@@ -8,6 +8,7 @@ const std = @import("std");
 const jsonMedia = @import("../common/json.zig");
 const Allocator = std.mem.Allocator;
 const dom = @import("dom.zig");
+const configCoerce = @import("../common/configCoerce.zig");
 const Tree = dom.Tree;
 const Node = dom.Node;
 const NO_NODE = dom.NO_NODE;
@@ -419,10 +420,10 @@ pub const Parser = struct {
 
     /// Creates a stateless parser. The parser itself allocates nothing;
     /// returned documents own an arena backed by `allocator`.
-    pub fn init(allocator: Allocator, config: ParserConfig) Parser {
+    pub fn init(allocator: Allocator, cfg_in: anytype) Parser {
         return .{
             .allocator = allocator,
-            .config = config,
+            .config = configCoerce.to(ParserConfig, cfg_in),
         };
     }
 
