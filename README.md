@@ -201,7 +201,8 @@ zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.
 >
 > For documentation matching older releases of `httpx.zig`, checkout that release's tag and generate local documentation using `zig build docs`, which emits native HTML documentation into `zig-out/docs/`.
 
-### Method 2: Zig Fetch (Latest Development Build)
+<details>
+<summary><strong>Method 2: Zig Fetch (Latest Development Build)</strong> — click to expand</summary>
 
 Use this for the latest development build from the `main` branch:
 
@@ -209,7 +210,10 @@ Use this for the latest development build from the `main` branch:
 zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 ```
 
-### Method 3: Manual `build.zig.zon` Configuration
+</details>
+
+<details>
+<summary><strong>Method 3: Manual `build.zig.zon` Configuration</strong> — click to expand</summary>
 
 ```zig
 .dependencies = .{
@@ -220,7 +224,10 @@ zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 },
 ```
 
-### Method 4: Local Source Checkout
+</details>
+
+<details>
+<summary><strong>Method 4: Local Source Checkout</strong> — click to expand</summary>
 
 ```bash
 git clone https://github.com/muhammad-fiaz/httpx.zig.git
@@ -237,6 +244,8 @@ To use a local checkout from another project:
     },
 },
 ```
+
+</details>
 
 ### Wire into `build.zig`
 
