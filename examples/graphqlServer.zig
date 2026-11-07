@@ -4,8 +4,8 @@
 //! - The full type system: objects, enums, input objects, arguments, lists
 //! - Typed resolvers with a shared `httpx.graphql.Context`
 //! - One `httpx.Server.init(allocator, io, …)` owning the listener, router,
-//!   REST controller, and GraphQL mount
-//! - Typed REST routes through `server.get(...)`
+//!   and GraphQL mount
+//! - REST routes through `server.get(...)`
 //! - GraphQL mounted with `server.graphql(.{ ... })`, torn down by `deinit`
 //! - Every documentation UI from the single `.docs` config, all served offline
 //! - String queries with typed client decoding via `httpx.graphql.Payload(T)`
@@ -174,16 +174,16 @@ pub fn main() !void {
     var urlBuf: [128]u8 = undefined;
     const urlRoot = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/", .{port});
     var res = try client.get(urlRoot, .{});
+    defer res.deinit();
     std.debug.print("GET / -> status={d}, body={s}\n", .{ res.status, res.body });
-    res.deinit();
 
     var gqlBuf: [128]u8 = undefined;
     const urlGraphql = try std.fmt.bufPrint(&gqlBuf, "http://127.0.0.1:{d}" ++ graphqlEndpoint, .{port});
     var statusBuf: [160]u8 = undefined;
     const urlStatus = try std.fmt.bufPrint(&statusBuf, "http://127.0.0.1:{d}/api/status", .{port});
     var statusRes = try client.get(urlStatus, .{});
+    defer statusRes.deinit();
     std.debug.print("GET /api/status -> status={d}, body={s}\n", .{ statusRes.status, statusRes.body });
-    statusRes.deinit();
 
     // String query against the typed schema; the response is decoded into a
     // typed envelope that declares only the fields this query selected.
