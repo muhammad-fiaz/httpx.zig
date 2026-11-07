@@ -35,7 +35,6 @@
 
 **One native Zig library for HTTP, networking, and web applications.**
 
-> [!IMPORTANT]
 - **HTTP client and server:** HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3 with connection pooling, streaming, lifecycle management, and configurable timeouts.
 - **TLS and secure transport:** TLS 1.2/1.3, ALPN, certificate and hostname verification, custom trust stores, mutual TLS, session resumption, HTTP/2 over TLS, HTTP/3 over QUIC, and FTP/FTPS.
 - **Networking and proxies:** DNS resolution and TTL caching, connectivity checks, HTTP proxies, SOCKS4/4a, SOCKS5/SOCKS5h, remote DNS resolution, and cross-platform TCP/UDP networking.
@@ -48,14 +47,6 @@
 - **Observability and development tools:** Prometheus metrics, metric snapshots, structured logging, request events, native file watching, CSS hot reload, and application reload workflows.
 - **Explicit resource management:** Allocator and `std.Io` integration, deterministic cleanup, bounded concurrency, and thread-based server lifecycle management.
 
->[!TIP]
-> httpx.zig brings HTTP, networking, and web development together in one native Zig
-> library. Its design emphasizes a consistent API, explicit resource ownership,
-> efficient I/O, and modular implementation.
-
-
-[**Explore the documentation**](./docs/) for installation, guides, API references,
-examples, supported features, and migration instructions.
 > [!NOTE]
 > httpx.zig is actively evolving, and breaking API or behavioral changes may occur between releases. If you're using an older version, consider upgrading and review the release notes and documentation before migrating.
 >
@@ -440,63 +431,63 @@ zig build bench
 
 Benchmark target: `x86_64-windows`, `ReleaseFast`. Measurements recorded on November 7, 2026.
 
-| Benchmark | Category | Average Latency | Throughput | Target |
-| :--- | :--- | ---: | ---: | :--- |
-| `headers_parse` | Core Operations | 214.50 ns/op | **4,661,985 ops/sec** | `x86_64-windows` |
-| `uri_parse` | Core Operations | 62.20 ns/op | **16,076,498 ops/sec** | `x86_64-windows` |
-| `status_lookup` | Core Operations | 2.75 ns/op | **364,167,385 ops/sec** | `x86_64-windows` |
-| `method_lookup` | Core Operations | 13.99 ns/op | **71,496,902 ops/sec** | `x86_64-windows` |
-| `http1_request_head` | Core Operations | 18.72 ns/op | **53,410,529 ops/sec** | `x86_64-windows` |
-| `http1_header_block` | Core Operations | 195.04 ns/op | **5,127,163 ops/sec** | `x86_64-windows` |
-| `authority_parse` | Core Operations | 11.15 ns/op | **89,715,708 ops/sec** | `x86_64-windows` |
-| `percent_decode` | Core Operations | 30.08 ns/op | **33,246,780 ops/sec** | `x86_64-windows` |
-| `percent_encode` | Core Operations | 22.05 ns/op | **45,345,304 ops/sec** | `x86_64-windows` |
-| `cookie_param_iter` | Core Operations | 95.63 ns/op | **10,456,564 ops/sec** | `x86_64-windows` |
-| `token_list_scan` | Core Operations | 29.32 ns/op | **34,107,773 ops/sec** | `x86_64-windows` |
-| `query_param_lookup` | Core Operations | 36.35 ns/op | **27,512,889 ops/sec** | `x86_64-windows` |
-| `router_static_match` | Routing | 238.70 ns/op | **4,189,357 ops/sec** | `x86_64-windows` |
-| `router_param_match` | Routing | 295.92 ns/op | **3,379,264 ops/sec** | `x86_64-windows` |
-| `router_dispatch` | Routing | 251.03 ns/op | **3,983,624 ops/sec** | `x86_64-windows` |
-| `router_typed_match` | Routing | 295.49 ns/op | **3,384,252 ops/sec** | `x86_64-windows` |
-| `router_miss_404` | Routing | 412.19 ns/op | **2,426,064 ops/sec** | `x86_64-windows` |
-| `router_reverse` | Routing | 56.38 ns/op | **17,737,415 ops/sec** | `x86_64-windows` |
-| `json_stringify` | Serialization | 188.22 ns/op | **5,312,830 ops/sec** | `x86_64-windows` |
-| `json_parse` | Serialization | 264.05 ns/op | **3,787,127 ops/sec** | `x86_64-windows` |
-| `basic_auth_encode` | Security | 24.91 ns/op | **40,151,290 ops/sec** | `x86_64-windows` |
-| `basic_auth_decode` | Security | 13.84 ns/op | **72,265,822 ops/sec** | `x86_64-windows` |
-| `bearer_token_parse` | Security | 1.07 ns/op | **931,653,871 ops/sec** | `x86_64-windows` |
-| `gzip_compress` | Compression | 14.65 µs/op | **68,282 ops/sec** | `x86_64-windows` |
-| `gzip_decompress` | Compression | 4.08 µs/op | **245,052 ops/sec** | `x86_64-windows` |
-| `deflate_compress` | Compression | 13.36 µs/op | **74,868 ops/sec** | `x86_64-windows` |
-| `deflate_decompress` | Compression | 4.15 µs/op | **240,966 ops/sec** | `x86_64-windows` |
-| `html_parse` | Parsing | 12.17 µs/op | **82,141 ops/sec** | `x86_64-windows` |
-| `template_parse` | Parsing | 2.42 µs/op | **412,787 ops/sec** | `x86_64-windows` |
-| `template_render` | Parsing | 1.36 µs/op | **734,305 ops/sec** | `x86_64-windows` |
-| `template_incremental` | Parsing | 19.33 µs/op | **51,740 ops/sec** | `x86_64-windows` |
-| `json_feed_parse` | Parsing | 3.34 µs/op | **299,722 ops/sec** | `x86_64-windows` |
-| `live_reload_inject` | Parsing | 239.71 ns/op | **4,171,678 ops/sec** | `x86_64-windows` |
-| `watcher_scan` | Watcher | 646.08 µs/op | **1,547 ops/sec** | `x86_64-windows` |
-| `watcher_deps` | Watcher | 3.23 µs/op | **309,498 ops/sec** | `x86_64-windows` |
-| `static_safe_join` | Static Files | 92.25 ns/op | **10,839,849 ops/sec** | `x86_64-windows` |
-| `spa_fallback_policy` | SPA | 92.70 ns/op | **10,787,501 ops/sec** | `x86_64-windows` |
-| `worker_pool_submit` | Concurrency | 180.21 ns/op | **5,549,050 ops/sec** | `x86_64-windows` |
-| `concurrency_queue` | Concurrency | 21.52 ns/op | **46,475,960 ops/sec** | `x86_64-windows` |
-| `dns_cache_hit` | DNS | 88.14 ns/op | **11,346,165 ops/sec** | `x86_64-windows` |
-| `h2_frame_header` | Protocols | 2.25 ns/op | **443,697,061 ops/sec** | `x86_64-windows` |
-| `hpack_int_encode` | Protocols | 3.95 ns/op | **252,859,205 ops/sec** | `x86_64-windows` |
-| `hpack_int_decode` | Protocols | 8.81 ns/op | **113,559,839 ops/sec** | `x86_64-windows` |
-| `qpack_int_encode` | Protocols | 3.97 ns/op | **252,110,162 ops/sec** | `x86_64-windows` |
-| `qpack_int_decode` | Protocols | 2.70 ns/op | **370,286,713 ops/sec** | `x86_64-windows` |
-| `h3_frame_header` | Protocols | 2.44 ns/op | **409,026,394 ops/sec** | `x86_64-windows` |
-| `h3_varint_encode` | Protocols | 3.76 ns/op | **265,868,352 ops/sec** | `x86_64-windows` |
-| `h3_varint_decode` | Protocols | 3.54 ns/op | **282,612,013 ops/sec** | `x86_64-windows` |
-| `tls_record_seal` | TLS | 1.08 µs/op | **925,245 ops/sec** | `x86_64-windows` |
-| `tls_cert_parse` | TLS | 1.02 µs/op | **983,413 ops/sec** | `x86_64-windows` |
-| `client_server_get` | Network | 80.37 µs/op | **12,442 req/sec** | `x86_64-windows` |
-| `h2_pooled_get` | Network | 54.08 µs/op | **18,492 req/sec** | `x86_64-windows` |
-| `h3_get` | Network | 202.98 ms/op | **4 req/sec** | `x86_64-windows` |
-| `tls_full_handshake` | TLS | 3.26 ms/op | **306 ops/sec** | `x86_64-windows` |
-| `tls_resumed_handshake` | TLS | 2.67 ms/op | **374 ops/sec** | `x86_64-windows` |
+| Benchmark | Category | Average Latency | Throughput |
+| :--- | :--- | ---: | ---: |
+| `headers_parse` | Core Operations | 214.50 ns/op | **4,661,985 ops/sec** |
+| `uri_parse` | Core Operations | 62.20 ns/op | **16,076,498 ops/sec** |
+| `status_lookup` | Core Operations | 2.75 ns/op | **364,167,385 ops/sec** |
+| `method_lookup` | Core Operations | 13.99 ns/op | **71,496,902 ops/sec** |
+| `http1_request_head` | Core Operations | 18.72 ns/op | **53,410,529 ops/sec** |
+| `http1_header_block` | Core Operations | 195.04 ns/op | **5,127,163 ops/sec** |
+| `authority_parse` | Core Operations | 11.15 ns/op | **89,715,708 ops/sec** |
+| `percent_decode` | Core Operations | 30.08 ns/op | **33,246,780 ops/sec** |
+| `percent_encode` | Core Operations | 22.05 ns/op | **45,345,304 ops/sec** |
+| `cookie_param_iter` | Core Operations | 95.63 ns/op | **10,456,564 ops/sec** |
+| `token_list_scan` | Core Operations | 29.32 ns/op | **34,107,773 ops/sec** |
+| `query_param_lookup` | Core Operations | 36.35 ns/op | **27,512,889 ops/sec** |
+| `router_static_match` | Routing | 238.70 ns/op | **4,189,357 ops/sec** |
+| `router_param_match` | Routing | 295.92 ns/op | **3,379,264 ops/sec** |
+| `router_dispatch` | Routing | 251.03 ns/op | **3,983,624 ops/sec** |
+| `router_typed_match` | Routing | 295.49 ns/op | **3,384,252 ops/sec** |
+| `router_miss_404` | Routing | 412.19 ns/op | **2,426,064 ops/sec** |
+| `router_reverse` | Routing | 56.38 ns/op | **17,737,415 ops/sec** |
+| `json_stringify` | Serialization | 188.22 ns/op | **5,312,830 ops/sec** |
+| `json_parse` | Serialization | 264.05 ns/op | **3,787,127 ops/sec** |
+| `basic_auth_encode` | Security | 24.91 ns/op | **40,151,290 ops/sec** |
+| `basic_auth_decode` | Security | 13.84 ns/op | **72,265,822 ops/sec** |
+| `bearer_token_parse` | Security | 1.07 ns/op | **931,653,871 ops/sec** |
+| `gzip_compress` | Compression | 14.65 µs/op | **68,282 ops/sec** |
+| `gzip_decompress` | Compression | 4.08 µs/op | **245,052 ops/sec** |
+| `deflate_compress` | Compression | 13.36 µs/op | **74,868 ops/sec** |
+| `deflate_decompress` | Compression | 4.15 µs/op | **240,966 ops/sec** |
+| `html_parse` | Parsing | 12.17 µs/op | **82,141 ops/sec** |
+| `template_parse` | Parsing | 2.42 µs/op | **412,787 ops/sec** |
+| `template_render` | Parsing | 1.36 µs/op | **734,305 ops/sec** |
+| `template_incremental` | Parsing | 19.33 µs/op | **51,740 ops/sec** |
+| `json_feed_parse` | Parsing | 3.34 µs/op | **299,722 ops/sec** |
+| `live_reload_inject` | Parsing | 239.71 ns/op | **4,171,678 ops/sec** |
+| `watcher_scan` | Watcher | 646.08 µs/op | **1,547 ops/sec** |
+| `watcher_deps` | Watcher | 3.23 µs/op | **309,498 ops/sec** |
+| `static_safe_join` | Static Files | 92.25 ns/op | **10,839,849 ops/sec** |
+| `spa_fallback_policy` | SPA | 92.70 ns/op | **10,787,501 ops/sec** |
+| `worker_pool_submit` | Concurrency | 180.21 ns/op | **5,549,050 ops/sec** |
+| `concurrency_queue` | Concurrency | 21.52 ns/op | **46,475,960 ops/sec** |
+| `dns_cache_hit` | DNS | 88.14 ns/op | **11,346,165 ops/sec** |
+| `h2_frame_header` | Protocols | 2.25 ns/op | **443,697,061 ops/sec** |
+| `hpack_int_encode` | Protocols | 3.95 ns/op | **252,859,205 ops/sec** |
+| `hpack_int_decode` | Protocols | 8.81 ns/op | **113,559,839 ops/sec** |
+| `qpack_int_encode` | Protocols | 3.97 ns/op | **252,110,162 ops/sec** |
+| `qpack_int_decode` | Protocols | 2.70 ns/op | **370,286,713 ops/sec** |
+| `h3_frame_header` | Protocols | 2.44 ns/op | **409,026,394 ops/sec** |
+| `h3_varint_encode` | Protocols | 3.76 ns/op | **265,868,352 ops/sec** |
+| `h3_varint_decode` | Protocols | 3.54 ns/op | **282,612,013 ops/sec** |
+| `tls_record_seal` | TLS | 1.08 µs/op | **925,245 ops/sec** |
+| `tls_cert_parse` | TLS | 1.02 µs/op | **983,413 ops/sec** |
+| `client_server_get` | Network | 80.37 µs/op | **12,442 req/sec** |
+| `h2_pooled_get` | Network | 54.08 µs/op | **18,492 req/sec** |
+| `h3_get` | Network | 202.98 ms/op | **4 req/sec** |
+| `tls_full_handshake` | TLS | 3.26 ms/op | **306 ops/sec** |
+| `tls_resumed_handshake` | TLS | 2.67 ms/op | **374 ops/sec** |
 
 For the full benchmark methodology, measurement details, and analysis, see [Benchmark Documentation](docs/reference/benchmarks.md).
 
