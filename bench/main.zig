@@ -157,6 +157,7 @@ var benchDnsCache: *httpx.net.dns.Cache = undefined;
 var sampleCompressRaw: []const u8 = undefined;
 var sampleGzipPayload: []const u8 = undefined;
 var sampleDeflatePayload: []const u8 = undefined;
+var sampleHtmlLargeDoc: []const u8 = &.{};
 
 // Group 1: Core Operations & Parsing
 
@@ -399,10 +400,30 @@ const sampleHtmlDoc =
     \\</html>
 ;
 
+/// Cards in the large benchmark document. Each card is about 150 bytes, so
+/// the default is a ~594 KB page with ~36,000 DOM nodes.
+const benchHtmlCardCount = 4_000;
+
+fn buildLargeHtmlDoc(allocator: std.mem.Allocator, cards: usize) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var line: [256]u8 = undefined;
+    for (0..cards) |i| {
+        try out.appendSlice(allocator, try std.fmt.bufPrint(&line, "<div class=\"card\"><img src=\"/static/poster.jpg\" alt=\"poster\"><div class=\"body\"><h3>Title {d}</h3><p>Description text for card {d}.</p></div></div>\n", .{ i, i }));
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 fn benchHtmlParse() void {
     var arena = std.heap.ArenaAllocator.init(benchAllocator);
     defer arena.deinit();
     _ = httpx.parsing.html.parse(arena.allocator(), sampleHtmlDoc, .{}) catch return;
+}
+
+fn benchHtmlParseLarge() void {
+    var arena = std.heap.ArenaAllocator.init(benchAllocator);
+    defer arena.deinit();
+    _ = httpx.parsing.html.parse(arena.allocator(), sampleHtmlLargeDoc, .{}) catch return;
 }
 
 const sampleTemplateSrc = "<h1>{{ title }}</h1>{% for item in items %}<p>{{ item }}</p>{% endfor %}";
@@ -1043,6 +1064,11 @@ pub fn main() !void {
     sampleDeflatePayload = try httpx.compression.compress(benchAllocator, .deflate, sampleCompressRaw);
     defer benchAllocator.free(sampleDeflatePayload);
 
+    // Large generated document, so the HTML benchmark covers realistic page
+    // sizes instead of only a single small snippet.
+    sampleHtmlLargeDoc = try buildLargeHtmlDoc(benchAllocator, benchHtmlCardCount);
+    defer benchAllocator.free(sampleHtmlLargeDoc);
+
     // 6. Initialize Local Loopback Server & Client
     var srv = try httpx.Server.init(benchAllocator, io, .{
         .port = 0,
@@ -1166,6 +1192,7 @@ pub fn main() !void {
     const fastCfg = BenchConfig{ .iterations = 2_000_000, .warmupIterations = 20_000, .rounds = 5 };
     const coreCfg = BenchConfig{ .iterations = 200_000, .warmupIterations = 5_000, .rounds = 5 };
     const medCfg = BenchConfig{ .iterations = 20_000, .warmupIterations = 500, .rounds = 3 };
+    const largeHtmlCfg = BenchConfig{ .iterations = 1, .warmupIterations = 1, .rounds = 3 };
     const compCfg = BenchConfig{ .iterations = 2_000, .warmupIterations = 100, .rounds = 3 };
     const scanCfg = BenchConfig{ .iterations = 500, .warmupIterations = 20, .rounds = 3 };
     const ioCfg = BenchConfig{ .iterations = 2_000, .warmupIterations = 100, .rounds = 3 };
@@ -1214,6 +1241,7 @@ pub fn main() !void {
 
     std.debug.print("\n[6] Web & Document Parsing:\n", .{});
     runBench("Parsing", "html_parse", "ops/sec", medCfg, benchHtmlParse);
+    runBench("Parsing", "html_parse_large", "pages/sec", largeHtmlCfg, benchHtmlParseLarge);
     runBench("Parsing", "template_parse", "ops/sec", medCfg, benchTemplateParse);
     {
         var parser = httpx.templates.parser.Parser.init(benchAllocator, "bench.html", sampleTemplateSrc);
