@@ -73,6 +73,7 @@ pub const socket = struct {
         pub const Listener = inner.Listener;
         pub const Socket = inner.Socket;
         pub const connect = inner.connect;
+        pub const wakeListenerPort = inner.wakeListenerPort;
         pub const connectAddress = inner.connectAddress;
         pub const connectAddressStream = inner.connectAddressStream;
     };

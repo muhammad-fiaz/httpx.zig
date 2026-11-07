@@ -704,7 +704,7 @@ fn benchClientServerLoopback() void {
 
 // Group 12: HTTP/2 pooled loopback (h2c prior knowledge, one server conn)
 
-var h2BenchListener: httpx.tcp.Listener = undefined;
+var h2BenchListener: httpx.socket.tcp.Listener = undefined;
 var h2BenchThread: std.Thread = undefined;
 var h2BenchClient: httpx.Client = undefined;
 var h2BenchUrl: [64]u8 = undefined;
@@ -815,11 +815,11 @@ const H3BenchServer = struct {
     /// Ownership of `qconn` stays with `run()`; this function must not deinit it.
     fn serveOne(srv: *H3BenchServer, qconn: *httpx.protocols.quic.Connection) !void {
         const alloc = benchAllocator;
-        var drv = httpx.protocols.quic.HandshakeDriver.initServer(srv.ep.io, alloc, .{ .certChainPem = benchCertPem, .privateKeyPem = benchKeyPem });
+        var drv = httpx.protocols.quic.Handshake.init(alloc, srv.ep.io, .{ .role = .server, .certChainPem = benchCertPem, .privateKeyPem = benchKeyPem });
         defer drv.deinit();
-        qconn.tls = .{ .ctx = &drv, .start = httpx.protocols.quic.HandshakeDriver.clientStart, .onData = httpx.protocols.quic.HandshakeDriver.onData };
-        try httpx.protocols.quic.handshake.serveHandshake(&srv.ep, &srv.pump, &drv, 10_000);
-        var h3 = httpx.protocols.http3.Connection.init(alloc, .server);
+        drv.attach(qconn);
+        try httpx.protocols.quic.handshake.serve(.{ .ep = &srv.ep, .pump = &srv.pump, .hs = &drv, .deadlineMs = 10_000 });
+        var h3 = httpx.protocols.http3.Connection.init(alloc, .{ .role = .server });
         defer h3.deinit();
         var acc = Acc{};
         defer acc.buf.deinit(alloc);
@@ -831,7 +831,7 @@ const H3BenchServer = struct {
             // Use a short 50 ms quantum so the loop stays responsive.
             // PumpStopped means shutdown was signalled — propagate immediately
             // so the server thread exits cleanly rather than burning the timeout.
-            httpx.protocols.quic.handshake.feedPumped(&srv.ep, &srv.pump, null, 50, now) catch |e| switch (e) {
+            httpx.protocols.quic.handshake.feedPumped(.{ .ep = &srv.ep, .pump = &srv.pump, .dest = null, .quantumMs = 50, .nowMs = now }) catch |e| switch (e) {
                 error.PumpStopped => return error.PumpStopped,
                 else => {},
             };
@@ -898,7 +898,7 @@ const benchKeyPem =
     \\-----END PRIVATE KEY-----
 ;
 
-var tlsBenchListener: httpx.tcp.Listener = undefined;
+var tlsBenchListener: httpx.socket.tcp.Listener = undefined;
 var tlsBenchThread: std.Thread = undefined;
 var tlsBenchPort: u16 = 0;
 var tlsBenchStop: std.atomic.Value(bool) = .init(false);
@@ -927,7 +927,7 @@ fn tlsBenchServe() void {
 }
 
 fn tlsBenchDial(session: ?*const httpx.protocols.tls.Session) void {
-    var sock = httpx.tcp.connect(tlsBenchIo, "127.0.0.1", tlsBenchPort) catch {
+    var sock = httpx.socket.tcp.connect(tlsBenchIo, "127.0.0.1", tlsBenchPort) catch {
         noteFailure();
         return;
     };
@@ -994,7 +994,7 @@ pub fn main() !void {
     defer benchQueue.deinit();
 
     // 3. Initialize Router with diverse routes
-    benchRouter = httpx.Router.init(benchAllocator);
+    benchRouter = httpx.Router.init(benchAllocator, .{});
     defer benchRouter.deinit();
     try benchRouter.get("/", dummyHandler, .{});
     try benchRouter.get("/api/v1/health", dummyHandler, .{});
@@ -1077,7 +1077,7 @@ pub fn main() !void {
     // Each teardown defer is registered only after its setup succeeds,
     // so a fatal setup error exits without joining garbage threads.
     h2BenchIo = io;
-    h2BenchListener = try httpx.tcp.Listener.bind(io, 0);
+    h2BenchListener = try httpx.socket.tcp.Listener.bind(io, 0);
     const h2port = h2BenchListener.localPort();
     h2BenchThread = try std.Thread.spawn(.{}, h2BenchServe, .{});
     h2BenchUrlSlice = try std.fmt.bufPrint(&h2BenchUrl, "http://127.0.0.1:{d}/ping", .{h2port});
@@ -1089,7 +1089,7 @@ pub fn main() !void {
     defer {
         // Stop server, wake listener, join thread, then close and deinit.
         h2BenchStop.store(true, .release);
-        httpx.tcp.wakeListenerPort(h2port);
+        httpx.socket.tcp.wakeListenerPort(h2port);
         h2BenchClient.deinit();
         h2BenchThread.join();
         h2BenchListener.close(io);
@@ -1117,7 +1117,7 @@ pub fn main() !void {
 
     // 9. TLS loopback server (tickets enabled) + one captured session
     tlsBenchIo = io;
-    tlsBenchListener = try httpx.tcp.Listener.bind(io, 0);
+    tlsBenchListener = try httpx.socket.tcp.Listener.bind(io, 0);
     tlsBenchPort = tlsBenchListener.localPort();
     tlsBenchThread = try std.Thread.spawn(.{}, tlsBenchServe, .{});
     defer {
@@ -1127,7 +1127,7 @@ pub fn main() !void {
     }
     {
         // Prime the resumption session (full handshake + read captures NST).
-        var sock = try httpx.tcp.connect(io, "127.0.0.1", tlsBenchPort);
+        var sock = try httpx.socket.tcp.connect(io, "127.0.0.1", tlsBenchPort);
         defer sock.close();
         var cli = httpx.protocols.tls.Client.init(benchAllocator, io, .{}) catch return error.NoSessionCaptured;
         defer cli.deinit();
