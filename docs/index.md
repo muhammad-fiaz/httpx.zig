@@ -102,12 +102,6 @@ Detailed methodology and analysis: [Benchmarks Reference](/reference/benchmarks)
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.4.tar.gz
 ```
 
-**Previous Release (v0.2.3, Zig 0.17)**
-
-```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.3.tar.gz
-```
-
 > [!NOTE]
 > **httpx.zig** requires Zig **0.17.0+**.
 >

@@ -29,7 +29,7 @@
 
 
 > [!TIP]
-> If you build with httpx.zig, make sure to give it a star.
+> If you build with httpx.zig, make sure to give it a star ⭐.
 
 ## Why Use httpx.zig?
 
@@ -188,12 +188,6 @@ zig build -Dtarget=x86-windows
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.4.tar.gz
-```
-
-**Previous Release (v0.2.3, Zig 0.17)**
-
-```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.3.tar.gz
 ```
 
 > [!NOTE]
