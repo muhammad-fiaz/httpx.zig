@@ -330,13 +330,14 @@ pub fn main() !void {
         .request = .{ .content = .json, .description = "User to create" },
     });
 
-    // GraphQL endpoint; GraphiQL UI is served by the docs mount below.
-    const graph_schema = httpx.graphql.Schema.init(allocator, io, .{
+    // GraphQL: schema and endpoint in one literal. GraphiQL UI comes from
+    // the docs mount below.
+    try server.graphql(.{
         .query = QueryRoot,
         .types = &.{UserType},
         .introspection = true,
+        .endpoint = "/graphql",
     });
-    try server.graphql(graph_schema, .{ .endpoint = "/graphql" });
 
     // Every bundled UI explicitly enabled; all assets embedded and offline.
     try server.docs(.{

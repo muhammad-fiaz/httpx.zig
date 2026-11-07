@@ -1088,16 +1088,36 @@ pub const Server = struct {
         self.docsMounted = true;
     }
 
-    /// Mounts a GraphQL schema at `cfg.endpoint` (POST, GET, OPTIONS).
-    ///
-    /// The mount reuses this server's allocator and `std.Io` and is removed by
-    /// `deinit`; mounting twice is an error instead of silently replacing the
-    /// first schema.
-    pub fn graphql(self: *Server, schema: graphqlServerMod.Schema, cfg: graphqlServerMod.HandlerConfig) !void {
+    /// Mounts GraphQL at `cfg.endpoint` (POST, GET, OPTIONS) and builds the
+    /// schema from this server's own allocator and `std.Io`. The schema and
+    /// mount options live in one literal, so no separate `Schema.init` is
+    /// needed. The mount is removed by `deinit`; mounting twice is an error
+    /// instead of silently replacing the first schema.
+    pub fn graphql(self: *Server, cfg_in: anytype) !void {
         if (self.graphqlMounted) return error.GraphqlAlreadyMounted;
-        try graphqlServerMod.mount(self.allocator, self.io, &self.router, schema, cfg);
+        const cfg = configCoerce.to(graphqlServerMod.MountConfig, cfg_in);
+        const schema = graphqlServerMod.Schema.init(self.allocator, self.io, .{
+            .query = cfg.query,
+            .mutation = cfg.mutation,
+            .types = cfg.types,
+            .enums = cfg.enums,
+            .inputs = cfg.inputs,
+            .interfaces = cfg.interfaces,
+            .unions = cfg.unions,
+            .maxDepth = cfg.maxDepth,
+            .maxComplexity = cfg.maxComplexity,
+            .introspection = cfg.introspection,
+        });
+        const handlerCfg: graphqlServerMod.HandlerConfig = .{
+            .endpoint = cfg.endpoint,
+            .maxBodySize = cfg.maxBodySize,
+            .cors = cfg.cors,
+            .allowGet = cfg.allowGet,
+            .responseContentType = cfg.responseContentType,
+        };
+        try graphqlServerMod.mount(self.allocator, self.io, &self.router, schema, handlerCfg);
         self.graphqlMounted = true;
-        self.graphqlCfg = cfg;
+        self.graphqlCfg = handlerCfg;
     }
 
     /// Returns true if this server has TLS configured and active.

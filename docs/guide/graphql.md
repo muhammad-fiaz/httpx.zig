@@ -113,13 +113,13 @@ var server = try httpx.Server.init(allocator, io, .{
 });
 defer server.deinit();
 
-const schema = httpx.graphql.Schema.init(allocator, io, .{
+try server.graphql(.{
     .query = QueryType,
     .types = &.{UserType},
     .enums = &.{RoleEnum},
     .inputs = &.{UserFilter},
+    .endpoint = "/graphql",
 });
-try server.graphql(schema, .{ .endpoint = "/graphql" });
 
 server.run();
 ```

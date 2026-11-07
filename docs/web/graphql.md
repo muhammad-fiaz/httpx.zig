@@ -99,15 +99,15 @@ pub fn main() !void {
     });
     defer server.deinit();
 
-    const schema = httpx.graphql.Schema.init(allocator, io, .{
+    try server.graphql(.{
         .query = QueryRoot,
         .types = &.{UserType},
         .enums = &.{RoleEnum},
         .inputs = &.{UserFilter},
         .interfaces = &.{Node},
         .introspection = true,
+        .endpoint = graphqlEndpoint,
     });
-    try server.graphql(schema, .{ .endpoint = graphqlEndpoint });
 
     server.run();
 }

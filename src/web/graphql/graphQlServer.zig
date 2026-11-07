@@ -52,6 +52,28 @@ pub const HandlerConfig = struct {
     responseContentType: []const u8 = jsonMod.applicationJsonUtf8,
 };
 
+/// Server-side mount configuration. `server.graphql(.{ .query = …, .types = … })`
+/// builds the `Schema` from the server's allocator and `std.Io`, so no
+/// separate `Schema.init` is needed: schema fields and mount fields live in
+/// one literal.
+pub const MountConfig = struct {
+    query: schemaMod.ObjectTypeDef,
+    mutation: ?schemaMod.ObjectTypeDef = null,
+    types: []const schemaMod.ObjectTypeDef = &.{},
+    enums: []const schemaMod.EnumTypeDef = &.{},
+    inputs: []const schemaMod.InputTypeDef = &.{},
+    interfaces: []const schemaMod.InterfaceTypeDef = &.{},
+    unions: []const schemaMod.UnionTypeDef = &.{},
+    maxDepth: usize = 32,
+    maxComplexity: usize = 500,
+    introspection: bool = true,
+    endpoint: []const u8 = "/graphql",
+    maxBodySize: usize = 2 * 1024 * 1024,
+    cors: bool = true,
+    allowGet: bool = true,
+    responseContentType: []const u8 = jsonMod.applicationJsonUtf8,
+};
+
 pub const ServerState = struct {
     /// Ownership borrowed from the mounter; `unmount` reuses it to release
     /// the state, so the same allocator that mounted it must still be alive.

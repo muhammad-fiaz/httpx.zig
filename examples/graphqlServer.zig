@@ -6,7 +6,7 @@
 //! - One `httpx.Server.init(allocator, io, …)` owning the listener, router,
 //!   REST controller, and GraphQL mount
 //! - Typed REST routes through `server.get(...)`
-//! - GraphQL mounted with `server.graphql(schema, …)`, torn down by `deinit`
+//! - GraphQL mounted with `server.graphql(.{ ... })`, torn down by `deinit`
 //! - Every documentation UI from the single `.docs` config, all served offline
 //! - String queries with typed client decoding via `httpx.graphql.Payload(T)`
 
@@ -160,17 +160,17 @@ pub fn main() !void {
         .tags = &.{"system"},
     });
 
-    // GraphQL schema and endpoint. Every declared type reaches introspection,
-    // so GraphiQL / ReDoc / Scalar render them. The mount is owned by the
-    // server and removed by `server.deinit()`.
-    const schema = httpx.graphql.Schema.init(allocator, io, .{
+    // GraphQL schema and endpoint in one literal. Every declared type
+    // reaches introspection, so GraphiQL / ReDoc / Scalar render them.
+    // The mount is owned by the server and removed by `server.deinit()`.
+    try server.graphql(.{
         .query = QueryRoot,
         .types = &.{UserType},
         .enums = &.{RoleEnum},
         .inputs = &.{UserFilter},
         .introspection = true,
+        .endpoint = graphqlEndpoint,
     });
-    try server.graphql(schema, .{ .endpoint = graphqlEndpoint });
 
     const port = server.localPort();
     std.debug.print("GraphQL server listening on http://127.0.0.1:{d}\n", .{port});
