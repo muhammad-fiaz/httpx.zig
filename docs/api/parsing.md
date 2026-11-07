@@ -28,7 +28,6 @@ The available client helpers are:
 |---|---|
 | `httpx.parsing.Document` | Parsed document tree |
 | `httpx.parsing.Parser` | Configurable document parser |
-| `httpx.parsing.Config` | Parser configuration |
 | `httpx.parsing.Handle` | Node reference |
 | `httpx.parsing.Nodes` | Node collection |
 | `httpx.parsing.Kind` | Detected content kind |
@@ -41,7 +40,6 @@ The available client helpers are:
 
 ```zig
 var parser = httpx.parsing.init(allocator, .{});
-defer parser.deinit();
 ```
 
 Use `httpx.parsing.detectKind` when content type must be selected before

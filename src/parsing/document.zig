@@ -95,7 +95,6 @@ pub const ParserConfig = struct {
     limits: html.Limits = .{},
     detectContentType: bool = true,
 };
-pub const Config = ParserConfig;
 
 pub const NodeList = struct {
     allocator: Allocator,

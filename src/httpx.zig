@@ -477,7 +477,6 @@ pub const parsing = struct {
     pub const document = @import("parsing/document.zig");
     pub const Document = document.Document;
     pub const Parser = document.Parser;
-    pub const Config = document.Config;
     pub const Handle = document.Handle;
     pub const Nodes = document.Nodes;
     pub const Kind = document.Kind;
