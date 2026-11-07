@@ -367,6 +367,17 @@ const HtmlToken = struct {
     kind: HtmlTokenKind,
     start: usize,
     end: usize,
+    start_point: SourcePoint,
+    end_point: SourcePoint,
+
+    fn range(self: HtmlToken) SourceRange {
+        return .{
+            .startByte = @intCast(self.start),
+            .endByte = @intCast(self.end),
+            .startPoint = self.start_point,
+            .endPoint = self.end_point,
+        };
+    }
 };
 
 fn collectHtmlTokens(tree: *const HtmlTree, allocator: Allocator) Allocator.Error![]HtmlToken {
@@ -401,9 +412,47 @@ fn collectHtmlTokens(tree: *const HtmlTree, allocator: Allocator) Allocator.Erro
     for (ordered.items) |n| {
         const t = n.nodeType();
         const kind: HtmlTokenKind = if (std.mem.eql(u8, t, "open_tag")) .openTag else if (std.mem.eql(u8, t, "close_tag")) .closeTag else if (std.mem.eql(u8, t, "selfclose_tag")) .selfcloseTag else if (std.mem.eql(u8, t, "comment")) .comment else if (std.mem.eql(u8, t, "doctype")) .doctype else if (std.mem.eql(u8, t, "pi")) .pi else .text;
-        try out.append(allocator, .{ .kind = kind, .start = n.startByte(), .end = n.endByte() });
+        const start_point = n.startPoint();
+        const end_point = n.endPoint();
+        try out.append(allocator, .{
+            .kind = kind,
+            .start = n.startByte(),
+            .end = n.endByte(),
+            .start_point = .{ .row = start_point.row, .column = start_point.column },
+            .end_point = .{ .row = end_point.row, .column = end_point.column },
+        });
     }
     return out.toOwnedSlice(allocator);
+}
+
+/// Advances `point` over `source[start..]`. Only bytes after the last token
+/// need this; every other range boundary comes from a token.
+fn advancePoint(source: []const u8, start: usize, point: SourcePoint) SourcePoint {
+    var p = point;
+    var i = start;
+    while (i < source.len) : (i += 1) {
+        if (source[i] == '\n') {
+            p.row += 1;
+            p.column = 0;
+        } else {
+            p.column += 1;
+        }
+    }
+    return p;
+}
+
+/// Point at the end of the document. Tree-sitter's last token stops before any
+/// trailing whitespace, which the document range still covers.
+fn sourceEndPoint(source: []const u8, tokens: []const HtmlToken) SourcePoint {
+    var end: usize = 0;
+    var point: SourcePoint = .{};
+    for (tokens) |tok| {
+        if (tok.end >= end) {
+            end = tok.end;
+            point = tok.end_point;
+        }
+    }
+    return advancePoint(source, end, point);
 }
 
 pub fn changedRanges(allocator: Allocator, oldSrc: []const u8, newSrc: []const u8) !usize {
@@ -477,13 +526,17 @@ pub fn parse(arena: Allocator, htmlSrc: []const u8, limits: Limits) ParseError!T
     if (htmlSrc.len > limits.maxInputSize) return error.InputTooLarge;
     var tree = try Tree.initCapacity(arena, @min(htmlSrc.len / 16 + 4, limits.maxNodes));
     errdefer tree.deinit(arena);
+    var tsTree = try parseHtmlTree(arena, htmlSrc);
+    defer tsTree.deinit();
+    const tokens = try collectHtmlTokens(&tsTree, arena);
+    const source_end = sourceEndPoint(htmlSrc, tokens);
     const root = try tree.append(arena, .{
         .kind = .document,
         .range = .{
             .startByte = 0,
             .endByte = @intCast(htmlSrc.len),
             .startPoint = .{ .row = 0, .column = 0 },
-            .endPoint = pointForOffset(htmlSrc, htmlSrc.len),
+            .endPoint = source_end,
         },
     });
     var builder = Builder{
@@ -493,10 +546,7 @@ pub fn parse(arena: Allocator, htmlSrc: []const u8, limits: Limits) ParseError!T
         .limits = limits,
     };
     try builder.openStack.append(arena, root);
-    var tsTree = try parseHtmlTree(arena, htmlSrc);
-    defer tsTree.deinit();
-    const tokens = try collectHtmlTokens(&tsTree, arena);
-    try builder.runTokens(htmlSrc, tokens, tsTree.hasError());
+    try builder.runTokens(htmlSrc, tokens, tsTree.hasError(), source_end);
     return tree;
 }
 
@@ -517,19 +567,21 @@ const Builder = struct {
         return @intCast(self.openStack.items.len);
     }
 
-    fn runTokens(self: *Builder, src: []const u8, tokens: []const HtmlToken, hadError: bool) ParseError!void {
+    fn runTokens(self: *Builder, src: []const u8, tokens: []const HtmlToken, hadError: bool, source_end: SourcePoint) ParseError!void {
         self.tree.getMut(self.openStack.items[0]).hasError = hadError;
         var covered: usize = 0;
+        var covered_point: SourcePoint = .{};
         var ti: usize = 0;
         while (ti < tokens.len) {
             const tok = tokens[ti];
             if (tok.start > covered) {
-                try self.appendText(src, src[covered..tok.start], covered, tok.start, true);
+                try self.appendText(src[covered..tok.start], covered, tok.start, covered_point, tok.start_point, true);
                 covered = tok.start;
+                covered_point = tok.start_point;
             }
             switch (tok.kind) {
                 .text => {
-                    try self.appendText(src, src[tok.start..tok.end], tok.start, tok.end, false);
+                    try self.appendText(src[tok.start..tok.end], tok.start, tok.end, tok.start_point, tok.end_point, false);
                     ti += 1;
                 },
                 .comment => {
@@ -541,7 +593,7 @@ const Builder = struct {
                     const idx = try self.tree.append(self.arena, .{
                         .kind = .comment,
                         .data = data,
-                        .range = makeRange(src, tok.start, tok.end),
+                        .range = tok.range(),
                     });
                     self.tree.appendChild(self.currentParent(), idx);
                     ti += 1;
@@ -550,7 +602,7 @@ const Builder = struct {
                     const idx = try self.tree.append(self.arena, .{
                         .kind = .doctype,
                         .data = "html",
-                        .range = makeRange(src, tok.start, tok.end),
+                        .range = tok.range(),
                     });
                     self.tree.appendChild(self.currentParent(), idx);
                     ti += 1;
@@ -564,7 +616,7 @@ const Builder = struct {
                         .kind = .element,
                         .tag = info.tag,
                         .attrs = info.attrs,
-                        .range = makeRange(src, tok.start, tok.end),
+                        .range = tok.range(),
                     });
                     self.tree.appendChild(self.currentParent(), nodeIdx);
                     ti += 1;
@@ -576,7 +628,7 @@ const Builder = struct {
                         .kind = .element,
                         .tag = info.tag,
                         .attrs = info.attrs,
-                        .range = makeRange(src, tok.start, tok.end),
+                        .range = tok.range(),
                     });
                     self.tree.appendChild(self.currentParent(), nodeIdx);
                     if (VOID_ELEMENTS.has(info.tag)) {
@@ -594,24 +646,32 @@ const Builder = struct {
                             }
                         }
                         const contentEnd = if (closeIdx) |cj| tokens[cj].start else src.len;
+                        const contentEndPoint = if (closeIdx) |cj| tokens[cj].start_point else source_end;
                         if (contentEnd > tok.end) {
                             const rawContent = src[tok.end..contentEnd];
                             const txtIdx = try self.tree.append(self.arena, .{
                                 .kind = .text,
                                 .data = rawContent,
-                                .range = makeRange(src, tok.end, contentEnd),
+                                .range = .{
+                                    .startByte = @intCast(tok.end),
+                                    .endByte = @intCast(contentEnd),
+                                    .startPoint = tok.end_point,
+                                    .endPoint = contentEndPoint,
+                                },
                             });
                             self.tree.appendChild(nodeIdx, txtIdx);
                         }
                         if (closeIdx) |cj| {
                             self.tree.getMut(nodeIdx).range.endByte = @intCast(tokens[cj].end);
-                            self.tree.getMut(nodeIdx).range.endPoint = pointForOffset(src, tokens[cj].end);
-                            covered = @max(covered, tokens[cj].end);
+                            self.tree.getMut(nodeIdx).range.endPoint = tokens[cj].end_point;
+                            covered = tokens[cj].end;
+                            covered_point = tokens[cj].end_point;
                             ti = cj + 1;
                         } else {
                             self.tree.getMut(nodeIdx).range.endByte = @intCast(src.len);
-                            self.tree.getMut(nodeIdx).range.endPoint = pointForOffset(src, src.len);
-                            covered = @max(covered, src.len);
+                            self.tree.getMut(nodeIdx).range.endPoint = source_end;
+                            covered = src.len;
+                            covered_point = source_end;
                             ti = tokens.len;
                         }
                         _ = self.openStack.pop();
@@ -622,27 +682,35 @@ const Builder = struct {
                 .closeTag => {
                     const name = closeTagName(src[tok.start..tok.end]);
                     const tag = lowerBuf(self.arena, name) catch name;
-                    self.popToTag(tag, tok.end, src);
+                    self.popToTag(tag, tok.end, tok.end_point);
                     ti += 1;
                 },
             }
-            covered = @max(covered, tok.end);
+            if (tok.end >= covered) {
+                covered = tok.end;
+                covered_point = tok.end_point;
+            }
         }
         if (covered < src.len) {
-            try self.appendText(src, src[covered..], covered, src.len, true);
+            try self.appendText(src[covered..], covered, src.len, covered_point, source_end, true);
         }
         if (self.openStack.items.len > 1) {
             self.tree.getMut(self.openStack.items[0]).hasError = true;
         }
     }
 
-    fn appendText(self: *Builder, src: []const u8, raw: []const u8, start: usize, end: usize, isError: bool) ParseError!void {
+    fn appendText(self: *Builder, raw: []const u8, start: usize, end: usize, start_point: SourcePoint, end_point: SourcePoint, isError: bool) ParseError!void {
         if (raw.len == 0) return;
         if (raw.len > self.limits.maxTextBlock) return error.InputTooLarge;
         const idx = try self.tree.append(self.arena, .{
             .kind = .text,
             .data = raw,
-            .range = makeRange(src, start, end),
+            .range = .{
+                .startByte = @intCast(start),
+                .endByte = @intCast(end),
+                .startPoint = start_point,
+                .endPoint = end_point,
+            },
             .hasError = isError,
         });
         self.tree.appendChild(self.currentParent(), idx);
@@ -678,44 +746,20 @@ const Builder = struct {
         return std.ascii.eqlIgnoreCase(closeTagName(slice), tag);
     }
 
-    fn popToTag(self: *Builder, tag: []const u8, endOffset: usize, src: []const u8) void {
+    fn popToTag(self: *Builder, tag: []const u8, endOffset: usize, end_point: SourcePoint) void {
         var k: usize = self.openStack.items.len;
         while (k > 0) : (k -= 1) {
             const idx = self.openStack.items[k - 1];
             const node = self.tree.getMut(idx);
             if (node.kind == .element and node.hasTag(tag)) {
                 node.range.endByte = @intCast(endOffset);
-                node.range.endPoint = pointForOffset(src, endOffset);
+                node.range.endPoint = end_point;
                 self.openStack.shrinkRetainingCapacity(k - 1);
                 return;
             }
         }
     }
 };
-
-fn pointForOffset(source: []const u8, offset: usize) SourcePoint {
-    const clamped = @min(offset, source.len);
-    var row: u32 = 0;
-    var col: u32 = 0;
-    for (source[0..clamped]) |b| {
-        if (b == '\n') {
-            row += 1;
-            col = 0;
-        } else {
-            col += 1;
-        }
-    }
-    return .{ .row = row, .column = col };
-}
-
-fn makeRange(source: []const u8, start: usize, end: usize) SourceRange {
-    return .{
-        .startByte = @intCast(start),
-        .endByte = @intCast(end),
-        .startPoint = pointForOffset(source, start),
-        .endPoint = pointForOffset(source, end),
-    };
-}
 
 fn parseAttrs(
     arena: Allocator,
@@ -866,4 +910,67 @@ test "html tracks source ranges from syntax nodes" {
         }
     }
     try std.testing.expect(foundP);
+}
+
+test "html source points stay correct deep into a large document" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const al = arena.allocator();
+
+    // Thousands of lines, so the last element's points come from a token far
+    // from the start of the document.
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(al);
+    var line: [64]u8 = undefined;
+    for (0..4000) |i| {
+        try src.appendSlice(al, try std.fmt.bufPrint(&line, "<p id=\"{d}\">line {d}</p>\n", .{ i, i }));
+    }
+
+    const tree = try parse(al, src.items, .{});
+
+    var count: usize = 0;
+    var last: SourceRange = undefined;
+    for (tree.nodes.items) |n| {
+        if (n.kind == .element and std.mem.eql(u8, n.tag, "p")) {
+            count += 1;
+            last = n.range;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 4000), count);
+
+    const start: usize = @intCast(last.startByte);
+    const before = src.items[0..start];
+    const start_line = (std.mem.lastIndexOfScalar(u8, before, '\n') orelse 0) + 1;
+    try std.testing.expectEqual(@as(u32, @intCast(std.mem.count(u8, before, "\n"))), last.startPoint.row);
+    try std.testing.expectEqual(@as(u32, @intCast(start - start_line)), last.startPoint.column);
+
+    const end: usize = @intCast(last.endByte);
+    const through = src.items[0..end];
+    const end_line = (std.mem.lastIndexOfScalar(u8, through, '\n') orelse 0) + 1;
+    try std.testing.expectEqual(@as(u32, @intCast(std.mem.count(u8, through, "\n"))), last.endPoint.row);
+    try std.testing.expectEqual(@as(u32, @intCast(end - end_line)), last.endPoint.column);
+}
+
+test "html document end point includes trailing whitespace" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const tree = try parse(arena.allocator(), "<p>x</p>\n\n  ", .{});
+    const root = tree.get(0);
+    try std.testing.expectEqual(@as(u32, 2), root.range.endPoint.row);
+    try std.testing.expectEqual(@as(u32, 2), root.range.endPoint.column);
+}
+
+test "html source points count bytes, not characters" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const tree = try parse(arena.allocator(), "<p>\u{e9}</p><p>x</p>", .{});
+    var last: SourceRange = undefined;
+    for (tree.nodes.items) |n| {
+        if (n.kind == .element and std.mem.eql(u8, n.tag, "p")) last = n.range;
+    }
+    try std.testing.expectEqual(@as(u32, 0), last.startPoint.row);
+    try std.testing.expectEqual(@as(u32, 9), last.startPoint.column);
 }
