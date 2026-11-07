@@ -27,7 +27,7 @@ const graphqlEndpoint = "/graphql";
 
 /// Enum type: resolvers return the Zig enum and the engine emits tag names.
 const Role = enum { ADMIN, USER };
-const RoleEnum = httpx.graphql.Enum("Role", &.{ "ADMIN", "USER" });
+const RoleEnum = httpx.graphql.Enum("Role", Role);
 
 /// User payload returned by resolvers.
 const User = struct {

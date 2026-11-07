@@ -70,7 +70,7 @@ interfaces (`Interface`), and unions (`Union`). Fields and arguments accept
 ```zig
 const Scalar = httpx.graphql.Scalar;
 
-const RoleEnum = httpx.graphql.Enum("Role", &.{ "ADMIN", "USER" });
+const RoleEnum = httpx.graphql.Enum("Role", Role);
 const UserFilter = httpx.graphql.Input("UserFilter", .{ .role = RoleEnum });
 
 const User = struct { id: []const u8, name: []const u8, role: Role };

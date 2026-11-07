@@ -432,15 +432,18 @@ pub fn Object(comptime typeName: []const u8, comptime fields: []const FieldDef) 
     return .{ .name = checkQlName(typeName, "GraphQL type"), .fields = fields };
 }
 
-/// Declares an enum type. Fields reference it exactly like a scalar:
-/// `.type = RoleEnum`; resolvers return a Zig enum and the engine emits its
-/// tag name on the wire.
-pub fn Enum(comptime typeName: []const u8, comptime values: []const []const u8) EnumTypeDef {
+/// Declares an enum type from a Zig enum: the wire values are the enum
+/// tags, so the values are declared once. Fields reference it exactly
+/// like a scalar: `.type = RoleEnum`; resolvers return the enum value
+/// and the engine emits its tag name on the wire.
+pub fn Enum(comptime typeName: []const u8, comptime T: type) EnumTypeDef {
+    if (@typeInfo(T) != .@"enum") @compileError("Enum requires a Zig enum type");
+    const names = @typeInfo(T).@"enum".field_names;
     comptime {
         _ = checkQlName(typeName, "GraphQL enum");
-        for (values) |value| _ = checkQlName(value, "GraphQL enum value");
+        for (names) |value| _ = checkQlName(value, "GraphQL enum value");
     }
-    return .{ .name = typeName, .values = values };
+    return .{ .name = typeName, .values = names };
 }
 
 /// Declares an input object type for field arguments (`ArgDef.typeName`).
@@ -1195,7 +1198,7 @@ test "graphql typed resolver args and list fields" {
 // Full type-system fixtures: enum, input object, interface, union, args.
 const AdvancedFixtures = struct {
     const Role = enum { ADMIN, USER };
-    const RoleEnum = Enum("Role", &.{ "ADMIN", "USER" });
+    const RoleEnum = Enum("Role", Role);
 
     const UserFilter = Input("UserFilter", .{
         .role = RoleEnum,

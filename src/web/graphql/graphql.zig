@@ -45,7 +45,7 @@ pub const Mutation = schema.Mutation;
 /// `Object("User", &.{ .{ .name = "id", .typeName = "ID" } })`. The non-typed
 /// counterpart of `Type(...)`.
 pub const Object = schema.Object;
-/// Enum type: `Enum("Role", &.{ "ADMIN", "USER" })`.
+/// Enum type: `Enum("Role", Role)`.
 pub const Enum = schema.Enum;
 /// Input object type for field arguments: `Input("Filter", .{ .role = Role })`.
 pub const Input = schema.Input;

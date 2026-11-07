@@ -11,7 +11,7 @@ introspection, so GraphiQL, ReDoc, and Scalar render the complete schema:
 |---|---|
 | Object | `Type("User", .{ … })` (struct-driven) or `Object("User", &.{ … })` (string-named) |
 | Scalar | `Scalar.string`, `.int`, `.float`, `.boolean`, `.id` |
-| Enum | `Enum("Role", &.{ "ADMIN", "USER" })` |
+| Enum | `Enum("Role", Role)` |
 | Input object | `Input("UserFilter", .{ .role = RoleEnum })` |
 | Interface | `Interface("Node", .{ .id = Scalar.id })` |
 | Union | `Union("SearchResult", &.{ UserType, ItemType })` |
@@ -25,7 +25,7 @@ arguments are declared with `.args = .{ … }`; each argument may carry `.list`,
 const Scalar = httpx.graphql.Scalar;
 
 const Role = enum { ADMIN, USER };
-const RoleEnum = httpx.graphql.Enum("Role", &.{ "ADMIN", "USER" });
+const RoleEnum = httpx.graphql.Enum("Role", Role);
 
 const UserFilter = httpx.graphql.Input("UserFilter", .{ .role = RoleEnum });
 const Node = httpx.graphql.Interface("Node", .{ .id = Scalar.id });
