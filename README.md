@@ -250,17 +250,15 @@ exe.root_module.addImport("httpx", httpx_dep.module("httpx"));
 
 ## Quick Start
 
-Typed REST, one raw route, GraphQL, docs UIs, and client verbs — one program.
+simple HTTP client and server example with REST and GraphQL:
 
 ```zig
 const std = @import("std");
 const httpx = @import("httpx");
 
-// REST types: typed handlers encode/decode JSON and feed OpenAPI.
 const User = struct { id: u64, name: []const u8 };
 const CreateUser = struct { name: []const u8 };
 
-// GraphQL type and resolver: explicit spec, same JSON engine as REST.
 const Scalar = httpx.graphql.Scalar;
 const UserType = httpx.graphql.Type("User", .{
     .id = Scalar.id,
@@ -278,7 +276,6 @@ const QueryRoot = httpx.graphql.Query(.{
     .me = .{ .type = UserType, .resolve = resolvers.me },
 });
 
-// Typed REST: JSON body decoding plus OpenAPI 3.1 generation.
 fn getUser(ctx: *httpx.router.Context) !httpx.Schema(User) {
     return httpx.Schema(User).ok(.{ .id = ctx.paramUint("id") orelse 1, .name = "alice" });
 }
@@ -287,7 +284,6 @@ fn createUser(_: *httpx.router.Context, body: CreateUser) !httpx.Schema(User) {
     return httpx.Schema(User).created(.{ .id = 1, .name = body.name });
 }
 
-// Raw route: plain Response, no schema derivation.
 fn health(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{ .status = 200, .body = "ok", .contentType = "text/plain; charset=utf-8" };
 }
@@ -298,84 +294,22 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    // The server owns the listener, router, docs, and GraphQL mount; the
-    // client handles every outbound call. Both take the same allocator/io.
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
-        .port = 0, // 0: OS picks a free port
+        .port = 0,
+        .docs = .{},
     });
     defer server.deinit();
-    var client = httpx.Client.init(allocator, io, .{ .timeoutMs = 10_000 });
+    var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    // Register routes before docs so the OpenAPI snapshot includes them.
-    try server.get("/health", .{ .handler = health, .summary = "Health check", .tags = &.{"system"} });
-    try server.get("/users/{id:int}", .{
-        .handler = getUser,
-        .summary = "Get user",
-        .tags = &.{"users"},
-        .params = &.{
-            .{ .name = "id", .in = .path, .required = true, .schema = httpx.rest.schemaOf(u64) },
-            .{ .name = "expand", .in = .query, .schema = httpx.rest.schemaOf(bool) },
-        },
-        .responses = &.{
-            .{ .status = 200, .description = "User", .schema = httpx.rest.schemaOf(User) },
-            .{ .status = 404, .description = "Not found" },
-        },
-    });
-    try server.post("/users", .{
-        .handler = createUser,
-        .summary = "Create user",
-        .tags = &.{"users"},
-        .request = .{ .content = .json, .description = "User to create" },
-    });
-
-    // GraphQL: schema and endpoint in one literal. GraphiQL UI comes from
-    // the docs mount below.
+    try server.get("/health", .{ .handler = health, .summary = "Health check" });
+    try server.get("/users/{id:int}", .{ .handler = getUser, .summary = "Get user" });
+    try server.post("/users", .{ .handler = createUser, .summary = "Create user" });
     try server.graphql(.{
         .query = QueryRoot,
         .types = &.{UserType},
-        .introspection = true,
         .endpoint = "/graphql",
-    });
-
-    // Every bundled UI explicitly enabled; all assets embedded and offline.
-    try server.docs(.{
-        .enabled = true,
-        .title = "Quick Start API",
-        .version = httpx.version,
-        .description = "REST, GraphQL, and OpenAPI in one app",
-        .openapi = .{ .enabled = true, .route = "/openapi.json" },
-        .swagger = .{
-            .enabled = true,
-            .route = "/docs",
-            .title = "Swagger UI",
-            .docExpansion = .full,
-            .displayRequestDuration = true,
-            .filter = true,
-            .persistAuthorization = true,
-        },
-        .redoc = .{
-            .enabled = true,
-            .route = "/redoc",
-            .title = "ReDoc",
-            .hideDownloadButton = true,
-            .requiredPropsFirst = true,
-        },
-        .scalar = .{
-            .enabled = true,
-            .route = "/scalar",
-            .title = "Scalar API Reference",
-            .theme = "default",
-            .showSidebar = true,
-        },
-        .graphiql = .{
-            .enabled = true,
-            .route = "/graphiql",
-            .graphqlEndpoint = "/graphql",
-            .title = "GraphiQL IDE",
-            .editorTheme = "vs-dark",
-        },
     });
 
     const port = server.localPort();
@@ -385,33 +319,23 @@ pub fn main() !void {
         thread.join();
     }
 
-    const base = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{port});
-    defer allocator.free(base);
-    var url_buf: [512]u8 = undefined;
-
-    // Client verbs reuse the same allocator/io as the server.
-    const health_url = try std.fmt.bufPrint(&url_buf, "{s}/health", .{base});
+    var urlBuf: [512]u8 = undefined;
+    const health_url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/health", .{port});
     var health_res = try client.get(health_url, .{});
     defer health_res.deinit();
     std.debug.print("GET /health -> {d}: {s}\n", .{ health_res.status, health_res.bytes() });
 
-    const user_url = try std.fmt.bufPrint(&url_buf, "{s}/users/7", .{base});
+    const user_url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/users/7", .{port});
     var user_res = try client.get(user_url, .{});
     defer user_res.deinit();
     std.debug.print("GET /users/7 -> {d}: {s}\n", .{ user_res.status, user_res.bytes() });
 
-    const post_url = try std.fmt.bufPrint(&url_buf, "{s}/users", .{base});
+    const post_url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/users", .{port});
     var post_res = try client.post(post_url, .{ .json = .{ .name = "bob" } });
     defer post_res.deinit();
     std.debug.print("POST /users -> {d}: {s}\n", .{ post_res.status, post_res.bytes() });
 
-    var req_res = try client.request(health_url, .{ .method = .GET });
-    defer req_res.deinit();
-    var fetch_res = try client.fetch(health_url, .{});
-    defer fetch_res.deinit();
-
-    // GraphQL over the same client.
-    const gql_url = try std.fmt.bufPrint(&url_buf, "{s}/graphql", .{base});
+    const gql_url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/graphql", .{port});
     var gql_res = try client.graphql(gql_url, "{ me { id name } }", null, .{});
     defer gql_res.deinit();
     std.debug.print("POST /graphql -> {d}: {s}\n", .{ gql_res.status, gql_res.bytes() });
