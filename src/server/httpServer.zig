@@ -926,7 +926,7 @@ pub const Server = struct {
 
     /// Mounts a directory of static files under a URL prefix.
     pub fn static(self: *Server, mountPath: []const u8, dirPath: []const u8) !void {
-        const staticMod = @import("../web/staticFiles/staticFileServer.zig");
+        const staticMod = @import("../web/staticFiles/static.zig");
         try staticMod.register(&self.router, .{
             .mount = mountPath,
             .root = dirPath,
@@ -935,7 +935,7 @@ pub const Server = struct {
 
     /// Mounts a Single Page Application (SPA) with index fallback.
     pub fn spa(self: *Server, mountPath: []const u8, dirPath: []const u8) !void {
-        const spaMod = @import("../web/spa/spaServer.zig");
+        const spaMod = @import("../web/spa/server.zig");
         try spaMod.register(&self.router, .{
             .mount = mountPath,
             .root = dirPath,

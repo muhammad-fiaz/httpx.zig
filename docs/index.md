@@ -232,7 +232,7 @@ for the full list), including:
 - `concurrentDemo.zig`: concurrent requests with worker pool
 - `connectionPool.zig`: keep-alive pooling
 - `staticFiles.zig`, `staticSite.zig`, `staticEmbedded.zig`: filesystem, site, and single-file embedded assets
-- `spaServer.zig`, `spaFallback.zig`: single-page applications
+- `server.zig`, `spaFallback.zig`: single-page applications
 - `http2Client.zig`, `http2Multiplex.zig`: HTTP/2 and HPACK
 - `http3Client.zig`, `http3Quic.zig`: HTTP/3, QPACK, and QUIC framing
 - `tlsServer.zig`, `tlsGet.zig`, `tlsMtls.zig`: TLS listener and identities
