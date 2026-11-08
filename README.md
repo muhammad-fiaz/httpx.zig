@@ -295,12 +295,12 @@ const QueryRoot = httpx.graphql.Query(.{
     .me = .{ .type = UserType, .resolve = resolvers.me },
 });
 
-fn getUser(ctx: *httpx.router.Context) !httpx.Schema(User) {
-    return httpx.Schema(User).ok(.{ .id = ctx.paramUint("id") orelse 1, .name = "alice" });
+fn getUser(ctx: *httpx.router.Context) !httpx.Result(User) {
+    return .{ .body = .{ .id = ctx.paramUint("id") orelse 1, .name = "alice" } };
 }
 
-fn createUser(_: *httpx.router.Context, body: CreateUser) !httpx.Schema(User) {
-    return httpx.Schema(User).created(.{ .id = 1, .name = body.name });
+fn createUser(_: *httpx.router.Context, body: CreateUser) !httpx.Result(User) {
+    return .{ .status = .created, .body = .{ .id = 1, .name = body.name } };
 }
 
 fn health(_: *httpx.router.Context) anyerror!httpx.router.Response {

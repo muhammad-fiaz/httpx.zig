@@ -3,7 +3,8 @@
 //! Demonstrates the whole explicit surface:
 //!
 //! * lowercase verb registration — `server.post("/users", .{ .handler, … })`
-//! * `httpx.Schema(T).result(.{ .status, .body })` responses
+//! * `httpx.Result(T)` struct-literal responses: `.status` (default
+//!   `200 OK`), `.body`, `.headers`, `.mediaType`
 //! * Single-document JSON media types on input (standard and any valid `+json` type)
 //! * JSON keys that are not valid Zig identifiers via quoted identifiers
 //!   (`@"user-name"`, `@"@contact"`)
@@ -40,38 +41,32 @@ const UserWire = struct {
     @"@contact": []const u8,
 };
 
-// Handlers: (ctx) or (ctx, body) -> !httpx.Schema(T)
+// Handlers: (ctx) or (ctx, body) -> !httpx.Result(T)
 
-fn createUser(_: *httpx.router.Context, req: CreateUserRequest) !httpx.Schema(UserResponse) {
-    return httpx.Schema(UserResponse).result(.{
-        .status = .created,
-        .body = .{ .id = 101, .name = req.name, .email = req.email },
-    });
+fn createUser(_: *httpx.router.Context, req: CreateUserRequest) !httpx.Result(UserResponse) {
+    return .{ .status = .created, .body = .{ .id = 101, .name = req.name, .email = req.email } };
 }
 
-fn getUser(ctx: *httpx.router.Context) !httpx.Schema(UserResponse) {
+fn getUser(ctx: *httpx.router.Context) !httpx.Result(UserResponse) {
     const id = ctx.paramUint("id") orelse 1;
-    return httpx.Schema(UserResponse).ok(.{
+    return .{ .body = .{
         .id = id,
         .name = "hari",
         .email = "hello@example.com",
-    });
+    } };
 }
 
-fn ping(_: *httpx.router.Context) !httpx.Schema(MessageResponse) {
-    return httpx.Schema(MessageResponse).ok(.{ .message = "pong" });
+fn ping(_: *httpx.router.Context) !httpx.Result(MessageResponse) {
+    return .{ .body = .{ .message = "pong" } };
 }
 
 /// Uses wire keys `user-name` and `@contact` on both the request and response.
-fn updateUser(_: *httpx.router.Context, req: UserWire) !httpx.Schema(UserWire) {
-    return httpx.Schema(UserWire).result(.{
-        .status = .accepted,
-        .body = .{ .@"user-name" = req.@"user-name", .@"@contact" = req.@"@contact" },
-    });
+fn updateUser(_: *httpx.router.Context, req: UserWire) !httpx.Result(UserWire) {
+    return .{ .status = .accepted, .body = .{ .@"user-name" = req.@"user-name", .@"@contact" = req.@"@contact" } };
 }
 
-fn deleteUser(_: *httpx.router.Context) !httpx.Schema(void) {
-    return httpx.Schema(void).noContent();
+fn deleteUser(_: *httpx.router.Context) !httpx.Result(void) {
+    return .{ .status = .noContent };
 }
 
 /// A plain handler for the raw `HandlerFn` surface.

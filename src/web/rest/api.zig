@@ -5,18 +5,22 @@
 //! explicit handler, and explicit metadata. Nothing is inferred from a string
 //! verb, and nothing is silently defaulted on the caller's behalf.
 //!
-//! Handlers return a typed result built from [`Schema`]:
+//! Handlers return a typed `httpx.Result(T)`, a struct with `.status`
+//! (default `200 OK`), `.body` (default `null`), `.headers`, and
+//! `.mediaType`, so a handler is a plain struct literal with no
+//! constructor:
 //!
 //! ```zig
 //! const CreateUser = struct { name: []const u8, email: []const u8 };
 //! const User = struct { id: u64, name: []const u8, email: []const u8 };
 //!
-//! fn createUser(ctx: *httpx.router.Context, req: CreateUser) !httpx.Schema(User) {
+//! fn createUser(ctx: *httpx.router.Context, req: CreateUser) !httpx.Result(User) {
 //!     _ = ctx;
-//!     return httpx.Schema(User).result(.{
-//!         .status = .created,
-//!         .body = .{ .id = 1, .name = req.name, .email = req.email },
-//!     });
+//!     return .{ .status = .created, .body = .{ .id = 1, .name = req.name, .email = req.email } };
+//! }
+//!
+//! fn deleteUser(_: *httpx.router.Context) !httpx.Result(void) {
+//!     return .{ .status = .noContent };
 //! }
 //!
 //! try server.post("/users", .{
@@ -25,6 +29,10 @@
 //!     .tags = &.{"users"},
 //! });
 //! ```
+//!
+//! `.status` accepts any `Status` decl (`.ok`, `.created`, `.accepted`,
+//! `.noContent`, `.notFound`, ...) or `httpx.Status.fromCode(422)` for
+//! arbitrary codes.
 //!
 //! ## JSON on the wire
 //!
@@ -65,7 +73,6 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const configCoerce = @import("../../common/configCoerce.zig");
 const routerMod = @import("../router/router.zig");
 const Context = routerMod.Context;
 const Response = routerMod.Response;
@@ -107,16 +114,27 @@ fn BodyField(comptime T: type) type {
 
 /// Typed REST result for a response payload of type `T`.
 ///
-/// ```zig
-/// return httpx.Schema(User).result(.{ .status = .ok, .body = user });
-/// return httpx.Schema(User).created(user);
-/// return httpx.Schema(void).noContent();
+/// A handler declares the return type and returns a plain struct
+/// literal; there are no constructors to call:
+///```zig
+/// fn getUser(ctx: *httpx.router.Context) !httpx.Result(User) {
+///     return .{ .body = user };                          // 200 OK
+/// }
+/// fn createUser(...) !httpx.Result(User) {
+///     return .{ .status = .created, .body = user };      // 201 Created
+/// }
+/// fn deleteUser(...) !httpx.Result(void) {
+///     return .{ .status = .noContent };                  // 204 No Content
+/// }
+/// fn reject(...) !httpx.Result(void) {
+///     return .{ .status = httpx.Status.fromCode(422) };
+/// }
 /// ```
-pub fn Schema(comptime T: type) type {
+pub fn Result(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        /// The payload type this schema carries; `void` for empty responses.
+        /// The payload type this result carries; `void` for empty responses.
         pub const ResponseBody = T;
 
         /// Response status. `.ok` is the explicit default for a result that
@@ -128,82 +146,7 @@ pub fn Schema(comptime T: type) type {
         headers: []const routerMod.Header = &.{},
         /// Response media type override; `null` keeps the endpoint default.
         mediaType: ?[]const u8 = null,
-
-        /// Builds a result from a struct literal. Every field is optional:
-        ///
-        /// ```zig
-        /// .result(.{ .status = .created, .body = user })
-        /// .result(.{ .status = Status.fromCode(422), .body = problem })
-        /// ```
-        pub fn result(spec: anytype) Self {
-            var out: Self = .{};
-            if (@typeInfo(@TypeOf(spec)) == .@"struct") {
-                inline for (@typeInfo(@TypeOf(spec)).@"struct".field_names) |fname| {
-                    if (comptime !@hasField(Self, fname)) {
-                        @compileError("unknown Schema.result option `." ++ fname ++ "`");
-                    }
-                    const value = @field(spec, fname);
-                    if (comptime std.mem.eql(u8, fname, "status")) {
-                        out.status = statusValue(value);
-                    } else {
-                        @field(out, fname) = coerceTo(@FieldType(Self, fname), value);
-                    }
-                }
-            }
-            return out;
-        }
-
-        pub fn ok(body: T) Self {
-            return .{ .status = .ok, .body = body };
-        }
-
-        pub fn created(body: T) Self {
-            return .{ .status = .created, .body = body };
-        }
-
-        pub fn accepted(body: T) Self {
-            return .{ .status = .accepted, .body = body };
-        }
-
-        /// `204 No Content` — the payload is omitted even when `T` is not `void`.
-        pub fn noContent() Self {
-            return .{ .status = .noContent };
-        }
-
-        /// Explicit status with an optional payload.
-        pub fn of(status: Status, body: ?T) Self {
-            return .{ .status = status, .body = body };
-        }
     };
-}
-
-/// Convenience alias for handlers that never return a payload.
-pub const Empty = Schema(void);
-
-/// Accepts a `Status`, or a status decl literal such as `.created`.
-fn statusValue(value: anytype) Status {
-    if (@TypeOf(value) == Status) return value;
-    return statusByName(comptime @tagName(value));
-}
-
-fn statusByName(comptime name: []const u8) Status {
-    if (@hasDecl(Status, name)) return @field(Status, name);
-    @compileError("unknown status `." ++ name ++ "` in Schema.result");
-}
-
-/// Coerces `value` to `Dest`. An anonymous struct literal (`.{ .id = 1 }`) only
-/// coerces at its literal site, so the payload is rebuilt field by field here
-/// before it is stored in a `Schema(T)` result.
-fn coerceTo(comptime Dest: type, value: anytype) Dest {
-    const Src = @TypeOf(value);
-    if (Src == Dest) return value;
-    if (@typeInfo(Src) == .null) return null;
-    if (@typeInfo(Dest) == .optional) return coerceTo(@typeInfo(Dest).optional.child, value);
-    if (@typeInfo(Src) == .@"struct" and @typeInfo(Dest) == .@"struct") {
-        if (@typeInfo(Src).@"struct".is_tuple or @typeInfo(Dest).@"struct".is_tuple) return value;
-        return configCoerce.to(Dest, value);
-    }
-    return value;
 }
 
 /// Converts a comptime array of parameter literals into typed `Param` values
@@ -476,11 +419,11 @@ pub const Rest = struct {
         const HandlerInfo = comptime blk: {
             const retInfo = @typeInfo(ReturnType);
             if (retInfo != .error_union) {
-                @compileError("REST typed handlers must return !httpx.Schema(T)");
+                @compileError("REST typed handlers must return !httpx.Result(T)");
             }
             const payload = retInfo.error_union.payload;
             if (@typeInfo(payload) != .@"struct" or !@hasDecl(payload, "ResponseBody") or !@hasField(payload, "body")) {
-                @compileError("REST handler must return httpx.Schema(T)");
+                @compileError("REST handler must return httpx.Result(T)");
             }
             break :blk .{ .schema = payload, .body = payload.ResponseBody };
         };
@@ -699,17 +642,17 @@ test "endpoint options expose params, custom responses, request overrides, and i
     const CreateItem = struct { name: []const u8 };
 
     const Handlers = struct {
-        fn getItem(ctx: *Context) !Schema(Item) {
+        fn getItem(ctx: *Context) !Result(Item) {
             const id = ctx.paramUint("id") orelse 0;
-            return Schema(Item).ok(.{ .id = id, .name = "item" });
+            return .{ .body = .{ .id = id, .name = "item" } };
         }
 
-        fn createItem(_: *Context, req: CreateItem) !Schema(Item) {
-            return Schema(Item).created(.{ .id = 1, .name = req.name });
+        fn createItem(_: *Context, req: CreateItem) !Result(Item) {
+            return .{ .status = .created, .body = .{ .id = 1, .name = req.name } };
         }
 
-        fn ping(_: *Context) !Schema(void) {
-            return Schema(void).noContent();
+        fn ping(_: *Context) !Result(void) {
+            return .{ .status = .noContent };
         }
     };
 
@@ -753,7 +696,7 @@ test "endpoint options expose params, custom responses, request overrides, and i
     try testing.expect(std.mem.indexOf(u8, spec, "/internal/health") == null);
 }
 
-test "typed REST endpoint: JSON body, Schema result, OpenAPI, quoted identifiers" {
+test "typed REST endpoint: JSON body, Result, OpenAPI, quoted identifiers" {
     const testing = std.testing;
     const a = testing.allocator;
 
@@ -765,22 +708,22 @@ test "typed REST endpoint: JSON body, Schema result, OpenAPI, quoted identifiers
     const UserRes = struct { id: u64, @"full-name": []const u8, email: []const u8 };
 
     const Handlers = struct {
-        fn createUser(ctx: *Context, req: CreateUserReq) !Schema(UserRes) {
+        fn createUser(ctx: *Context, req: CreateUserReq) !Result(UserRes) {
             _ = ctx;
-            return Schema(UserRes).result(.{
+            return .{
                 .status = .created,
                 .body = .{ .id = 42, .@"full-name" = req.@"full-name", .email = req.email },
-            });
+            };
         }
 
-        fn getUser(ctx: *Context) !Schema(UserRes) {
+        fn getUser(ctx: *Context) !Result(UserRes) {
             _ = ctx;
-            return Schema(UserRes).ok(.{ .id = 42, .@"full-name" = "Test User", .email = "test@example.com" });
+            return .{ .body = .{ .id = 42, .@"full-name" = "Test User", .email = "test@example.com" } };
         }
 
-        fn deleteUser(ctx: *Context) !Schema(void) {
+        fn deleteUser(ctx: *Context) !Result(void) {
             _ = ctx;
-            return Schema(void).noContent();
+            return .{ .status = .noContent };
         }
     };
 
@@ -856,11 +799,11 @@ test "typed REST accepts dynamic JSON for arbitrary string keys" {
     var rest = Rest.init(testing.allocator, std.Io.Threaded.global_single_threaded.io(), &router);
 
     const Handlers = struct {
-        fn echo(ctx: *Context, req: std.json.Value) !Schema(std.json.Value) {
+        fn echo(ctx: *Context, req: std.json.Value) !Result(std.json.Value) {
             _ = ctx;
             // Keys are read exactly as received; no Zig identifier is required.
-            _ = req.object.get("user-name") orelse return Schema(std.json.Value).ok(req);
-            return Schema(std.json.Value).ok(req);
+            _ = req.object.get("user-name") orelse return .{ .body = req };
+            return .{ .body = req };
         }
     };
     try rest.post("/dynamic", .{ .handler = Handlers.echo });
@@ -923,8 +866,8 @@ test "dynamic JSON request and response types derive a free-form OpenAPI schema"
     var rest = Rest.init(testing.allocator, std.Io.Threaded.global_single_threaded.io(), &router);
 
     const Handlers = struct {
-        fn echo(_: *Context, req: std.json.Value) !Schema(std.json.Value) {
-            return Schema(std.json.Value).ok(req);
+        fn echo(_: *Context, req: std.json.Value) !Result(std.json.Value) {
+            return .{ .body = req };
         }
     };
     try rest.post("/dynamic-openapi", .{ .handler = Handlers.echo });
@@ -952,10 +895,10 @@ test "malformed JSON bodies produce a 400 JSON error envelope" {
 
     const OkBody = struct { ok: bool };
     const Handlers = struct {
-        fn create(ctx: *Context, req: struct { name: []const u8 }) !Schema(OkBody) {
+        fn create(ctx: *Context, req: struct { name: []const u8 }) !Result(OkBody) {
             _ = ctx;
             _ = req;
-            return Schema(OkBody).created(.{ .ok = true });
+            return .{ .status = .created, .body = .{ .ok = true } };
         }
     };
     try rest.post("/x", .{ .handler = Handlers.create });

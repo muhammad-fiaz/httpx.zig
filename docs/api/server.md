@@ -311,7 +311,7 @@ literal as the second.
 
 The handler's return type selects the mode automatically:
 
-- `!httpx.Schema(T)` → typed REST endpoint (JSON body decoding plus OpenAPI 3.1).
+- `!httpx.Result(T)` → typed REST endpoint (JSON body decoding plus OpenAPI 3.1).
 - `!httpx.router.Response` → raw `HandlerFn` route with the same metadata fields.
 
 | Method | Description |
@@ -392,22 +392,21 @@ out of the generated document while still serving them. Typed handlers decode
 JSON only, so `.request.content` must stay `.json`; setting `.request` on a
 handler without a request parameter is a compile error.
 
-#### Results: `Schema(T).result(.{ ... })`
+#### Results: return `httpx.Result(T)` as a struct literal
 
 ```zig
-fn createUser(ctx: *httpx.router.Context, req: CreateUser) !httpx.Schema(User) {
+fn createUser(ctx: *httpx.router.Context, req: CreateUser) !httpx.Result(User) {
     _ = ctx;
-    return httpx.Schema(User).result(.{
-        .status = .created,
-        .body = .{ .id = 101, .name = req.name },
-    });
+    return .{ .status = .created, .body = .{ .id = 101, .name = req.name } };
 }
 ```
 
-`result` accepts `.status`, `.body`, `.headers`, and `.mediaType`, all optional.
-Shorthands: `.ok(body)`, `.created(body)`, `.accepted(body)`, `.noContent()`,
-`.of(status, body)`. Use `httpx.Schema(void)` (or `httpx.Empty`) for bodiless
-responses.
+`Result(T)` is a struct with `.status` (default `.ok`), `.body`
+(default `null`), `.headers`, and `.mediaType` — all optional
+fields, so bare `.{ .body = user }` is a complete 200 response.
+For bodiless responses use `!httpx.Result(void)` and `.status =
+.noContent`; for arbitrary statuses use `.status =
+httpx.Status.fromCode(422)`.
 
 #### JSON media types
 
@@ -442,7 +441,7 @@ const User = struct {
 };
 
 try server.post("/users", .{
-    .handler = createUser, // fn (ctx, CreateUser) !httpx.Schema(User)
+    .handler = createUser, // fn (ctx, CreateUser) !httpx.Result(User)
 });
 ```
 

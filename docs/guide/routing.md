@@ -181,7 +181,7 @@ Shared across code-based routing, file-based routing, and website serving.
 ## Typed REST Endpoints with `Server`
 
 `httpx.Server` registers routes with the path first and an optional `.{}` options
-literal second. Typed handlers return `httpx.Schema(T)`; raw handlers return
+literal second. Typed handlers return `httpx.Result(T)`; raw handlers return
 `httpx.router.Response` and use the same verbs and metadata fields:
 
 ```zig
@@ -201,7 +201,7 @@ server.run();
 ```
 
 Handler signatures are `(*Context)` or `(*Context, RequestType)`, returning
-`!httpx.Schema(T)`:
+`!httpx.Result(T)` — a plain struct literal, no constructor:
 
 ```zig
 const User = struct {
@@ -210,24 +210,25 @@ const User = struct {
     @"@context": []const u8,
 };
 
-fn getUser(ctx: *httpx.router.Context) !httpx.Schema(User) {
+fn getUser(ctx: *httpx.router.Context) !httpx.Result(User) {
     const id = ctx.paramUint("id") orelse return error.BadRequest;
-    return httpx.Schema(User).ok(.{
+    return .{ .body = .{
         .id = id,
         .@"user-name" = "alice",
         .@"@context" = "https://schema.org",
-    });
+    } };
 }
 
-fn createUser(_: *httpx.router.Context, body: CreateUserRequest) !httpx.Schema(User) {
-    return httpx.Schema(User).result(.{
-        .status = .created,
-        .body = .{
-            .id = 101,
-            .@"user-name" = body.name,
-            .@"@context" = "https://schema.org",
-        },
-    });
+fn createUser(_: *httpx.router.Context, body: CreateUserRequest) !httpx.Result(User) {
+    return .{ .status = .created, .body = .{
+        .id = 101,
+        .@"user-name" = body.name,
+        .@"@context" = "https://schema.org",
+    } };
+}
+
+fn deleteUser(_: *httpx.router.Context) !httpx.Result(void) {
+    return .{ .status = .noContent };
 }
 ```
 
