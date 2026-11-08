@@ -1,4 +1,4 @@
-# Example: Retry Demo
+# Example: Retry
 
 Demonstrates retryDemo.zig using the canonical HTTPX API.
 

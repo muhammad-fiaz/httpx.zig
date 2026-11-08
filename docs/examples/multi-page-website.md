@@ -32,7 +32,6 @@ When run via the static-site target, the output follows that program's print for
 Static site server listening on http://127.0.0.1:54321
 GET / -> Status: 200, Length: 1024
 Mounted Site Title: 'Example Site'
-Static site verification successful.
 ```
 
 The port number, content length, and page title vary with the served directory contents.
@@ -43,8 +42,3 @@ The port number, content length, and page title vary with the served directory c
 zig build run-static-site
 zig build run-website
 ```
-
-## What to Verify
-
-- `/` and `/about` return 200 with HTML bodies.
-- Static assets resolve with correct content types.

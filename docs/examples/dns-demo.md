@@ -1,4 +1,4 @@
-# Example: DNS Demo
+# Example: DNS
 
 Demonstrates advanced client DNS capabilities including dual-stack resolution, address family filtering (`.family = .ipv4`), and URL-based resolution.
 

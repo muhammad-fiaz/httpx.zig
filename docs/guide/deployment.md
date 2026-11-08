@@ -35,7 +35,7 @@ HTTPX is built on standards-based TCP/UDP, TLS, and HTTP abstractions. It runs i
       │ HTTPS (Port 8443 or Port 443 with bind capabilities)
       ▼
 ┌───────────────────────┐
-│ HTTPX (httpx.tls.Listener) │ ── Native Zig TLS 1.3 engine (+ std.crypto.tls HTTPS client)
+│ HTTPX (httpx.Server) │ ── Native Zig TLS 1.3 engine (+ std.crypto.tls HTTPS client)
 └───────────────────────┘
 ```
 

@@ -51,8 +51,6 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, a, "--fs")) useFs = true;
     }
 
-    std.debug.print("==> HTTPX website demo ({s} mode)\n", .{if (useFs) "filesystem" else "embedded"});
-
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
@@ -130,7 +128,6 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(userUrl);
     std.debug.print("nav home={s} user={s}\n", .{ homeUrl, userUrl });
 
-    std.debug.print("website verification successful.\n", .{});
     server.stop();
 
     if (!useFs) httpx.assets.globalStore(allocator).deinit();

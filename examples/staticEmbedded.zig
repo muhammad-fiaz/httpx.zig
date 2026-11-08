@@ -25,8 +25,6 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    std.debug.print("==> HTTPX Single-File Embedded Server Demo\n\n", .{});
-
     // 1. Register embedded assets (logical web paths, served from memory).
     try httpx.assets.registerEmbedded(allocator, "index.html", indexHtml, null);
     try httpx.assets.registerEmbedded(allocator, "styles.css", stylesCss, null);
@@ -78,7 +76,6 @@ pub fn main() !void {
     defer res2.deinit();
     std.debug.print("GET /hello -> Status: {d}, Body: {s}\n", .{ res2.status, res2.body });
 
-    std.debug.print("\nSingle-file embedded verification successful.\n", .{});
     server.stop();
 
     // Release global registry keys/etags owned by the debug allocator.

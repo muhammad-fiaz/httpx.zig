@@ -24,9 +24,3 @@ Encoded size follows QUIC varint rules for the input value (1337 encodes in 2 by
 ```bash
 zig build run-http3-client
 ```
-
-## What to Verify
-
-- Varint round trip produces the original numeric value.
-- Encoded size follows QUIC varint rules.
-- Control-stream SETTINGS exchange validates.

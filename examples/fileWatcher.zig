@@ -24,14 +24,9 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    std.debug.print("==> HTTPX Filesystem Watcher Demo\n\n", .{});
-
     const watchTarget = "watcher_demo_asset.txt";
-    try httpx.static.files.writeFile(watchTarget, "Version 1");
-    defer {
-        const cwd = std.Io.Dir.cwd();
-        cwd.deleteFile(io, watchTarget) catch {};
-    }
+    try httpx.fs.writeFile(watchTarget, "Version 1");
+    defer httpx.fs.deleteFile(watchTarget) catch {};
 
     var watcher = try httpx.Watcher.init(allocator, io, .{
         .dirPath = ".",
@@ -65,6 +60,4 @@ pub fn main() !void {
 
     const changes = watcher.changeCount();
     std.debug.print("Total changes captured: {d} (dequeued: {d})\n", .{ changes, eventCount });
-
-    std.debug.print("\nFile Watcher verification successful.\n", .{});
 }

@@ -417,15 +417,15 @@ fn buildLargeHtmlDoc(allocator: std.mem.Allocator, cards: usize) ![]u8 {
 }
 
 fn benchHtmlParse() void {
-    var arena = std.heap.ArenaAllocator.init(benchAllocator);
-    defer arena.deinit();
-    _ = httpx.parsing.html.parse(arena.allocator(), sampleHtmlDoc, .{}) catch return;
+    var doc = httpx.parsing.init(benchAllocator, std.Io.Threaded.global_single_threaded.io(), .{}).parseHtml(sampleHtmlDoc) catch return;
+    defer doc.deinit();
+    std.mem.doNotOptimizeAway(doc.source.len);
 }
 
 fn benchHtmlParseLarge() void {
-    var arena = std.heap.ArenaAllocator.init(benchAllocator);
-    defer arena.deinit();
-    _ = httpx.parsing.html.parse(arena.allocator(), sampleHtmlLargeDoc, .{}) catch return;
+    var doc = httpx.parsing.init(benchAllocator, std.Io.Threaded.global_single_threaded.io(), .{}).parseHtml(sampleHtmlLargeDoc) catch return;
+    defer doc.deinit();
+    std.mem.doNotOptimizeAway(doc.source.len);
 }
 
 const sampleTemplateSrc = "<h1>{{ title }}</h1>{% for item in items %}<p>{{ item }}</p>{% endfor %}";
@@ -452,7 +452,10 @@ fn benchTemplateRender() void {
 }
 
 fn benchTemplateIncremental() void {
-    _ = httpx.parsing.html.changedRanges(benchAllocator, sampleHtmlDoc, sampleHtmlDoc) catch return;
+    var doc = httpx.parsing.init(benchAllocator, std.Io.Threaded.global_single_threaded.io(), .{}).parseHtml(sampleHtmlDoc) catch return;
+    defer doc.deinit();
+    const changed = doc.incrementalUpdate(sampleHtmlDoc) catch return;
+    std.mem.doNotOptimizeAway(changed);
 }
 
 const sampleJsonFeed =
@@ -469,7 +472,7 @@ const sampleJsonFeed =
 ;
 
 fn benchJsonFeedParse() void {
-    var feed = httpx.parsing.feed.parse(benchAllocator, sampleJsonFeed, "application/feed+json") catch return;
+    var feed = httpx.parsing.init(benchAllocator, std.Io.Threaded.global_single_threaded.io(), .{}).parseFeed(sampleJsonFeed, "application/feed+json") catch return;
     defer feed.deinit();
     std.mem.doNotOptimizeAway(feed.entries.len);
 }

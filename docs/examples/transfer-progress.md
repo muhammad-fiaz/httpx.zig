@@ -44,8 +44,3 @@ Percentages, byte counts, speeds, and ETAs vary continuously during the transfer
 ```bash
 zig build run-download-custom-progress
 ```
-
-## What to Verify
-
-- Progress callbacks fire with sane percentages and speeds.
-- Cancellation via `cancel` aborts the transfer.

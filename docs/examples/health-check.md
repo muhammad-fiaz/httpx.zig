@@ -5,30 +5,19 @@ Demonstrates healthCheck.zig using the canonical HTTPX API.
 ## Complete Example
 
 ```zig
-//! Health, readiness, and metrics endpoints.
+//! Health endpoints: liveness and readiness as data, not strings.
 //!
 //! Run with: `zig build run-health-check`
-//!
-//! Demonstrates the health check helpers, custom metrics, and a
-//! readiness probe that gates traffic.
 
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn healthzHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
-    return .{
-        .status = httpx.health.Status.healthy.httpStatus(),
-        .body = httpx.health.Status.healthy.jsonBody(),
-        .contentType = "application/json",
-    };
+fn health(_: *httpx.router.Context) anyerror!httpx.router.Response {
+    return .{ .status = 200, .body = "{\"status\":\"healthy\"}", .contentType = "application/json" };
 }
 
-fn readyzHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
-    return .{
-        .status = httpx.health.Status.ready.httpStatus(),
-        .body = httpx.health.Status.ready.jsonBody(),
-        .contentType = "application/json",
-    };
+fn ready(_: *httpx.router.Context) anyerror!httpx.router.Response {
+    return .{ .status = 200, .body = "{\"status\":\"ready\"}", .contentType = "application/json" };
 }
 
 pub fn main() !void {
@@ -45,37 +34,30 @@ pub fn main() !void {
     });
     defer server.deinit();
 
-    try server.router.add(.GET, "/healthz", &healthzHandler, .{});
-    try server.router.add(.GET, "/readyz", &readyzHandler, .{});
+    try server.get("/health", .{ .handler = health });
+    try server.get("/ready", .{ .handler = ready });
 
     const port = server.localPort();
     std.debug.print("endpoints on 127.0.0.1:{d}\n", .{port});
 
-    const ServerThread = struct {
-        fn run(s: *httpx.Server) void {
-            s.run();
-        }
-    };
-    const t = try std.Thread.spawn(.{}, ServerThread.run, .{&server});
-
-    var spin: usize = 0;
-    while (spin < 1000) : (spin += 1) std.Thread.yield() catch {};
+    const t = try server.start();
 
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    const healthUrl = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/healthz", .{port});
+    const healthUrl = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/health", .{port});
     defer allocator.free(healthUrl);
     var healthRes = try client.get(healthUrl, .{});
     defer healthRes.deinit();
-    std.debug.print("GET /healthz -> {d} {s}\n", .{ healthRes.status, healthRes.body });
+    std.debug.print("GET /health -> {d} {s}\n", .{ healthRes.status, healthRes.body });
 
-    const readyUrl = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/readyz", .{port});
+    const readyUrl = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/ready", .{port});
     defer allocator.free(readyUrl);
     var readyRes = try client.get(readyUrl, .{});
     defer readyRes.deinit();
-    std.debug.print("GET /readyz -> {d} {s}\n", .{ readyRes.status, readyRes.body });
+    std.debug.print("GET /ready -> {d} {s}\n", .{ readyRes.status, readyRes.body });
 
+    server.requestShutdown();
     t.join();
 }
 ```
@@ -84,8 +66,8 @@ pub fn main() !void {
 
 ```text
 endpoints on 127.0.0.1:54321
-GET /healthz -> 200 {"status":"healthy"}
-GET /readyz -> 200 {"status":"ready"}
+GET /health -> 200 {"status":"healthy"}
+GET /ready -> 200 {"status":"ready"}
 ```
 
 The port is ephemeral and varies on every run; only the line format above is stable.

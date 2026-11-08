@@ -2,7 +2,7 @@
 
 Read the buffered response body incrementally through `Response.reader()`.
 
-## Demo Program
+## Example
 
 ```zig
 const std = @import("std");
@@ -51,8 +51,3 @@ The byte count reflects the requested `/bytes/4096` payload and varies with the 
 ```bash
 zig build run-streaming
 ```
-
-## What to Verify
-
-- The buffered body can be read incrementally through `Response.reader()`.
-- Total byte count matches the requested payload size.

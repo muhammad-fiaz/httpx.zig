@@ -39,8 +39,3 @@ The status code and body length depend on the remote server's response; on proxy
 ```bash
 zig build run-proxy-demo
 ```
-
-## What to Verify
-
-- Requests route through the configured proxy.
-- SOCKS5h delegates DNS to the proxy side.

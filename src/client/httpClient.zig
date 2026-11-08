@@ -427,7 +427,7 @@ pub const DocumentApi = struct {
         const client: *Client = @fieldParentPtr("document", self);
         var res = try fetchForParsing(client, url, opts);
         defer res.deinit();
-        return @import("../parsing/document.zig").Document.parse(client.allocator, res.header("content-type"), res.body);
+        return @import("../parsing/document.zig").Parser.init(client.allocator, client.io, .{}).parse(res.body, res.header("content-type"));
     }
 };
 
@@ -438,7 +438,7 @@ pub const HtmlApi = struct {
         const client: *Client = @fieldParentPtr("html", self);
         var res = try fetchForParsing(client, url, opts);
         defer res.deinit();
-        return @import("../parsing/document.zig").Document.parseHtml(client.allocator, res.body);
+        return @import("../parsing/document.zig").Parser.init(client.allocator, client.io, .{}).parseHtml(res.body);
     }
 };
 
@@ -449,7 +449,7 @@ pub const XmlApi = struct {
         const client: *Client = @fieldParentPtr("xml", self);
         var res = try fetchForParsing(client, url, opts);
         defer res.deinit();
-        return @import("../parsing/document.zig").Document.parseXml(client.allocator, res.body);
+        return @import("../parsing/document.zig").Parser.init(client.allocator, client.io, .{}).parseXml(res.body);
     }
 };
 
@@ -685,13 +685,6 @@ pub const Client = struct {
     pub fn lookupFileInfo(self: *Client, url: []const u8, opts: anytype) DownloadError!RemoteFileInfo {
         const downloadOptions = coerceDownloadOptions(opts);
         return DownloadCore.lookupFileInfo(self, url, downloadOptions);
-    }
-
-    /// Returns a Parser bound to this Client's allocator.
-    pub fn parser(self: *Client, opts: anytype) @import("../parsing/document.zig").Parser {
-        const cfg: @import("../parsing/document.zig").ParserConfig =
-            if (@TypeOf(opts) == @import("../parsing/document.zig").ParserConfig) opts else .{};
-        return @import("../parsing/document.zig").Parser.init(self.allocator, cfg);
     }
 
     /// Executes a GraphQL query or mutation against a remote endpoint.

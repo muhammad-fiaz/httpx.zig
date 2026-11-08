@@ -1,9 +1,4 @@
-//! Example: HTML Client Fetching and Document Parsing
-//!
-//! Demonstrates:
-//! 1. Making an HTTP GET request to `httpbun.com/html`
-//! 2. Automatic parsing via `response.html()`
-//! 3. Extracting title, text, links, and inspecting DOM nodes
+//! Fetching HTML and parsing it with the unified parsing API.
 //!
 //! Run with: `zig build run-html-client`
 
@@ -19,7 +14,7 @@ fn htmlHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
         \\<head><title>Httpx HTML Client Test</title></head>
         \\<body>
         \\  <h1>Welcome to Local HTML Test</h1>
-        \\  <p>Testing response.html() parsing end-to-end.</p>
+        \\  <p>Testing parsing end-to-end.</p>
         \\  <a href="/about">About Us</a>
         \\  <a href="/docs">Documentation</a>
         \\</body>
@@ -35,19 +30,20 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    std.debug.print("==> HTTPX HTML Client Demo (local loopback)\n\n", .{});
-
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
-        .maxConnections = 1,
+        .maxConnections = 2,
     });
     defer server.deinit();
-    try server.router.add(.GET, "/html", htmlHandler, .{});
+    try server.get("/html", .{ .handler = htmlHandler });
     const port = server.localPort();
     const thread = try server.start();
-    defer thread.join();
+    defer {
+        server.requestShutdown();
+        thread.join();
+    }
 
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
@@ -63,7 +59,7 @@ pub fn main() !void {
     std.debug.print("Content-Type: {s}\n\n", .{response.contentType()});
 
     // Parse HTML directly from response
-    var doc = try response.html();
+    var doc = try httpx.parsing.init(allocator, io, .{}).parseHtml(response.body);
     defer doc.deinit();
 
     const title = try doc.title();
@@ -74,10 +70,8 @@ pub fn main() !void {
 
     // Inspect Links
     const links = try doc.links();
-    std.debug.print("Links Found ({d}):\n", .{links.len});
+    std.debug.print("Links ({d}):\n", .{links.len});
     for (links) |link| {
         std.debug.print("  - href: {s}, text: '{s}'\n", .{ link.href, link.text });
     }
-
-    std.debug.print("\nHTML Client verification successful.\n", .{});
 }

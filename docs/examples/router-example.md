@@ -50,8 +50,3 @@ Statuses, bodies, and ids vary with the request path and handler logic.
 ```bash
 zig build run-custom-server
 ```
-
-## What to Verify
-
-- `GET /users/42` returns `id=42`.
-- `POST /users` returns `201 created`.

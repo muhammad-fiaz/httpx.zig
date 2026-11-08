@@ -62,8 +62,3 @@ Status codes are fixed per scenario (404/500/401/200); payload values reflect th
 ```bash
 zig build run-auth-and-errors
 ```
-
-## What to Verify
-
-- Missing bearer token returns 401; valid token returns 200.
-- Basic auth round-trips through `ctx.basicAuth()`.

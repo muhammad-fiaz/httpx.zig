@@ -1,8 +1,8 @@
 # TLS Server Example
 
-Demonstrates the custom TLS server implementation built from scratch. Shows TLS configuration with ECDSA certificate/key PEM files, ALPN negotiation, HTTP/1.1 and HTTP/2 over TLS, and TLS client handshake with HTTP request/response.
+Demonstrates a TLS server using ECDSA certificate/key PEM files, served through the direct `httpx.Server` API with the TLS identity passed in the `.tls` config.
 
-## Features Demonstrated
+## Covers
 
 - TLS server with ECDSA P-256 certificates (custom implementation)
 - ALPN negotiation for protocol selection (h2 or http/1.1 over TLS)
@@ -10,7 +10,7 @@ Demonstrates the custom TLS server implementation built from scratch. Shows TLS 
 - HTTP request/response over TLS 1.3
 - HTTP/2 ALPN detection
 
-## Demo Program
+## Example
 
 ```zig
 const std = @import("std");
@@ -27,48 +27,33 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    // Start a local TLS listener with a self-signed identity.
-    // (See examples/tlsServer.zig for the runnable version.)
-    var tlsListener = try httpx.tls.Listener.init(allocator, io, .{
+    // Start an HTTPS server with a self-signed identity.
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .defaultIdentity = .{
-            .certChainPem = @embedFile("cert.pem"),
+        .enableDocs = false,
+        .tls = .{
+            .certificatePem = @embedFile("cert.pem"),
             .privateKeyPem = @embedFile("key.pem"),
         },
     });
-    defer tlsListener.deinit();
+    defer server.deinit();
+    try server.get("/", .{ .handler = helloHandler });
 
-    const port = tlsListener.localPort();
-    std.debug.print("TLS server running on 127.0.0.1:{d}\n", .{port});
-    std.debug.print("TLS listener initialized successfully on port {d}.\n", .{port});
-    std.debug.print("TLS server configuration verified.\n", .{});
+    const port = server.localPort();
 }
 ```
 
 ## Expected Output
 
 ```text
-TLS server running on 127.0.0.1:54321
-TLS listener initialized successfully on port 54321.
-TLS server configuration verified.
+GET / -> 200 Hello from TLS server!
 ```
 
-The ephemeral loopback port varies per run; certificate material and handshake details vary by deployment. Loopback only with a self-signed identity, no external service required. The `helloHandler` serves `Hello from TLS server!` with status 200 when the listener runs.
+The ephemeral loopback port varies per run; certificate material and handshake details vary by deployment. Loopback only with a self-signed identity, no external service required.
 
 ## Run
 
 ```bash
 zig build run-tls-server
 ```
-
-## Checklist
-
-- [x] Server starts with TLS enabled using ECDSA P-256 certificates
-- [x] Certificate and key PEM files are loaded
-- [x] TLS handshake completes successfully (TLS 1.3)
-- [x] ALPN negotiates h2 or http/1.1
-- [x] HTTP/2 is detected via ALPN
-- [x] HTTP request over TLS returns 200 OK
-- [x] Uses TLS 1.3 cipher suites on the native server path
-- [x] Record-level fragmentation works correctly

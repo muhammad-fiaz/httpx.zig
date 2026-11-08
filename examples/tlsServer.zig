@@ -60,25 +60,41 @@ pub fn main() !void {
         \\-----END PRIVATE KEY-----
     ;
 
-    var tlsListener = try httpx.tls.Listener.init(allocator, io, .{
+    var server = try httpx.Server.init(allocator, io, .{
+        .host = "127.0.0.1",
         .port = 0,
-        .defaultIdentity = .{
-            .certChainPem = cert,
+        .enableDocs = false,
+        .maxConnections = 2,
+        .tls = .{
+            .certificatePem = cert,
             .privateKeyPem = key,
         },
     });
-    defer tlsListener.deinit();
+    defer server.deinit();
 
-    const port = tlsListener.localPort();
-    std.debug.print("TLS server running on 127.0.0.1:{d}\n", .{port});
+    try server.get("/", .{ .handler = handler });
 
-    std.debug.print("TLS listener initialized successfully on port {d}.\n", .{port});
-    std.debug.print("TLS server configuration verified.\n", .{});
+    const port = server.localPort();
+    const thread = try server.start();
+    defer {
+        server.requestShutdown();
+        thread.join();
+    }
+
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
+
+    var urlBuf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&urlBuf, "https://127.0.0.1:{d}/", .{port});
+    var res = try client.get(url, .{ .tls = .{ .verify = .none, .allowTruncation = true }, .timeoutMs = 15_000 });
+    defer res.deinit();
+    std.debug.print("GET / -> {d} {s}\n", .{ res.status, res.body });
 }
 
-fn handler(_: httpx.tls.Request) anyerror!httpx.tls.Response {
+fn handler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "Hello from TLS server!",
+        .contentType = "text/plain; charset=utf-8",
     };
 }

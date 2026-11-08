@@ -37,8 +37,3 @@ The values reflect the recorded traffic (2 requests, one 200 and one 500 in the 
 ```bash
 zig build run-metrics-server
 ```
-
-## What to Verify
-
-- Counters, status classes, and latency samples accumulate.
-- `/metrics` renders Prometheus text with the live values.

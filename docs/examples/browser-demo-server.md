@@ -1,4 +1,4 @@
-# Example: Browser Demo Server
+# Example: Browser Server
 
 Demonstrates browserDemoServer.zig using the canonical HTTPX API.
 
@@ -15,7 +15,7 @@ const htmlV1 =
     \\<html lang="en">
     \\<head>
     \\  <meta charset="UTF-8">
-    \\  <title>httpx.zig Live Demo</title>
+    \\  <title>httpx.zig</title>
     \\  <style>
     \\    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0b0f19; color: #f1f5f9; padding: 2rem; margin: 0; }
     \\    .card { max-width: 650px; margin: 2rem auto; background: #1e293b; border-radius: 16px; padding: 2.5rem; box-shadow: 0 10px 25px rgba(0,0,0,0.5); border: 1px solid #334155; }
@@ -64,7 +64,7 @@ const htmlV2 =
     \\<html lang="en">
     \\<head>
     \\  <meta charset="UTF-8">
-    \\  <title>httpx.zig Live Demo (Hot-Reloaded)</title>
+    \\  <title>httpx.zig (Hot-Reloaded)</title>
     \\  <style>
     \\    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0b0f19; color: #f1f5f9; padding: 2rem; margin: 0; }
     \\    .card { max-width: 650px; margin: 2rem auto; background: #1e293b; border-radius: 16px; padding: 2.5rem; box-shadow: 0 10px 25px rgba(0,0,0,0.5); border: 2px solid #22c55e; }
@@ -161,7 +161,7 @@ pub fn main() !void {
     try server.post("/api/trigger-reload", triggerReloadHandler);
 
     const port = server.localPort();
-    std.debug.print("Demo server listening on http://127.0.0.1:{d}\n", .{port});
+    std.debug.print("Listening on http://127.0.0.1:{d}\n", .{port});
 
     const ServerThread = struct {
         fn run(s: *httpx.Server) void {
@@ -198,7 +198,7 @@ pub fn main() !void {
 ## Expected Output
 
 ```text
-Demo server listening on http://127.0.0.1:54321
+Listening on http://127.0.0.1:54321
 GET /api/status -> status=200, body={"status":"online","engine":"httpx.zig","protocols":["HTTP/1.1","HTTP/2","HTTP/3","QUIC","TLS 1.2","TLS 1.3"],"version":"1.0.0","uptimeMs":42000,"hotReloadActive":true}
 POST /api/trigger-reload -> status=200
 GET /api/status (reloaded) -> status=200, body={"status":"online","engine":"httpx.zig","protocols":["HTTP/1.1","HTTP/2","HTTP/3","QUIC","TLS 1.2","TLS 1.3"],"version":"2.0.0-reloaded","uptimeMs":42000,"hotReloadActive":true}

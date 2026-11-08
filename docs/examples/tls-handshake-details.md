@@ -2,7 +2,7 @@
 
 Demonstrates TLS handshake with detailed information about negotiated protocol, cipher suites, and key exchange groups.
 
-## Features Demonstrated
+## Covers
 
 - TLS handshake execution
 - Protocol negotiation over TLS (HTTP/1.1 or HTTP/2)
@@ -10,7 +10,7 @@ Demonstrates TLS handshake with detailed information about negotiated protocol, 
 - Key exchange group details
 - HTTP/2 detection via `isHttp2()`
 
-## Demo Program
+## Example
 
 ```zig
 const std = @import("std");
@@ -27,17 +27,19 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    // Start a local TLS listener with a self-signed identity.
-    var listener = try httpx.tls.Listener.init(allocator, io, .{
+    // Start an HTTPS server with a self-signed identity.
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .defaultIdentity = .{
-            .certChainPem = @embedFile("cert.pem"),
+        .enableDocs = false,
+        .tls = .{
+            .certificatePem = @embedFile("cert.pem"),
             .privateKeyPem = @embedFile("key.pem"),
         },
     });
-    defer listener.deinit();
-    const port = listener.localPort();
+    defer server.deinit();
+    try server.get("/", .{ .handler = handler });
+    const port = server.localPort();
     std.debug.print("TLS listening on {d} (TLS 1.3, ALPN h2 + http/1.1)\n", .{port});
 }
 ```

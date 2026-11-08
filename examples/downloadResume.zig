@@ -35,7 +35,6 @@ pub fn main() !void {
 
     var urlBuf: [64]u8 = undefined;
     const sampleUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/sample-local-pdf.pdf", .{port});
-    std.debug.print("==> Downloading {s} with Range resume policy (.resumePartial)...\n", .{sampleUrl});
 
     // Uses .resumePartial (short canonical resume policy)
     const result = client.download(

@@ -37,8 +37,3 @@ On failure it prints `Proxy request failed: <ErrorName>`. Statuses, lengths, and
 ```bash
 zig build run-proxy-demo
 ```
-
-## What to Verify
-
-- Requests route through the configured proxy.
-- SOCKS5h performs DNS resolution on the proxy side (remote DNS).

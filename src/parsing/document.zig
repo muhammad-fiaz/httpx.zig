@@ -395,33 +395,19 @@ pub const Document = struct {
         self.source = newSource;
         return changed;
     }
-
-    /// Convenience static constructors matching `Document.parseHtml(...)`
-    pub fn parseHtml(allocator: Allocator, htmlSource: []const u8) !Document {
-        const p = Parser.init(allocator, .{});
-        return p.parseHtml(htmlSource);
-    }
-
-    pub fn parseXml(allocator: Allocator, xmlSource: []const u8) !Document {
-        const p = Parser.init(allocator, .{});
-        return p.parseXml(xmlSource);
-    }
-
-    pub fn parse(allocator: Allocator, contentType: ?[]const u8, source: []const u8) !Document {
-        const p = Parser.init(allocator, .{});
-        return p.parse(source, contentType);
-    }
 };
 
 pub const Parser = struct {
     allocator: Allocator,
+    io: std.Io,
     config: ParserConfig,
 
     /// Creates a stateless parser. The parser itself allocates nothing;
     /// returned documents own an arena backed by `allocator`.
-    pub fn init(allocator: Allocator, cfg_in: anytype) Parser {
+    pub fn init(allocator: Allocator, io: std.Io, cfg_in: anytype) Parser {
         return .{
             .allocator = allocator,
+            .io = io,
             .config = configCoerce.to(ParserConfig, cfg_in),
         };
     }
@@ -526,7 +512,8 @@ test "edit vocabulary tracks points across replacement" {
 
 test "incremental update reparses and reports changed ranges" {
     const a = std.testing.allocator;
-    var doc = try Parser.init(a, .{}).parseHtml("<p>one</p>");
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var doc = try Parser.init(a, io, .{}).parseHtml("<p>one</p>");
     defer doc.deinit();
     const changed = try doc.incrementalUpdate("<p>one</p><p>two</p>");
     try std.testing.expect(changed > 0);
@@ -537,6 +524,7 @@ test "incremental update reparses and reports changed ranges" {
 
 test "document regex text search and link extraction" {
     const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
     const htmlSnippet =
         \\<html>
         \\<head><title>Test Page</title></head>
@@ -549,7 +537,7 @@ test "document regex text search and link extraction" {
         \\</html>
     ;
 
-    var doc = try Parser.init(a, .{}).parseHtml(htmlSnippet);
+    var doc = try Parser.init(a, io, .{}).parseHtml(htmlSnippet);
     defer doc.deinit();
 
     // Regex text matching

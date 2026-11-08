@@ -34,8 +34,3 @@ This snippet produces no printed output; frame header lengths and accept bytes v
 ```bash
 zig build run-websocket-server
 ```
-
-## What to Verify
-
-- The browser client page returns 200.
-- Handshake accept keys match the RFC 6455 test vector.

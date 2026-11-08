@@ -66,8 +66,3 @@ Part names, content types, and data sizes reflect the fields added to the form; 
 ```bash
 zig build run-multipart
 ```
-
-## What to Verify
-
-- POST returns 200 with a `multipart/form-data; boundary=...` content type.
-- Parsed parts round-trip name, content type, and data.

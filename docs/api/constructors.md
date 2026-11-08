@@ -23,7 +23,7 @@ defer server.deinit();
 |---|---|---|
 | HTTP client | `httpx.Client.init(allocator, io, options)` | `httpx.Client.init(allocator, io, .{})` |
 | HTTP server | `httpx.Server.init(allocator, io, options)` | `httpx.Server.init(allocator, io, .{})` |
-| Document parser | `httpx.parsing.init(allocator, options)` | `httpx.parsing.init(allocator, .{})` |
+| Document parser | `httpx.parsing.init(allocator, io, options)` | `httpx.parsing.init(allocator, io, .{})` |
 | Connection pool | `httpx.client.pool.init(allocator, io, options)` | `...init(allocator, io, .{})` |
 | Cookie jar | `httpx.client.jar.init(allocator, io)` | no options |
 | Worker pool | `httpx.concurrency.Pool.init(allocator, io, options)` | pass the pool config |

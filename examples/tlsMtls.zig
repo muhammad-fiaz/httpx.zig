@@ -30,12 +30,8 @@ const keyPem =
     \\-----END PRIVATE KEY-----
 ;
 
-fn handler(_: httpx.tls.Request) anyerror!httpx.tls.Response {
-    return .{ .status = 200, .body = "mutual-hello" };
-}
-
-fn runServer(listener: *httpx.tls.Listener) void {
-    listener.run(handler) catch |err| std.debug.print("server error: {s}\n", .{@errorName(err)});
+fn handler(_: *httpx.router.Context) anyerror!httpx.router.Response {
+    return .{ .status = 200, .body = "mutual-hello", .contentType = "text/plain; charset=utf-8" };
 }
 
 pub fn main() !void {
@@ -44,17 +40,28 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var listener = try httpx.tls.Listener.init(allocator, io, .{
+    var server = try httpx.Server.init(allocator, io, .{
+        .host = "127.0.0.1",
         .port = 0,
-        .defaultIdentity = .{ .certChainPem = certPem, .privateKeyPem = keyPem },
-        .clientAuth = .required,
-        .clientCaPem = certPem,
+        .enableDocs = false,
+        .maxConnections = 2,
+        .tls = .{
+            .certificatePem = certPem,
+            .privateKeyPem = keyPem,
+            .clientAuth = .required,
+            .clientCaPem = certPem,
+        },
     });
-    defer listener.deinit();
-    const port = listener.localPort();
-    const th = try std.Thread.spawn(.{}, runServer, .{&listener});
-    defer th.join();
-    defer listener.stop();
+    defer server.deinit();
+
+    try server.get("/", .{ .handler = handler });
+
+    const port = server.localPort();
+    const thread = try server.start();
+    defer {
+        server.requestShutdown();
+        thread.join();
+    }
 
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
@@ -93,6 +100,4 @@ pub fn main() !void {
             std.debug.print("mTLS enforcement: empty-cert client rejected\n", .{});
         }
     }
-
-    std.debug.print("MTLS DEMO VERIFICATION PASSED\n", .{});
 }

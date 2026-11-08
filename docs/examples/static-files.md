@@ -4,7 +4,7 @@ Serve a directory with automatic MIME type resolution (`httpx.mime.fromPath`),
 ETag / `If-None-Match` conditional requests, range requests, and index
 resolution. See `examples/staticFiles.zig`.
 
-## Demo Program
+## Example
 
 ```zig
 const std = @import("std");
@@ -64,12 +64,3 @@ The port is the ephemeral port selected at runtime; the status code and byte cou
 ```bash
 zig build run-static-files
 ```
-
-## What to Verify
-
-- HTML file is served from disk with the `Content-Type` matching its extension.
-- `ETag` is emitted and `If-None-Match` can return `304 Not Modified`.
-- Directories resolve to `index.html`; `..` traversal is rejected with `403`.
-- Single-file deployments register the same paths with
-  `httpx.assets.registerEmbedded` and serve them from memory (see
-  `zig build run-static-embedded`).

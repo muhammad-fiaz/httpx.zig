@@ -306,7 +306,7 @@ For complete copy/paste demos, see these example pages:
 - [Custom Headers](/examples/custom-headers)
 - [Concurrent Requests](/examples/concurrent-requests)
 - [Connection Pool](/examples/connection-pool)
-- [Cookies Demo](/examples/cookies-demo)
+- [Cookies](/examples/cookies-demo)
 - [HTTP Auth Helpers](/examples/http-auth-helpers)
 - [Simplified API Aliases](/examples/simplified-api-aliases)
 

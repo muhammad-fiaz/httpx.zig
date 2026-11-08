@@ -30,9 +30,3 @@ On failure it prints `Attempt 1 failed: <ErrorName>` per attempt and finally `Al
 ```bash
 zig build run-retry-demo
 ```
-
-## Checklist
-
-- [x] Retryable statuses trigger another attempt
-- [x] Delay grows linearly per attempt
-- [x] Non-retryable errors return immediately

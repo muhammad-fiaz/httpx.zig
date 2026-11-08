@@ -31,6 +31,22 @@
 > [!TIP]
 > If you build with httpx.zig, make sure to give it a star ⭐.
 
+<details>
+<summary><strong>Table of Contents</strong> (click to expand)</summary>
+
+- [Why Use httpx.zig?](#why-use-httpxzig)
+- [Prerequisites](#prerequisites)
+- [Supported Platforms](#supported-platforms)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Performance](#performance)
+- [Contributing](#contributing)
+- [License](#license)
+
+</details>
+
+---
+
 ## Why Use httpx.zig?
 
 **One native Zig library for HTTP, networking, and web applications.**
@@ -39,7 +55,7 @@
 - **TLS and secure transport:** TLS 1.2/1.3, ALPN, certificate and hostname verification, custom trust stores, mutual TLS, session resumption, HTTP/2 over TLS, HTTP/3 over QUIC, and FTP/FTPS.
 - **Networking and proxies:** DNS resolution and TTL caching, connectivity checks, HTTP proxies, SOCKS4/4a, SOCKS5/SOCKS5h, remote DNS resolution, and cross-platform TCP/UDP networking.
 - **File transfers and multipart:** Progress-aware downloads, resumable transfers, atomic updates, existing-file policies, size and checksum verification, multipart forms, and bounded streaming uploads.
-- **Built-in web framework:** High-performance routing, typed parameters, route groups, mounts, named routes, reverse routing, 404/405 handling, middleware, CORS, security headers, CSRF protection, rate limiting, health checks, and error recovery.
+- **Built-in web framework:** High-performance routing, typed parameters, route groups, mounts, named routes, reverse routing, 404/405 handling, middleware, CORS, security headers, CSRF protection, rate limiting, and error recovery.
 - **REST and OpenAPI:** Typed REST handlers, OpenAPI 3.1 generation, and locally served Swagger UI, ReDoc, Scalar, and GraphiQL assets without external CDNs.
 - **Web application capabilities:** GraphQL, static files, ETags, SPA fallback, sessions, WebSockets, Server-Sent Events, templates, and multipart request parsing.
 - **Jinja templating:** Template inheritance, blocks, includes, loops, conditionals, filters, macros, call blocks, caching, and live-reload integration.
@@ -101,7 +117,7 @@
 | **Unified DOM & Web Parsing** | DOM parsing and inspection for HTML, XML, RSS/Atom/JSON feeds, robots.txt, sitemaps, and a documented CSS-selector subset with zero-leak arena architecture. |
 | **Streaming Downloader** | Resumable chunked file downloader powered by `loaders.zig` progress bars, ETA calculation, and hash verification. |
 | **Pattern-based Routing** | Intuitive server routing with typed parameters (`/users/{id:int}`), slugs, catch-alls, groups, mounting, named routes + reversing, 404/405 handling, and OpenAPI integration. |
-| **Middleware Stack** | Built-in middleware for CORS, security headers (Helmet), automated CSRF protection, and recovery; rate limiting, server event callbacks, health endpoints, and CSRF token helpers. |
+| **Middleware Stack** | Built-in middleware for CORS, security headers (Helmet), automated CSRF protection, and recovery; rate limiting, server event callbacks, and CSRF token helpers. |
 | **TLS/SSL** | Native TLS 1.3 server engine + native TLS 1.3 client (RFC 8446) plus TLS 1.2/1.3 via the std-based HTTPS/1.1 transport: server ALPN (RFC 7301) with HTTP/1.1 fallback, native client ALPN (`h2` for HTTP/2 over TLS, `h3` for HTTP/3 over QUIC), X25519MLKEM768/X25519 key exchange, ChaCha20-Poly1305/AES-128-GCM server record ciphers, X.509 parsing/verification (P-256 ECDSA server certs), system/custom trust stores, hostname checks, mutual TLS enforcement (required/optional client certificates, presented via high-level `.tls = .{ .clientCertPem, .clientKeyPem }`), TLS 1.3 PSK session resumption (`psk_dhe_ke` NST tickets) + HelloRetryRequest, and opt-in TLS 1.3 0-RTT early data with bounded server-side anti-replay cache (`ReplayCache`) and safe HTTP method policy. |
 | **Static Files & SPA** | High-performance static file serving with ETag, cache control, conditional GET, MIME detection, and SPA HTML5 fallback. |
 | **Interactive API Docs** | Auto-generated OpenAPI 3.1 specifications with embedded Swagger UI, ReDoc, Scalar, and GraphiQL interfaces. |
@@ -128,17 +144,6 @@
 <summary><strong>Prerequisites and Supported Platforms</strong> (click to expand)</summary>
 
 <br>
-
-## Contents
-
-- [Why Use httpx.zig?](#why-use-httpxzig)
-- [Prerequisites](#prerequisites)
-- [Supported Platforms](#supported-platforms)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Performance](#performance)
-- [Contributing](#contributing)
-- [License](#license)
 
 ## Prerequisites
 
@@ -196,7 +201,7 @@ zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.
 > For documentation matching older releases of `httpx.zig`, checkout that release's tag and generate local documentation using `zig build docs`, which emits native HTML documentation into `zig-out/docs/`.
 
 <details>
-<summary><strong>Zig Fetch (Latest Beta / Development Build)</strong> (click to expand)</summary>
+<summary><strong>Method 2: Latest Beta / Development Build</strong> (click to expand)</summary>
 
 Use this for the latest beta development build from the GitHub `main` branch:
 
@@ -205,6 +210,8 @@ zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 ```
 
 </details>
+
+---
 
 <details>
 <summary><strong>Method 3: Manual `build.zig.zon` Configuration</strong> (click to expand)</summary>
@@ -219,6 +226,8 @@ zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 ```
 
 </details>
+
+---
 
 <details>
 <summary><strong>Method 4: Local Source Checkout</strong> (click to expand)</summary>
@@ -352,76 +361,80 @@ Run the benchmarks with:
 ```bash
 zig build bench
 ```
+---
 
 <details>
 <summary><strong>Benchmarks</strong> (click to expand)</summary>
 
 
-Benchmark target: `x86_64-windows`, `ReleaseFast`. Measurements recorded on November 7, 2026.
+Benchmark target: `x86_64-windows`, `ReleaseFast`. Measurements recorded on November 8, 2026.
 
 | Benchmark | Category | Average Latency | Throughput |
-| :--- | :--- | ---: | ---: |
-| `headers_parse` | Core Operations | 224.93 ns/op | **4445904 ops/sec** |
-| `uri_parse` | Core Operations | 61.79 ns/op | **16183534 ops/sec** |
-| `status_lookup` | Core Operations | 2.36 ns/op | **424329347 ops/sec** |
-| `method_lookup` | Core Operations | 13.79 ns/op | **72537146 ops/sec** |
-| `http1_request_head` | Core Operations | 16.49 ns/op | **60656055 ops/sec** |
-| `http1_header_block` | Core Operations | 205.65 ns/op | **4862711 ops/sec** |
-| `authority_parse` | Core Operations | 13.05 ns/op | **76612795 ops/sec** |
-| `percent_decode` | Core Operations | 34.33 ns/op | **29131247 ops/sec** |
-| `percent_encode` | Core Operations | 20.98 ns/op | **47666259 ops/sec** |
-| `cookie_param_iter` | Core Operations | 89.31 ns/op | **11196954 ops/sec** |
-| `token_list_scan` | Core Operations | 28.21 ns/op | **35453701 ops/sec** |
-| `query_param_lookup` | Core Operations | 37.48 ns/op | **26683388 ops/sec** |
-| `router_static_match` | Routing | 250.91 ns/op | **3985422 ops/sec** |
-| `router_param_match` | Routing | 306.85 ns/op | **3258914 ops/sec** |
-| `router_dispatch` | Routing | 261.41 ns/op | **3825408 ops/sec** |
-| `router_typed_match` | Routing | 303.18 ns/op | **3298399 ops/sec** |
-| `router_miss_404` | Routing | 419.13 ns/op | **2385882 ops/sec** |
-| `router_reverse` | Routing | 55.58 ns/op | **17992730 ops/sec** |
-| `json_stringify` | Serialization | 197.37 ns/op | **5066592 ops/sec** |
-| `json_parse` | Serialization | 273.95 ns/op | **3650294 ops/sec** |
-| `basic_auth_encode` | Security | 24.44 ns/op | **40924567 ops/sec** |
-| `basic_auth_decode` | Security | 14.63 ns/op | **68358774 ops/sec** |
-| `bearer_token_parse` | Security | 1.09 ns/op | **913634162 ops/sec** |
-| `gzip_compress` | Compression | 14.88 -�s/op | **67217 ops/sec** |
-| `gzip_decompress` | Compression | 4.13 -�s/op | **242071 ops/sec** |
-| `deflate_compress` | Compression | 13.47 -�s/op | **74248 ops/sec** |
-| `deflate_decompress` | Compression | 4.06 -�s/op | **246455 ops/sec** |
-| `html_parse` | Parsing | 11.55 -�s/op | **86583 ops/sec** |
-| `template_parse` | Parsing | 2.39 -�s/op | **418704 ops/sec** |
-| `template_render` | Parsing | 1.33 -�s/op | **754289 ops/sec** |
-| `template_incremental` | Parsing | 18.69 -�s/op | **53508 ops/sec** |
-| `json_feed_parse` | Parsing | 3.24 -�s/op | **308669 ops/sec** |
-| `live_reload_inject` | Parsing | 231.07 ns/op | **4327662 ops/sec** |
-| `watcher_scan` | Watcher | 657.92 -�s/op | **1519 ops/sec** |
-| `watcher_deps` | Watcher | 3.18 -�s/op | **314606 ops/sec** |
-| `static_safe_join` | Static Files | 95.81 ns/op | **10437803 ops/sec** |
-| `spa_fallback_policy` | SPA | 92.54 ns/op | **10806489 ops/sec** |
-| `worker_pool_submit` | Concurrency | 198.00 ns/op | **5050484 ops/sec** |
-| `concurrency_queue` | Concurrency | 21.56 ns/op | **46386492 ops/sec** |
-| `dns_cache_hit` | DNS | 89.73 ns/op | **11144134 ops/sec** |
-| `h2_frame_header` | Protocols | 2.52 ns/op | **396381826 ops/sec** |
-| `hpack_int_encode` | Protocols | 3.82 ns/op | **261660234 ops/sec** |
-| `hpack_int_decode` | Protocols | 9.03 ns/op | **110760124 ops/sec** |
-| `qpack_int_encode` | Protocols | 4.11 ns/op | **243141583 ops/sec** |
-| `qpack_int_decode` | Protocols | 2.40 ns/op | **417505156 ops/sec** |
-| `h3_frame_header` | Protocols | 2.43 ns/op | **411815819 ops/sec** |
-| `h3_varint_encode` | Protocols | 3.42 ns/op | **292106408 ops/sec** |
-| `h3_varint_decode` | Protocols | 3.22 ns/op | **310161190 ops/sec** |
-| `tls_record_seal` | TLS | 1.11 -�s/op | **899435 ops/sec** |
-| `tls_cert_parse` | TLS | 974.69 ns/op | **1025963 ops/sec** |
-| `client_server_get` | Network | 81.44 -�s/op | **12279 req/sec** |
-| `h2_pooled_get` | Network | 52.93 -�s/op | **18894 req/sec** |
-| `h3_get` | Network | 203.29 ms/op | **4 req/sec** |
-| `tls_full_handshake` | TLS | 3.26 ms/op | **307 ops/sec** |
-| `tls_resumed_handshake` | TLS | 2.65 ms/op | **377 ops/sec** |
+| :--- | :--- | :---: | :---: |
+| `headers_parse` | Core Operations | 221.49 ns/op | **4514882 ops/sec** |
+| `uri_parse` | Core Operations | 68.36 ns/op | **14629208 ops/sec** |
+| `status_lookup` | Core Operations | 2.35 ns/op | **426368322 ops/sec** |
+| `method_lookup` | Core Operations | 14.10 ns/op | **70926462 ops/sec** |
+| `http1_request_head` | Core Operations | 20.30 ns/op | **49253077 ops/sec** |
+| `http1_header_block` | Core Operations | 193.31 ns/op | **5173027 ops/sec** |
+| `authority_parse` | Core Operations | 11.01 ns/op | **90813324 ops/sec** |
+| `percent_decode` | Core Operations | 30.32 ns/op | **32984902 ops/sec** |
+| `percent_encode` | Core Operations | 22.21 ns/op | **45022331 ops/sec** |
+| `cookie_param_iter` | Core Operations | 78.80 ns/op | **12689936 ops/sec** |
+| `token_list_scan` | Core Operations | 28.72 ns/op | **34819911 ops/sec** |
+| `query_param_lookup` | Core Operations | 39.31 ns/op | **25440178 ops/sec** |
+| `router_static_match` | Routing | 286.30 ns/op | **3492798 ops/sec** |
+| `router_param_match` | Routing | 331.05 ns/op | **3020703 ops/sec** |
+| `router_dispatch` | Routing | 283.97 ns/op | **3521482 ops/sec** |
+| `router_typed_match` | Routing | 328.54 ns/op | **3043773 ops/sec** |
+| `router_miss_404` | Routing | 460.00 ns/op | **2173910 ops/sec** |
+| `router_reverse` | Routing | 59.07 ns/op | **16928035 ops/sec** |
+| `json_stringify` | Serialization | 190.77 ns/op | **5241977 ops/sec** |
+| `json_parse` | Serialization | 279.62 ns/op | **3576328 ops/sec** |
+| `basic_auth_encode` | Security | 24.54 ns/op | **40753615 ops/sec** |
+| `basic_auth_decode` | Security | 13.80 ns/op | **72442770 ops/sec** |
+| `bearer_token_parse` | Security | 1.06 ns/op | **947292637 ops/sec** |
+| `gzip_compress` | Compression | 15.46 ┬╡s/op | **64674 ops/sec** |
+| `gzip_decompress` | Compression | 4.26 ┬╡s/op | **234965 ops/sec** |
+| `deflate_compress` | Compression | 14.10 ┬╡s/op | **70932 ops/sec** |
+| `deflate_decompress` | Compression | 4.30 ┬╡s/op | **232776 ops/sec** |
+| `html_parse` | Parsing | 12.00 ┬╡s/op | **83305 ops/sec** |
+| `html_parse_large` | Parsing | 20.50 ms/op | **48 pages/sec** |
+| `template_parse` | Parsing | 2.49 ┬╡s/op | **401097 ops/sec** |
+| `template_render` | Parsing | 1.40 ┬╡s/op | **716827 ops/sec** |
+| `template_incremental` | Parsing | 44.49 ┬╡s/op | **22475 ops/sec** |
+| `json_feed_parse` | Parsing | 3.35 ┬╡s/op | **298141 ops/sec** |
+| `live_reload_inject` | Parsing | 224.73 ns/op | **4449817 ops/sec** |
+| `watcher_scan` | Watcher | 650.99 ┬╡s/op | **1536 ops/sec** |
+| `watcher_deps` | Watcher | 3.41 ┬╡s/op | **292948 ops/sec** |
+| `static_safe_join` | Static Files | 92.25 ns/op | **10839673 ops/sec** |
+| `spa_fallback_policy` | SPA | 94.22 ns/op | **10613590 ops/sec** |
+| `worker_pool_submit` | Concurrency | 211.88 ns/op | **4719654 ops/sec** |
+| `concurrency_queue` | Concurrency | 23.03 ns/op | **43413329 ops/sec** |
+| `dns_cache_hit` | DNS | 87.81 ns/op | **11387939 ops/sec** |
+| `h2_frame_header` | Protocols | 2.32 ns/op | **431721142 ops/sec** |
+| `hpack_int_encode` | Protocols | 3.37 ns/op | **296837199 ops/sec** |
+| `hpack_int_decode` | Protocols | 8.76 ns/op | **114207791 ops/sec** |
+| `qpack_int_encode` | Protocols | 3.39 ns/op | **295036599 ops/sec** |
+| `qpack_int_decode` | Protocols | 2.15 ns/op | **464634355 ops/sec** |
+| `h3_frame_header` | Protocols | 2.40 ns/op | **416396009 ops/sec** |
+| `h3_varint_encode` | Protocols | 3.15 ns/op | **317430086 ops/sec** |
+| `h3_varint_decode` | Protocols | 2.96 ns/op | **338002271 ops/sec** |
+| `tls_record_seal` | TLS | 1.09 ┬╡s/op | **919299 ops/sec** |
+| `tls_cert_parse` | TLS | 993.24 ns/op | **1006806 ops/sec** |
+| `client_server_get` | Network | 80.86 ┬╡s/op | **12366 req/sec** |
+| `h2_pooled_get` | Network | 51.48 ┬╡s/op | **19423 req/sec** |
+| `h3_get` | Network | 203.15 ms/op | **4 req/sec** |
+| `tls_full_handshake` | TLS | 3.42 ms/op | **292 ops/sec** |
+| `tls_resumed_handshake` | TLS | 2.78 ms/op | **359 ops/sec** |
 
 For the full benchmark methodology, measurement details, and analysis, see [Benchmark Documentation](docs/reference/benchmarks.md).
 
 **Note:** These are recorded measurements for the specified platform and build mode, not universal performance guarantees. Results may vary with hardware, compiler version, workload, and system configuration.
 
 </details>
+
+---
 
 ## Contributing
 

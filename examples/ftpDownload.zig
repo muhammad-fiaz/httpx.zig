@@ -7,8 +7,6 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    std.debug.print("==> Downloading file over FTP with progress and verification...\n", .{});
-
     var ftp = httpx.client.ftp.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 21,

@@ -316,21 +316,6 @@ pub const Response = struct {
         return self.header("content-type") orelse "";
     }
 
-    /// Parses HTML body into a Document using the response's internal allocator.
-    pub fn html(self: *const Response) !@import("../parsing/document.zig").Document {
-        return @import("../parsing/document.zig").Document.parseHtml(self.allocator, self.body);
-    }
-
-    /// Parses XML body into a Document using the response's internal allocator.
-    pub fn xml(self: *const Response) !@import("../parsing/document.zig").Document {
-        return @import("../parsing/document.zig").Document.parseXml(self.allocator, self.body);
-    }
-
-    /// Parses auto-detected document from response body and headers.
-    pub fn document(self: *const Response) !@import("../parsing/document.zig").Document {
-        return @import("../parsing/document.zig").Document.parse(self.allocator, self.header("content-type"), self.body);
-    }
-
     /// Returns body as bytes.
     pub fn bytes(self: *const Response) []const u8 {
         return self.body;

@@ -1,4 +1,4 @@
-# Example: Proxy Demo
+# Example: Proxy
 
 Demonstrates proxyDemo.zig using the canonical HTTPX API.
 

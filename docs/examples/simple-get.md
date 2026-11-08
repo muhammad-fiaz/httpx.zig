@@ -2,7 +2,7 @@
 
 Perform a minimal HTTP GET request with `httpx.Client`.
 
-## Demo Program
+## Example
 
 ```zig
 const std = @import("std");
@@ -40,9 +40,3 @@ The status code is the numeric HTTP status and the body is the raw response text
 ```bash
 zig build run-simple-get
 ```
-
-## What to Verify
-
-- Successful HTTP status code.
-- Non-empty response body text.
-- Defaults are implicit unless explicitly overridden.

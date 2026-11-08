@@ -44,9 +44,3 @@ Statuses, event payloads, ids, retry intervals, URLs, and ports vary with the ha
 ```bash
 zig build run-sse-server
 ```
-
-## Checklist
-
-- [x] SSE events use W3C wire format (`event:`, `id:`, `data:`)
-- [x] Server returns `Content-Type: text/event-stream`
-- [x] Client receives all events in order

@@ -32,7 +32,6 @@ pub fn main() !void {
 
     var urlBuf: [64]u8 = undefined;
     const sampleUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/bytes/90", .{port});
-    std.debug.print("==> Downloading {s} with zero-config progress bar...\n", .{sampleUrl});
 
     // 1. Download to a specific directory (automatically uses URL basename "90")
     const result1 = client.download(

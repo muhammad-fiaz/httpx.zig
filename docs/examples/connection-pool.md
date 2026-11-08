@@ -2,7 +2,7 @@
 
 Reuse connections across requests to improve latency and throughput.
 
-## Demo Program
+## Example
 
 ```zig
 const std = @import("std");
@@ -43,8 +43,3 @@ Status values reflect the live endpoints.
 ```bash
 zig build run-connection-pool
 ```
-
-## What to Verify
-
-- Repeated calls succeed with stable performance.
-- Pool limits are respected for host and global connections.

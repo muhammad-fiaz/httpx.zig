@@ -32,7 +32,6 @@ pub fn main() !void {
 
     var urlBuf: [64]u8 = undefined;
     const sampleUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/sample-local-pdf.pdf", .{port});
-    std.debug.print("==> Downloading {s} with size and cryptographic verification...\n", .{sampleUrl});
 
     const result = client.download(
         sampleUrl,

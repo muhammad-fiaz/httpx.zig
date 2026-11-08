@@ -34,9 +34,3 @@ If-None-Match: "abc123"
 
 HTTP/1.1 304 Not Modified
 ```
-
-## Checklist
-
-- [x] ETag generation and matching on static routes
-- [x] Conditional GET (304 Not Modified)
-- [x] Download resume and existing-file policies

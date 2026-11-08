@@ -14,8 +14,7 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
-
-    std.debug.print("==> HTTPX CSS Selector Engine Demo\n\n", .{});
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     const htmlContent =
         \\<!DOCTYPE html>
@@ -43,8 +42,7 @@ pub fn main() !void {
         \\</html>
     ;
 
-    var p = httpx.parsing.Parser.init(allocator, .{});
-    var doc = try p.parseHtml(htmlContent);
+    var doc = try httpx.parsing.init(allocator, io, .{}).parseHtml(htmlContent);
     defer doc.deinit();
 
     // 1. Select by tag and class: "a.nav-link"
@@ -73,6 +71,4 @@ pub fn main() !void {
     std.debug.print("\n4. Select 'main > article':\n", .{});
     var articles = try doc.select("main > article");
     std.debug.print("   Total matched articles: {d}\n", .{articles.len()});
-
-    std.debug.print("\nSelector verification successful.\n", .{});
 }

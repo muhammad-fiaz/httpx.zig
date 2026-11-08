@@ -91,7 +91,7 @@ pub fn main() !void {
 
     // 1. Setup sample asset for watcher
     const testAsset = "sample_dev_asset.txt";
-    try httpx.static.files.writeFile(testAsset, "Initial static asset content");
+    try httpx.fs.writeFile(testAsset, "Initial static asset content");
 
     // 2. Initialize Watcher with reload callbacks
     var fileWatcher = try httpx.static.Watcher.init(allocator, io, .{

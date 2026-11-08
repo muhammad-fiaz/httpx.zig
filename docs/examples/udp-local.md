@@ -42,8 +42,3 @@ The ephemeral loopback ports vary per run; the datagram payload is fixed by the 
 ```bash
 zig build run-udp-local
 ```
-
-## What to Verify
-
-- UDP bind succeeds on the local interface.
-- The datagram is sent and received on loopback.

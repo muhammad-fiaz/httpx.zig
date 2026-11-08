@@ -41,8 +41,6 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    std.debug.print("==> HTTPX Live Reload Server Demo\n\n", .{});
-
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
@@ -75,10 +73,9 @@ pub fn main() !void {
     defer res.deinit();
     std.debug.print("GET / returned status {d} (Content-Type: {s})\n", .{ res.status, res.contentType() });
 
-    var doc = try res.html();
+    var doc = try httpx.parsing.init(allocator, io, .{}).parseHtml(res.body);
     defer doc.deinit();
     std.debug.print("Parsed Page Title: '{s}'\n", .{try doc.title()});
 
-    std.debug.print("\nLive reload server verification successful.\n", .{});
     server.stop();
 }

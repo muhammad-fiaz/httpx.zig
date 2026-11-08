@@ -60,10 +60,10 @@ native parsers.
 
 | Grammar | Ships in dep | HTTPX consumer | Reason |
 | ------- | ------------ | -------------- | ------ |
-| Arithmetic expressions | Yes (demo) | None | Demo grammar; template expressions are paths/filters, not arithmetic |
-| S-expressions | Yes (demo) | None | No s-expression input in HTTPX |
+| Arithmetic expressions | Yes (reference) | None | Demo grammar; template expressions are paths/filters, not arithmetic |
+| S-expressions | Yes (reference) | None | No s-expression input in HTTPX |
 | JSON | Yes | Feed (JSON Feed syntax layer) | Only shipped grammar with an HTTPX consumer; value decoding stays `std.json` |
-| Outline (indent demo) | Yes (demo) | None | Demo only |
+| Outline (indent demo) | Yes (reference) | None | Reference only |
 | HTML | **No** | — | Native parser retained |
 | Templates (<code v-pre>{{ }}</code>, `{% %}`, `{# #}`) | HTTPX-defined (`templateLanguage`) | Templates (syntax layer) | Tree-sitter tokenizes; nesting/AST stays in HTTPX |
 | CSS selectors | **No** | — | Native parser retained |

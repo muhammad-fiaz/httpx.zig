@@ -37,9 +37,3 @@ The status reflects the live endpoint and the body length varies with the decode
 ```bash
 zig build run-compression-demo
 ```
-
-## Checklist
-
-- [x] Client sends `Accept-Encoding` and reads decoded bodies
-- [x] Round-trip compress/decompress matches input
-- [x] `decompressLimited` enforces the cap

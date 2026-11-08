@@ -32,7 +32,6 @@ pub fn main() !void {
 
     var urlBuf: [64]u8 = undefined;
     const sampleUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/sample-local-pdf.pdf", .{port});
-    std.debug.print("==> Updating local application asset from {s} with rollback backup...\n", .{sampleUrl});
 
     const res = client.updateFile(
         sampleUrl,

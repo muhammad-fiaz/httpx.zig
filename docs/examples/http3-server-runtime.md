@@ -33,8 +33,3 @@ Status is 200 on success; port, stream IDs, and body path vary by route. See `ex
 ```bash
 zig build run-http3-client
 ```
-
-## What to Verify
-
-- The server speaks HTTP/3 to capable clients.
-- Routes dispatch identically across HTTP versions.

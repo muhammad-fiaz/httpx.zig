@@ -2,7 +2,7 @@
 
 Send requests with explicit authentication and tracing headers.
 
-## Demo Program
+## Example
 
 ```zig
 const std = @import("std");
@@ -44,8 +44,3 @@ The status reflects the live endpoint and the echoed body varies with the server
 ```bash
 zig build run-custom-headers
 ```
-
-## What to Verify
-
-- Response shows the custom headers echoed by server.
-- Authorization and trace headers are transmitted correctly.

@@ -1,4 +1,4 @@
-# Example: Concurrent Demo
+# Example: Concurrent Requests
 
 Demonstrates concurrentDemo.zig using `httpx.concurrency.Pool` and `httpx.Client`.
 

@@ -1,4 +1,4 @@
-# Example: Compression Demo
+# Example: Compression
 
 Demonstrates compressionDemo.zig using the canonical HTTPX API.
 

@@ -49,13 +49,13 @@ if (response.header("Content-Type")) |ct| {
 
 ## HTML & DOM Parsing
 
-HTML responses can be parsed into a DOM document tree:
+HTML responses can be parsed into a DOM document tree from the buffered body:
 
 ```zig
-var doc = try response.html();
+var doc = try httpx.parsing.init(allocator, io, .{}).parseHtml(response.body);
 defer doc.deinit();
 
-if (doc.query("h1")) |h1| {
-    std.debug.print("Heading: {s}\n", .{h1.text()});
+if (try doc.selectFirst("h1")) |h1| {
+    std.debug.print("Heading: {s}\n", .{try h1.text()});
 }
 ```

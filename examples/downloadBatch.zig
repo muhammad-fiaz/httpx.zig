@@ -62,8 +62,6 @@ pub fn main() !void {
     });
     defer pool.deinit();
 
-    std.debug.print("==> Starting concurrent batch download with built-in zero-config progress bar...\n", .{});
-
     for (&tasks) |*task| {
         try pool.submit(DownloadTask.run, task, null);
     }

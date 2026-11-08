@@ -38,8 +38,3 @@ Status values reflect the live endpoints and body lengths vary per response.
 ```bash
 zig build run-concurrent-demo
 ```
-
-## What to Verify
-
-- Concurrent request tasks all return 200.
-- The worker pool submits background jobs without stalling request handling.

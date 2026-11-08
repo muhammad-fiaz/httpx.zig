@@ -3,7 +3,7 @@
 HTTPX never prints on its own. Attach callbacks to receive structured
 server and client events (slices are borrowed for the callback call only).
 
-## Demo Program
+## Example
 
 ```zig
 const std = @import("std");
@@ -66,16 +66,3 @@ by server examples such as:
 ```bash
 zig build run-custom-server
 ```
-
-## Checklist
-
-- [x] Server callback receives `requestCompleted` with method/path/status.
-- [x] Client callback receives `requestCompleted` with method/url/status.
-- [x] Omitting the callbacks keeps server and client fully silent.
-- [x] Secrets (passwords, tokens, private keys) never appear in events.
-
-### Level Filtering
-
-Set `.level` (`.trace`, `.debug`, `.info`, `.warn`, `.err`, `.fatal`) to
-drop events below a severity. Messages below the configured level are
-silently dropped.

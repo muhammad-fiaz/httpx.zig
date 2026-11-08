@@ -2,7 +2,7 @@
 
 Start a minimal server with plain-text and JSON routes.
 
-## Demo Program
+## Example
 
 ```zig
 const std = @import("std");
@@ -84,10 +84,3 @@ The port is the ephemeral port selected at runtime, and statuses/bodies vary wit
 ```bash
 zig build run-simple-server
 ```
-
-## What to Verify
-
-- `GET /` returns `hello, world!` as plain text.
-- `GET /json` returns `{"ok":true}` as JSON.
-- Server starts without route registration errors.
-- A client request to `http://127.0.0.1:<effective-port>/` returns immediately.

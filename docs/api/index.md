@@ -37,7 +37,7 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 ### Server Types
 
 - `httpx.Server`, `httpx.Router`, `httpx.router.Context`, `httpx.router.Response`
-- `httpx.tls.Listener`, `httpx.tls.ListenerConfig`, `httpx.tls.Request`, `httpx.tls.Response`
+- `httpx.tls.TicketKeys`, `httpx.tls.ClientAuthMode`
 
 ### Concurrency Helpers
 

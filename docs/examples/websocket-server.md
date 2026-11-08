@@ -2,7 +2,7 @@
 
 Demonstrates serving an interactive browser WebSocket client and handling WebSocket upgrade requests with `httpx.websocket.computeAccept` and frame codecs.
 
-## Demo Program
+## Example
 
 ```zig
 const std = @import("std");
@@ -82,14 +82,3 @@ The ephemeral loopback port varies per run; response body length varies with the
 ```
 zig build run-websocket-server
 ```
-
-## Checklist
-
-- [x] `Server.init` serves `/` and `/ws` on an ephemeral loopback port
-- [x] `wsHandler` reads `sec-websocket-key` via `ctx.header`
-- [x] `httpx.websocket.computeAccept` computes the RFC 6455 accept key
-- [x] Upgrade responds `101` with `Upgrade`/`Connection`/`Sec-WebSocket-Accept`
-- [x] `httpx.websocket.Frame.buildFrameHeader`/`parseFrameHeader` roundtrip frames
-- [x] `httpx.websocket.Frame.Opcode` covers `.text`/`.binary`/`.close`/`.ping`/`.pong`
-- [x] `applyMask` masks client-to-server payloads in place
-- [x] Large payloads (>125 bytes) use extended length encoding

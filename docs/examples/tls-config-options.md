@@ -40,17 +40,18 @@ var server = try httpx.Server.init(allocator, io, .{
 defer server.deinit();
 ```
 
-## Listener identity (`Identity`)
+## Server identity
 
 ```zig
-var listener = try httpx.tls.Listener.init(allocator, io, .{
+var server = try httpx.Server.init(allocator, io, .{
+    .host = "127.0.0.1",
     .port = 8443,
-    .defaultIdentity = .{
-        .certChainPem = @embedFile("cert.pem"),
+    .tls = .{
+        .certificatePem = @embedFile("cert.pem"),
         .privateKeyPem = @embedFile("key.pem"),
     },
 });
-defer listener.deinit();
+defer server.deinit();
 ```
 
 ## Expected Output

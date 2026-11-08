@@ -31,8 +31,3 @@ The destination path and byte count reflect the requested URL and vary by downlo
 ```bash
 zig build run-download
 ```
-
-## What to Verify
-
-- Successful HTTP status code.
-- File lands on disk with the expected byte count.

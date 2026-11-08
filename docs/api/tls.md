@@ -175,18 +175,19 @@ var server = try httpx.Server.init(allocator, io, .{
 });
 ```
 
-For a standalone TLS listener, use `httpx.tls.Listener`:
+For HTTPS, pass the identity to `httpx.Server`:
 
 ```zig
-var listener = try httpx.tls.Listener.init(allocator, io, .{
+var server = try httpx.Server.init(allocator, io, .{
+    .host = "127.0.0.1",
     .port = 8443,
-    .defaultIdentity = .{
-        .certChainPem = @embedFile("cert.pem"),
+    .tls = .{
+        .certificatePem = @embedFile("cert.pem"),
         .privateKeyPem = @embedFile("key.pem"),
     },
 });
-defer listener.deinit();
-try listener.run(handler);
+defer server.deinit();
+try server.get("/", .{ .handler = handler });
 ```
 
 ::: tip ALPN Default
@@ -199,9 +200,9 @@ The server automatically loads the certificate chain and private key on the firs
 
 Client connections flow through the high-level client (`client.get("https://…")`),
 which performs the handshake, ALPN negotiation, hostname verification, and
-record-layer encryption internally. Server connections are accepted by
-`httpx.tls.Listener` / `Server.tls` and dispatched to HTTP/1 or HTTP/2
-handlers based on the negotiated ALPN protocol.
+record-layer encryption internally. Server connections are accepted via
+`Server.tls` and dispatched to HTTP/1 or HTTP/2 handlers based on the
+negotiated ALPN protocol.
 
 Post-handshake TLS 1.3 `KeyUpdate` records are handled transparently by
 `read`: receive keys rotate, and a peer requesting an update is answered
@@ -221,10 +222,6 @@ subsequent records.
 | `httpx.tls.Server.init(allocator, io, cfg)` | TLS server owner (identity validated once) |
 | `server.accept(&socket)` | Accept; returns an owned `Connection` |
 | `server.acceptBuffered(&socket, peeked)` | Accept with pre-read bytes |
-| `httpx.tls.Listener.init(allocator, io, cfg)` | Bind a TLS listener with `defaultIdentity` |
-| `listener.run(handler)` | Blocking accept loop |
-| `listener.stop()` | Immediate shutdown |
-| `listener.localPort()` | Actual bound port |
 | `server.setTls(certPemOrPath, keyPemOrPath)` | Rotate server identity at runtime |
 | `server.isTls()` | Whether TLS is active |
 

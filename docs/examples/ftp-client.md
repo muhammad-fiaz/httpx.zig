@@ -2,7 +2,7 @@
 
 Connect to an FTP server with PASV/EPSV, directory listing, upload, and download.
 
-## Demo Program
+## Example
 
 ```zig
 const std = @import("std");
@@ -79,10 +79,3 @@ Hostnames, ports, listing contents, and timings vary; when the remote server is 
 ```bash
 zig build run-ftp-client
 ```
-
-## What to Verify
-
-- FTP client configuration is printed cleanly.
-- Connection is established using passive data channel negotiations.
-- Directory listing (`LIST /`) displays remote directory contents.
-

@@ -2,7 +2,7 @@
 
 Send JSON request bodies and inspect structured responses.
 
-## Demo Program
+## Example
 
 ```zig
 const std = @import("std");
@@ -47,8 +47,3 @@ The status code and echoed body depend on the remote server's response; the body
 ```bash
 zig build run-post-json
 ```
-
-## What to Verify
-
-- Response status is successful.
-- Echoed body includes sent JSON payload.

@@ -16,8 +16,6 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    std.debug.print("==> HTTPX Static Site Server Demo\n\n", .{});
-
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
@@ -49,10 +47,9 @@ pub fn main() !void {
     defer res.deinit();
     std.debug.print("GET / -> Status: {d}, Length: {d}\n", .{ res.status, res.body.len });
 
-    var doc = try res.html();
+    var doc = try httpx.parsing.init(allocator, io, .{}).parseHtml(res.body);
     defer doc.deinit();
     std.debug.print("Mounted Site Title: '{s}'\n", .{try doc.title()});
 
-    std.debug.print("\nStatic site verification successful.\n", .{});
     server.stop();
 }

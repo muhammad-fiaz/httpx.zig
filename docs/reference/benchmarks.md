@@ -24,7 +24,7 @@ The harness copies each result into a Markdown table at the end of the run, whic
 | **Target Architecture** | `x86_64` |
 | **Operating System** | Windows (`x86_64-windows`) |
 | **Benchmark Harness** | `bench/main.zig` via `zig build bench` |
-| **Measurement Date** | `2026-11-07` |
+| **Measurement Date** | `2026-11-08` |
 
 Each benchmark reports `min`, `avg`, and `max` nanoseconds per operation across 3-5 rounds; the table shows `avg`. Iteration counts are chosen per cost class - 2,000,000 for primitive encoders, 200,000 for general parsing and routing, 20,000 for document parsing, 2,000 for compression, and 10-200 for network and handshake operations.
 

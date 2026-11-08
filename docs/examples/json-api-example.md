@@ -35,8 +35,3 @@ The printed values reflect whatever JSON the server echoes back; names, roles, a
 ```bash
 zig build run-post-json
 ```
-
-## What to Verify
-
-- POST returns 200 with the echoed JSON body.
-- Typed decoding ignores unknown fields.

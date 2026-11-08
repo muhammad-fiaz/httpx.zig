@@ -7,7 +7,7 @@
 //!   protocols/  - HTTP/1.x parser+serializer, HTTP/2 engine, HTTP/3+QUIC,
 //!                 TLS with custom ALPN, FTP
 //!   compression/- gzip/deflate/zstd/brotli codecs + content negotiation
-//!   web/        - router, middleware, SSE, WebSocket, docs, SPA, health,
+//!   web/        - router, middleware, SSE, WebSocket, docs, SPA,
 //!                 metrics, multipart, cookies, auth, static files, openapi
 //!   server/     - server lifecycle, connections, request context
 //!   client/     - request engine, connection pool, cookie jar
@@ -364,7 +364,6 @@ pub const BackendMode = static.BackendMode;
 pub const BackendKind = static.BackendKind;
 pub const BackendCapabilities = static.BackendCapabilities;
 pub const WatcherStatus = static.WatcherStatus;
-pub const health = @import("web/health/healthEndpoints.zig");
 pub const metrics = @import("web/metrics/metricsRegistry.zig");
 pub const mime = @import("common/mime.zig");
 pub const fs = @import("utils/fs.zig");
@@ -466,17 +465,13 @@ test "client facade keeps configuration and request option types private" {
 // Parsing & inspection subsystem
 /// HTML, XML, feed, robots, and sitemap parsing.
 pub const parsing = struct {
-    pub const dom = @import("parsing/dom.zig");
-    pub const html = @import("parsing/html.zig");
-    pub const xml = @import("parsing/xml.zig");
-    pub const selector = @import("parsing/selector.zig");
-    pub const extract = @import("parsing/extract.zig");
-    pub const feed = @import("parsing/feed.zig");
-    pub const robots = @import("parsing/robots.zig");
-    pub const sitemap = @import("parsing/sitemap.zig");
-    pub const document = @import("parsing/document.zig");
+    const document = @import("parsing/document.zig");
+    const extract = @import("parsing/extract.zig");
+    const feed = @import("parsing/feed.zig");
+    const robots = @import("parsing/robots.zig");
+    const sitemap = @import("parsing/sitemap.zig");
+    const selector = @import("parsing/selector.zig");
     pub const Document = document.Document;
-    pub const Parser = document.Parser;
     pub const Handle = document.Handle;
     pub const Nodes = document.Nodes;
     pub const Kind = document.Kind;
@@ -495,8 +490,8 @@ pub const parsing = struct {
     pub const SitemapUrl = sitemap.SitemapUrl;
     pub const ChangeFreq = sitemap.ChangeFreq;
     pub const Selector = selector.Selector;
-    pub fn init(allocator: std.mem.Allocator, cfg_in: anytype) document.Parser {
-        return document.Parser.init(allocator, cfg_in);
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, cfg_in: anytype) document.Parser {
+        return document.Parser.init(allocator, io, cfg_in);
     }
     pub const detectKind = document.detectKind;
 };
@@ -623,7 +618,6 @@ test {
     _ = site;
     _ = siteRoutes;
     _ = assets;
-    _ = health;
     _ = metrics;
     _ = rest;
     _ = openapi;
@@ -636,15 +630,15 @@ test {
     _ = templates.loader;
     _ = templates.cache;
     _ = templates.errors;
-    _ = parsing.dom;
-    _ = parsing.html;
-    _ = parsing.xml;
-    _ = parsing.selector;
-    _ = parsing.extract;
-    _ = parsing.feed;
-    _ = parsing.robots;
-    _ = parsing.sitemap;
-    _ = parsing.document;
+    _ = @import("parsing/dom.zig");
+    _ = @import("parsing/html.zig");
+    _ = @import("parsing/xml.zig");
+    _ = @import("parsing/selector.zig");
+    _ = @import("parsing/extract.zig");
+    _ = @import("parsing/feed.zig");
+    _ = @import("parsing/robots.zig");
+    _ = @import("parsing/sitemap.zig");
+    _ = @import("parsing/document.zig");
     _ = protocols.ftp.Client;
     _ = protocols.ftp.Server;
     _ = server.Server;

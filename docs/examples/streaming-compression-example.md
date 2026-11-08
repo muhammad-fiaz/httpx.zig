@@ -36,11 +36,3 @@ On failure it prints `Compression request failed: <ErrorName>`. Statuses, length
 ```bash
 zig build run-compression-demo
 ```
-
-## Checklist
-
-- [x] Streaming gzip compression
-- [x] Streaming gzip decompression
-- [x] Streaming deflate
-- [x] Identity passthrough
-- [x] Decompression limits enforced

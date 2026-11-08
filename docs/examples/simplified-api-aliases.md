@@ -37,7 +37,3 @@ Status codes and bodies vary with the target URL and verb.
 ```bash
 zig build run-simple-get
 ```
-
-## What to Verify
-
-- Each verb returns the expected status and body.

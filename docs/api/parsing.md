@@ -27,7 +27,6 @@ The available client helpers are:
 | Type | Purpose |
 |---|---|
 | `httpx.parsing.Document` | Parsed document tree |
-| `httpx.parsing.Parser` | Configurable document parser |
 | `httpx.parsing.Handle` | Node reference |
 | `httpx.parsing.Nodes` | Node collection |
 | `httpx.parsing.Kind` | Detected content kind |
@@ -36,10 +35,16 @@ The available client helpers are:
 | `httpx.parsing.Sitemap` | Parsed sitemap |
 | `httpx.parsing.Selector` | Parsed selector expression |
 
-## Initialize a parser
+## Parse with `httpx.parsing.init`
+
+All parse methods live on `httpx.parsing.init(allocator, io, .{})`:
 
 ```zig
-var parser = httpx.parsing.init(allocator, .{});
+var doc = try httpx.parsing.init(allocator, io, .{}).parseHtml(html);
+defer doc.deinit();
+
+var feed = try httpx.parsing.init(allocator, io, .{}).parseFeed(xml, "application/rss+xml");
+defer feed.deinit();
 ```
 
 Use `httpx.parsing.detectKind` when content type must be selected before

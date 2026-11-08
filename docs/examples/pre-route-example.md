@@ -33,8 +33,3 @@ server.router.setNotFoundHandler(notFound);
 ```
 
 Each request line follows the middleware's `[request] METHOD PATH` print format; the concrete method and path vary with the incoming traffic, and unmatched paths receive the custom `404` body.
-
-## What to Verify
-
-- Every request passes through the middleware first.
-- Unknown paths return the custom 404 body.

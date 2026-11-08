@@ -30,8 +30,6 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    std.debug.print("==> Downloading with SHA256SUMS file parsing & verification...\n", .{});
-
     // Sample checksum file format simulation
     const checksumManifest =
         \\# Official Release Hashes

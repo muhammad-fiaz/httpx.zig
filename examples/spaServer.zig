@@ -23,8 +23,6 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    std.debug.print("==> HTTPX SPA Fallback Server Demo\n\n", .{});
-
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
@@ -69,6 +67,5 @@ pub fn main() !void {
     defer resApi.deinit();
     std.debug.print("GET /api/user (API Route) -> Status: {d}, Body: {s}\n", .{ resApi.status, resApi.body });
 
-    std.debug.print("\nSPA server verification successful.\n", .{});
     server.stop();
 }

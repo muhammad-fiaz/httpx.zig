@@ -56,8 +56,3 @@ The port number varies per run; unauthenticated requests against the `auth` snip
 ```bash
 zig build run-helmet-server
 ```
-
-## What to Verify
-
-- Unauthenticated requests return 401.
-- Security headers appear on responses.

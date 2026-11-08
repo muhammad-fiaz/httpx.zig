@@ -5,7 +5,7 @@ This section contains practical `httpx.zig` demo programs for client, server, mi
 ## How to Use
 
 1. Open an example page.
-2. Review the `Demo Program` snippet.
+2. Review the Example snippet.
 3. Run the matching command from the `Run` section.
 4. Verify behavior with the checklist.
 

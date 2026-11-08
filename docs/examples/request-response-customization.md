@@ -57,8 +57,3 @@ zig build run-custom-headers
 zig build run-custom-responses
 zig build run-custom-server
 ```
-
-## What to Verify
-
-- Custom headers, query params, and auth round-trip.
-- Response accessors return status, content type, and body text.

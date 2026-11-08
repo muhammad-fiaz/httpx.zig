@@ -35,8 +35,3 @@ Supported hashes: `sha256`, `sha384`, `sha512`, `md5`, `sha1`, plus
 ```bash
 zig build run-download-verify
 ```
-
-## What to Verify
-
-- Matching hashes verify and save the file.
-- Mismatches return `ChecksumMismatch` without keeping corrupt output.

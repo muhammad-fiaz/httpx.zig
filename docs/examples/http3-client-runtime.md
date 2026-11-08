@@ -27,8 +27,3 @@ Status is 200 on success against the loopback HTTP/3 endpoint; URL/port vary per
 ```bash
 zig build run-http3-client
 ```
-
-## What to Verify
-
-- Control-stream SETTINGS exchange validates.
-- The client decodes HTTP/3 HEADERS/DATA frames into a standard `Response`.
