@@ -28,9 +28,9 @@ pub fn main() !void {
         .enableDocs = false,
     });
     defer server.deinit();
-    try server.router.add(.GET, "/get", okHandler, .{});
-    try server.router.add(.GET, "/headers", okHandler, .{});
-    try server.router.add(.GET, "/ip", okHandler, .{});
+    try server.get("/get", .{ .handler = okHandler });
+    try server.get("/headers", .{ .handler = okHandler });
+    try server.get("/ip", .{ .handler = okHandler });
     const port = server.localPort();
     const thread = try server.start();
 

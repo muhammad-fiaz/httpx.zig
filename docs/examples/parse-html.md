@@ -8,8 +8,8 @@ Demonstrates parseHtml.zig using the canonical HTTPX API.
 //! Example: HTML/XML/Feed/Robots/Sitemap parsing with httpx.zig
 //!
 //! Demonstrates the full parsing API:
-//!   * Unified `httpx.parsing.init(allocator, .{})` instance
-//!   * Parser `parseHtml`, `parseXml`, `parseFeed`, `parseRobots`, `parseSitemap`
+//!   * `parseHtml`, `parseXml`, `parseFeed`, `parseRobots`, `parseSitemap`
+//!     methods on `httpx.parsing.init(allocator, io, .{})`
 //!   * Direct dot-notation access on parsed elements and collections
 //!   * Clean lifecycle: `doc.deinit()` frees all extracted structures and nodes
 //!
@@ -23,11 +23,9 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    std.debug.print("\n==> httpx.zig Unified Parsing & Inspection Subsystem Demo\n\n", .{});
-
-    // 1. Initialize the unified Parser instance with the allocator once
-    var p = httpx.parsing.init(allocator, .{});
+    std.debug.print("\nUnified parsing API\n\n", .{});
 
     // 1. HTML Parsing & DOM Inspection
     std.debug.print("1. HTML Parsing & DOM Inspection\n", .{});
@@ -73,7 +71,7 @@ pub fn main() !void {
         \\</html>
     ;
 
-    var doc = try p.parseHtml(htmlSrc);
+    var doc = try httpx.parsing.init(allocator, io, .{}).parseHtml(htmlSrc);
     defer doc.deinit();
 
     // Title
@@ -144,7 +142,7 @@ pub fn main() !void {
         \\</rss>
     ;
 
-    var feed = try p.parseFeed(rssSrc, "application/rss+xml");
+    var feed = try httpx.parsing.init(allocator, io, .{}).parseFeed(rssSrc, "application/rss+xml");
     defer feed.deinit();
     std.debug.print("  Feed Title: {s}\n", .{feed.title});
     std.debug.print("  Feed Link:  {s}\n", .{feed.link});
@@ -163,7 +161,7 @@ pub fn main() !void {
         \\Sitemap: https://httpx.zig/sitemap.xml
     ;
 
-    var r = try p.parseRobots(robotsSrc);
+    var r = try httpx.parsing.init(allocator, io, .{}).parseRobots(robotsSrc);
     defer r.deinit();
     std.debug.print("  Allowed '/' ? {}\n", .{r.isAllowed("MyBot", "/")});
     std.debug.print("  Allowed '/admin/dashboard' ? {}\n", .{r.isAllowed("MyBot", "/admin/dashboard")});
@@ -189,22 +187,18 @@ pub fn main() !void {
         \\</urlset>
     ;
 
-    var sm = try p.parseSitemap(sitemapSrc);
+    var sm = try httpx.parsing.init(allocator, io, .{}).parseSitemap(sitemapSrc);
     defer sm.deinit();
     std.debug.print("  Sitemap URLs ({d}):\n", .{sm.urls.len});
     for (sm.urls) |u| {
         std.debug.print("    loc={s} lastMod={s} prio={d:.1}\n", .{ u.loc, u.lastMod, u.priority orelse 0.0 });
     }
-
-    std.debug.print("\nAll parsing tests and demonstrations completed successfully.\n", .{});
 }
 ```
 
 ## Expected Output
 
 ```text
-==> httpx.zig Unified Parsing & Inspection Subsystem Demo
-
 1. HTML Parsing & DOM Inspection
   Title: httpx Parsing Demo
   Description: A demo of httpx parsing
@@ -244,8 +238,6 @@ pub fn main() !void {
   Sitemap URLs (2):
     loc=https://httpx.zig/ lastMod=2026-08-30 prio=1.0
     loc=https://httpx.zig/docs lastMod= prio=0.8
-
-All parsing tests and demonstrations completed successfully.
 ```
 
 Counts, URLs, titles, and boolean results follow the embedded demo inputs above; they vary only if those inputs change.

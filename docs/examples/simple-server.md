@@ -38,8 +38,8 @@ pub fn main() !void {
     });
     defer server.deinit();
 
-    try server.router.add(.GET, "/", indexHandler, .{});
-    try server.router.add(.GET, "/json", jsonHandler, .{});
+    try server.get("/", .{ .handler = indexHandler });
+    try server.get("/json", .{ .handler = jsonHandler });
 
     const port = server.localPort();
     std.debug.print("listening on 127.0.0.1:{d}\n", .{port});
