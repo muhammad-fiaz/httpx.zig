@@ -1,11 +1,10 @@
-//! Example: complete embedded + filesystem website with file-based routing.
+//! File-based website served entirely by `httpx.Server`.
 //!
-//! Covers in one runnable program:
-//!   individual + recursive embedded assets, embedded templates, file
-//!   routes, clean + extension URLs, trailing-slash modes, .html/.htm,
-//!   index routes, slugs, custom + dynamic routes, navigation, static
-//!   assets, SPA coexistence, code routes, watcher + live reload (fs mode)
-//!   and single-executable production mode (embedded).
+//! The file routes, static assets, and templates are enabled through the
+//! `.site` option of `httpx.Server.init`: a filesystem directory in
+//! development, or an explicit embedded-file manifest in production.
+//! Mounting happens in `run()`, after the code routes below, so explicit
+//! handlers always win over generated routes.
 //!
 //! Run embedded (default): `zig build run-website`
 //! Run from filesystem:    `zig build run-website -- --fs`
@@ -13,14 +12,29 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-const embedded = @import("embed_website");
+// Embedded files, listed explicitly: one entry per file under dist/.
+const embedded = [_]httpx.assets.EmbeddedFile{
+    .{ .path = "index.html", .content = @embedFile("dist/index.html") },
+    .{ .path = "blog/hello-world.html", .content = @embedFile("dist/blog/hello-world.html") },
+    .{ .path = "blog/index.html", .content = @embedFile("dist/blog/index.html") },
+    .{ .path = "about/company.htm", .content = @embedFile("dist/about/company.htm") },
+    .{ .path = "about/index.html", .content = @embedFile("dist/about/index.html") },
+    .{ .path = "about/team.html", .content = @embedFile("dist/about/team.html") },
+    .{ .path = "users/[id].html", .content = @embedFile("dist/users/[id].html") },
+    .{ .path = "templates/layout.html", .content = @embedFile("dist/templates/layout.html") },
+    .{ .path = "templates/components/footer.html", .content = @embedFile("dist/templates/components/footer.html") },
+    .{ .path = "templates/components/header.html", .content = @embedFile("dist/templates/components/header.html") },
+    .{ .path = "assets/css/app.css", .content = @embedFile("dist/assets/css/app.css") },
+    .{ .path = "assets/images/logo.svg", .content = @embedFile("dist/assets/images/logo.svg") },
+    .{ .path = "assets/js/app.js", .content = @embedFile("dist/assets/js/app.js") },
+};
 
 fn health(_: *httpx.router.Context) anyerror!httpx.router.Response {
-    return .{ .status = 200, .body = @constCast("{\"status\":\"ok\"}") };
+    return .{ .status = 200, .body = "{\"status\":\"ok\"}", .contentType = "application/json" };
 }
 
 fn apiUsers(_: *httpx.router.Context) anyerror!httpx.router.Response {
-    return .{ .status = 200, .body = @constCast("[{\"id\":1}]") };
+    return .{ .status = 200, .body = "[{\"id\":1}]", .contentType = "application/json" };
 }
 
 fn check(client: *httpx.Client, url: []const u8, wantStatus: u16, wantBodyPart: ?[]const u8) !void {
@@ -51,37 +65,31 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, a, "--fs")) useFs = true;
     }
 
-    var server = try httpx.Server.init(allocator, io, .{
-        .host = "127.0.0.1",
-        .port = 0,
-        .enableDocs = false,
-    });
-    defer server.deinit();
-
-    // Code routes first: exact matches always win over generated routes.
-    try server.get("/health", health);
-    try server.get("/api/users", apiUsers);
-
-    var site = if (useFs)
-        try httpx.Site.init(allocator, io, .{ .filesystem = "examples/website/dist" }, .{
-            .custom = &.{
-                .{ .file = "about/company.htm", .route = "/company", .name = "company" },
+    var server = if (useFs)
+        try httpx.Server.init(allocator, io, .{
+            .host = "127.0.0.1",
+            .port = 0,
+            .enableDocs = false,
+            .site = .{
+                .filesystem = "examples/website/dist",
             },
         })
     else
-        try httpx.Site.init(allocator, io, .{ .embedded = &embedded.files }, .{
-            .watch = false,
-            .reload = false,
-            .custom = &.{
-                .{ .file = "about/company.htm", .route = "/company", .name = "company" },
+        try httpx.Server.init(allocator, io, .{
+            .host = "127.0.0.1",
+            .port = 0,
+            .enableDocs = false,
+            .site = .{
+                .embedded = &embedded,
+                .watch = false,
+                .reload = false,
             },
         });
-    defer site.deinit();
-    try site.mount(&server);
+    defer server.deinit();
 
-    for (site.collisions()) |c| {
-        std.debug.print("collision {s}: {s} wins over {s}\n", .{ c.route, c.winner, c.loser });
-    }
+    // Code routes first: exact matches always win over generated routes.
+    try server.get("/health", .{ .handler = health });
+    try server.get("/api/users", .{ .handler = apiUsers });
 
     const port = server.localPort();
     const ServerThread = struct {
@@ -105,7 +113,6 @@ pub fn main(init: std.process.Init) !void {
         .{ .path = "/about/", .status = 200, .body = "About" },
         .{ .path = "/about/team", .status = 200, .body = "Team" },
         .{ .path = "/about/team.html", .status = 200, .body = "Team" },
-        .{ .path = "/company", .status = 200, .body = "Company" },
         .{ .path = "/blog", .status = 200, .body = "Blog" },
         .{ .path = "/blog/hello-world", .status = 200, .body = "Hello World" },
         .{ .path = "/users/42", .status = 200, .body = "User page" },
@@ -121,14 +128,7 @@ pub fn main(init: std.process.Init) !void {
         try check(&client, url, c.status, c.body);
     }
 
-    // Navigation resolves through canonical route metadata.
-    const homeUrl = try site.urlFor("home", .{}, null);
-    defer allocator.free(homeUrl);
-    const userUrl = try site.urlFor("users.{id}", .{ .id = 7 }, null);
-    defer allocator.free(userUrl);
-    std.debug.print("nav home={s} user={s}\n", .{ homeUrl, userUrl });
-
-    server.stop();
+    server.requestShutdown();
 
     if (!useFs) httpx.assets.globalStore(allocator).deinit();
 }

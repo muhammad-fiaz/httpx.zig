@@ -20,15 +20,15 @@ try server.static("/static", "./public");
 
 MIME types resolve through the shared table (`httpx.mime.fromPath`), and
 path traversal is rejected by the static layer. For file-based routing with
-clean URLs, use `httpx.Site` (see [Single File](/guide/single-file)).
+clean URLs, enable `.site` in the server config: `httpx.Server.init` with
+`.site = .{ .filesystem = "dist" }` or `.embedded = &manifest` (see
+`examples/website/`).
 
 ## Expected Output
 
 When run via the static-site target, the output follows that program's print format:
 
 ```text
-==> HTTPX Static Site Server Demo
-
 Static site server listening on http://127.0.0.1:54321
 GET / -> Status: 200, Length: 1024
 Mounted Site Title: 'Example Site'

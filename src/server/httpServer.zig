@@ -38,6 +38,7 @@ const udpMod = @import("../sockets/udp.zig");
 const templatesMod = @import("../web/templates/templates.zig");
 const tlsServerMod = @import("../protocols/tls/tlsServer.zig");
 const fsMod = @import("../utils/fs.zig");
+const siteMod = @import("../web/site/host.zig");
 const addressMod = @import("../net/address.zig");
 const uriMod = @import("../common/uri.zig");
 const alpnMod = @import("../protocols/tls/alpn.zig");
@@ -286,6 +287,10 @@ pub const Config = struct {
     liveReloadPath: []const u8 = "/__httpx_liveReload",
     /// Native template engine configuration. If null, automatically discovers and enables "templates/" if that directory exists.
     templates: ?templatesMod.Config = null,
+    /// File-based website (pages, assets, templates). Null disables. The
+    /// server builds the route table at init; routes mount in `run()` so
+    /// explicit code routes registered after init always win ties.
+    site: ?siteMod.SiteConfig = null,
     /// Production-grade TLS / HTTPS configuration.
     /// When provided with certificate & private key (PEM or file path), enables HTTPS server.
     tls: ?tlsServerMod.Server.Config = null,
@@ -539,7 +544,11 @@ pub const Server = struct {
     graphqlMounted: bool = false,
     graphqlCfg: graphqlServerMod.HandlerConfig = .{},
     watcher: ?*watcherMod.Watcher = null,
-    sitePtr: ?*anyopaque = null,
+    /// File-based website host (owned by the server). Built at init from
+    /// `.site`, mounted in `run()` after user routes.
+    siteHost: ?siteMod.Host = null,
+    sitePtr: ?*siteMod.Host = null,
+    siteMounted: bool = false,
     siteReloadFn: ?*const fn (sitePtr: ?*anyopaque, server: *Server) void = null,
     liveReloadEventId: std.atomic.Value(usize) = .init(1),
     /// Last reload strategy reported by the watcher (as a
@@ -798,8 +807,12 @@ pub const Server = struct {
             .startTimeMs = clock.monotonicMillis(io),
         };
         srv.router.templateEngine = templateEngine;
+        if (effectiveCfg.site) |siteCfg| {
+            srv.siteHost = try siteMod.Host.init(allocator, io, siteCfg);
+        }
         errdefer {
             srv.router.deinit();
+            if (srv.siteHost) |*host| host.deinit();
             if (templateEngine) |eng| {
                 eng.deinit();
                 allocator.destroy(eng);
@@ -990,6 +1003,11 @@ pub const Server = struct {
     }
 
     pub fn deinit(self: *Server) void {
+        if (self.siteHost) |*host| {
+            host.deinit();
+            self.siteHost = null;
+            self.sitePtr = null;
+        }
         if (self.watcher) |w| {
             w.stop();
             w.deinit();
@@ -1278,6 +1296,16 @@ pub const Server = struct {
             self.docsMounted = true;
             const dc = self.cfg.docs orelse docsMod.Config{};
             docsMod.mount(self.allocator, &self.router, dc, null) catch {};
+        }
+
+        // Mount the file-based website last so explicit code routes win
+        // ties over generated routes. Like the docs mount above.
+        if (self.siteHost) |*host| {
+            if (!self.siteMounted) {
+                self.siteMounted = true;
+                self.sitePtr = host;
+                host.mount(self) catch {};
+            }
         }
 
         // Out-of-the-box watcher and live-reload integration

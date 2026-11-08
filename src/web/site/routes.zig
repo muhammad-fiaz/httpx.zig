@@ -1,30 +1,8 @@
 //! File-based route discovery: asset tree paths -> router patterns.
 //!
-//! Pure functions over logical file paths (no IO). The same builder feeds
-//! filesystem walks and build-generated embedded manifests, so both modes
-//! produce identical route structures.
-//!
-//! Rules (deterministic, documented):
-//!   * Only `.html`/`.htm` files (ASCII case-insensitive) become pages;
-//!     every other extension is skipped (assets belong to static serving).
-//!   * `index` (configurable base name) files become their directory route:
-//!     `dist/index.html` -> `/`, `dist/about/index.html` -> `/about`.
-//!   * `[name]` segments become router `{name}` params, `[...name]` becomes
-//!     a trailing `*name` wildcard (must be the final segment).
-//!   * Every other segment is used byte-verbatim (case, `-`, `_`, dots and
-//!     Unicode preserved); only the page extension is stripped. Filenames
-//!     containing `{`, `}` or `*` outside dynamic syntax are rejected.
-//!   * Clean URLs drop the extension (`/about/team`); extension URLs keep
-//!     the on-disk form (`/about/team.html`). `UrlStyle` selects which are
-//!     registered. Static segments needing percent-encoding additionally
-//!     register an encoded alias route for the same file.
-//!   * Route names default to the dotted clean path (`blog.hello-world`,
-//!     root is `home`); explicit `CustomRoute.name` overrides.
-//!   * Collisions (same final route from several files, including identical
-//!     dynamic shapes) resolve by rank: custom > index.html > index.htm >
-//!     stem.html > stem.htm, ties broken by smaller file path. A losing
-//!     file loses all of its routes; every conflict is reported in
-//!     `BuildResult.collisions`, never silently picked.
+//! Pure functions over logical file paths (no IO) plus the route table the
+//! server builds from them. Produces identical structures whether files are
+//! walked on disk or declared as an explicit embedded manifest.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

@@ -120,7 +120,17 @@ Dynamic routes discovered at runtime use `registerRouteTable(&routes)`, applying
 
 ## File-Based Routing Conventions
 
-`httpx.site.Site` unifies filesystem discovery with the core router:
+`httpx.Server` serves file-based websites through its `.site` option. File
+discovery, routing, and template rendering are owned by the server itself;
+the filesystem directory (development) or an explicit embedded-file
+manifest (production) is declared once:
+
+```zig
+var server = try httpx.Server.init(allocator, io, .{
+    .site = .{ .filesystem = "dist" },
+});
+```
+
 - **Static & nested**: `about/team.html` -> `/about/team`.
 - **Index files**: `index.html` -> `/`, `blog/index.html` -> `/blog`.
 - **Dynamic segments**: `users/[id].html` -> `/users/{id}`, `users/[id:int].html` -> `/users/{id:int}`.

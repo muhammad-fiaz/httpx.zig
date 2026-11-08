@@ -1,6 +1,6 @@
 # Example: Download Batch
 
-Demonstrates downloadBatch.zig using the canonical HTTPX API.
+Downloads multiple files concurrently with one shared client.
 
 ## Complete Example
 
@@ -8,24 +8,19 @@ Demonstrates downloadBatch.zig using the canonical HTTPX API.
 const std = @import("std");
 const httpx = @import("httpx");
 
-const DownloadTask = struct {
-    taskId: usize,
-    url: []const u8,
-    dest: []const u8,
+const Job = struct {
+    client: *httpx.Client,
+    task: httpx.client.download.Task,
 
     fn run(ctx: ?*anyopaque, cancel: *std.atomic.Value(bool)) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(ctx.?));
-        const io = std.Io.Threaded.global_single_threaded.io();
-        var c = httpx.Client.init(std.heap.smp_allocator, io, .{});
-        defer c.deinit();
-
-        _ = c.download(self.url, .{
-            .path = self.dest,
-            .progress = .enabled,
+        _ = try self.client.download(self.task.url, .{
+            .path = self.task.dest,
+            .progress = .disabled,
             .existing = .overwrite,
             .cancel = cancel,
             .createDirs = true,
-        }) catch {};
+        });
     }
 };
 
@@ -33,43 +28,32 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
 
     const sampleUrl = "https://httpbun.com/bytes/90";
 
-    var tasks = [_]DownloadTask{
-        .{ .taskId = 1, .url = sampleUrl, .dest = "downloads/batch_file1.bin" },
-        .{ .taskId = 2, .url = sampleUrl, .dest = "downloads/batch_file2.bin" },
-        .{ .taskId = 3, .url = sampleUrl, .dest = "downloads/batch_file3.bin" },
+    var jobs = [_]Job{
+        .{ .client = &client, .task = .{ .url = sampleUrl, .dest = "downloads/batch_file1.bin" } },
+        .{ .client = &client, .task = .{ .url = sampleUrl, .dest = "downloads/batch_file2.bin" } },
+        .{ .client = &client, .task = .{ .url = sampleUrl, .dest = "downloads/batch_file3.bin" } },
     };
 
-    const io = std.Io.Threaded.global_single_threaded.io();
-
     var pool = try httpx.concurrency.Pool.init(allocator, io, .{
-        .workers = 4,
+        .workers = 3,
     });
     defer pool.deinit();
 
-    std.debug.print("==> Starting concurrent batch download with built-in zero-config progress bar...\n", .{});
-
-    for (&tasks) |*task| {
-        try pool.submit(DownloadTask.run, task, null);
+    for (&jobs) |*job| {
+        try pool.submit(Job.run, job, null);
     }
 
     pool.shutdownDrain();
     pool.join();
-
-    std.debug.print("Batch download completed successfully.\n", .{});
 }
 ```
-
-## Expected Output
-
-```text
-==> Starting concurrent batch download with built-in zero-config progress bar...
-Batch download completed successfully.
-```
-
-A live progress bar for each worker may interleave between these two lines. File sizes (90 bytes per file in this example) and timings vary; only the line format above is stable.
 
 ## How to Run
 

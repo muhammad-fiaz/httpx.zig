@@ -68,8 +68,7 @@ pub const Server = struct {
         var addr: addressMod.Address = blk: {
             if (std.mem.eql(u8, cfg.host, "0.0.0.0")) break :blk addressMod.Address.unspecified4(cfg.port);
             if (std.mem.eql(u8, cfg.host, "::")) break :blk addressMod.Address.unspecified6(cfg.port);
-            var parsed: addressMod.Address = undefined;
-            break :blk parsed.parseIp(cfg.host) catch return error.InvalidHost;
+            break :blk addressMod.Address.parseIp(cfg.host) catch return error.InvalidHost;
         };
         addr.port = cfg.port;
         var self = Server{

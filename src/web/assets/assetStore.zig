@@ -181,16 +181,15 @@ pub fn registerEmbedded(
     try store.register(path, content, contentType);
 }
 
-/// One entry of a build-generated embedded directory manifest: a logical
-/// web path plus the bytes embedded for it (typically via `@embedFile`).
-/// Manifests are generated deterministically sorted by `build.zig` helpers,
-/// so registration order never depends on filesystem enumeration order.
+/// One entry of an explicit embedded-file manifest: a logical web path plus
+/// the bytes embedded for it (typically via `@embedFile`). The manifest is
+/// declared in user code, one entry per file.
 pub const EmbeddedFile = struct {
     path: []const u8,
     content: []const u8,
 };
 
-/// Registers a whole build-generated manifest with one call. MIME types
+/// Registers a whole explicit embedded-file manifest with one call. MIME types
 /// resolve through the shared MIME system unless an entry needs an
 /// override, in which case register that path individually afterwards.
 pub fn registerEmbeddedDir(allocator: Allocator, files: []const EmbeddedFile) !void {

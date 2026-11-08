@@ -26,40 +26,41 @@ const result = try client.download("https://example.com/archive.tar.gz", .{
 });
 ```
 
-For concurrent multi-file downloads, use `httpx.concurrency.Pool` with `client.download`:
+For concurrent multi-file downloads, use `httpx.concurrency.Pool` with one
+shared `client.download` call per task. The client pool, DNS cache, and TLS
+session cache are internally synchronized, so sharing one client is safe:
 
 ```zig
 const std = @import("std");
 const httpx = @import("httpx");
 
-const DownloadTask = struct {
-    url: []const u8,
-    dest: []const u8,
+const Job = struct {
+    client: *httpx.Client,
+    task: httpx.client.download.Task,
 
     fn run(ctx: ?*anyopaque, cancel: *std.atomic.Value(bool)) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(ctx.?));
-        const io = std.Io.Threaded.global_single_threaded.io();
-        var client = httpx.Client.init(std.heap.smp_allocator, io, .{});
-        defer client.deinit();
-
-        _ = try client.download(self.url, .{
-            .path = self.dest,
-            .progress = .enabled,
+        _ = try self.client.download(self.task.url, .{
+            .path = self.task.dest,
+            .progress = .disabled,
             .cancel = cancel,
         });
     }
 };
 
+var client = httpx.Client.init(allocator, io, .{});
+defer client.deinit();
+
 var pool = try httpx.concurrency.Pool.init(allocator, io, .{ .workers = 4 });
 defer pool.deinit();
 
-var tasks = [_]DownloadTask{
-    .{ .url = "https://example.com/a.tar", .dest = "a.tar" },
-    .{ .url = "https://example.com/b.tar", .dest = "b.tar" },
+var jobs = [_]Job{
+    .{ .client = &client, .task = .{ .url = "https://example.com/a.tar", .dest = "a.tar" } },
+    .{ .client = &client, .task = .{ .url = "https://example.com/b.tar", .dest = "b.tar" } },
 };
 
-for (&tasks) |*t| {
-    try pool.submit(DownloadTask.run, t, null);
+for (&jobs) |*job| {
+    try pool.submit(Job.run, job, null);
 }
 pool.shutdownDrain();
 pool.join();

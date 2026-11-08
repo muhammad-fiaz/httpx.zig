@@ -31,6 +31,8 @@
 > [!TIP]
 > If you build with httpx.zig, make sure to give it a star ⭐.
 
+---
+
 <details>
 <summary><strong>Table of Contents</strong> (click to expand)</summary>
 
@@ -250,6 +252,8 @@ To use a local checkout from another project:
 
 </details>
 
+---
+
 ### Wire into `build.zig`
 
 ```zig
@@ -259,6 +263,7 @@ const httpx_dep = b.dependency("httpx", .{
 });
 exe.root_module.addImport("httpx", httpx_dep.module("httpx"));
 ```
+---
 
 ## Quick Start
 
@@ -354,6 +359,8 @@ pub fn main() !void {
 }
 ```
 
+---
+
 ## Performance
 
 Run the benchmarks with:
@@ -445,6 +452,8 @@ Contributions are welcome! Please:
 3. Add tests for new functionality
 4. Ensure all tests pass: `zig build test`
 5. Submit a pull request
+
+---
 
 ## License
 

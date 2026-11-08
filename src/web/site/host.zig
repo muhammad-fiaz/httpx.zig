@@ -1,26 +1,28 @@
 //! File-based website serving: one mount for pages, assets and templates.
 //!
-//! A `Site` discovers page files (filesystem walk or build-generated
-//! embedded manifest), builds a deterministic route table with
-//! `routes.buildRoutes`, and registers it on the existing `Router`:
-//! HTML pages render through the shared template engine, every other
-//! asset flows through the existing static/SPA pipeline (which already
-//! prefers embedded bytes). Normally mount last, after explicit API
-//! routes; exact file routes outscore static wildcards by router priority.
+//! A `Host` discovers page files (a filesystem directory in development, or
+//! an explicit embedded-file manifest in production), builds a deterministic
+//! route table, and registers it on the existing `Router`: HTML pages render
+//! through the shared template engine, every other asset flows through the
+//! existing static/SPA pipeline (which already prefers embedded bytes).
+//! Normally mount last, after explicit API routes; exact file routes outscore
+//! static wildcards by router priority.
 //!
 //! ```zig
-//! var site = try httpx.site.Site.init(allocator, io, .{ .filesystem = "dist" }, .{});
+//! var site = try httpx.Host.init(allocator, io, .{ .filesystem = "dist" });
 //! defer site.deinit();
 //! try site.mount(&server); // register pages + static layer
 //! ```
 //!
 //! Ownership: `init` receives allocator and IO once. `mount` borrows the
-//! server (Site must outlive serving; deinit after `server.stop()`).
+//! server (Host must outlive serving; deinit after `server.stop()`).
 //! `urlFor`/`staticUrl` return caller-owned slices.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const routerMod = @import("../router/router.zig");
+const patternMod = @import("../router/routePattern.zig");
+const routesMod = @import("routes.zig");
 const Context = routerMod.Context;
 const Response = routerMod.Response;
 const uri = @import("../../common/uri.zig");
@@ -32,29 +34,19 @@ const spa = @import("../spa/spaServer.zig");
 const watcherMod = @import("../watcher/watcherBackend.zig");
 const reload = @import("../watcher/fileWatcher.zig");
 const Server = @import("../../server/httpServer.zig").Server;
-const routesMod = @import("siteRoutes.zig");
 
 pub const TrailingSlash = routerMod.TrailingSlash;
 
-/// Re-exported route-table vocabulary so site users import one namespace.
-pub const UrlStyle = routesMod.UrlStyle;
-pub const FileRoute = routesMod.FileRoute;
-pub const Collision = routesMod.Collision;
-pub const CustomRoute = routesMod.CustomRoute;
-
-/// Asset source: a filesystem directory (development) or a build-generated
-/// manifest slice (production single-executable).
-pub const Source = union(enum) {
-    filesystem: []const u8,
-    embedded: []const assetsMod.EmbeddedFile,
-};
-
-pub const Config = struct {
+pub const SiteConfig = struct {
+    /// Filesystem directory (development). Mutually exclusive with `embedded`.
+    filesystem: ?[]const u8 = null,
+    /// Explicit embedded-file manifest (production single-executable).
+    /// Mutually exclusive with `filesystem`.
+    embedded: ?[]const assetsMod.EmbeddedFile = null,
     base: []const u8 = "/",
     urls: routesMod.UrlStyle = .both,
     trailing: TrailingSlash = .serveBoth,
     indexBase: []const u8 = "index",
-    custom: []const routesMod.CustomRoute = &.{},
     /// SPA fallback file (e.g. "index.html"); null disables SPA fallback.
     spaFallback: ?[]const u8 = null,
     /// Filesystem mode: drive the server watcher on the site root.
@@ -73,17 +65,17 @@ pub const NavEntry = struct {
 };
 
 const Target = struct {
-    site: *Site,
+    site: *Host,
     route: *const routesMod.FileRoute,
 };
 
-pub const Site = struct {
+pub const Host = struct {
     allocator: Allocator,
     io: std.Io,
-    config: Config,
+    config: SiteConfig,
     base: []u8,
     embedded: bool,
-    /// Site root directory (filesystem mode) or "" (embedded). The template
+    /// Host root directory (filesystem mode) or "" (embedded). The template
     /// engine created at mount time serves templates relative to it.
     root: []u8,
     table: routesMod.BuildResult,
@@ -92,17 +84,20 @@ pub const Site = struct {
     ssePath: []u8,
     mounted: bool = false,
 
-    /// Discovers files from `source`, registers embedded manifests and
-    /// builds the route table. The template engine is created at `mount`
-    /// time with the server allocator, so the server owns and destroys it.
-    pub fn init(allocator: Allocator, io: std.Io, source: Source, config: Config) !Site {
+    /// Discovers files from the configured source, registers embedded
+    /// manifests and builds the route table. The template engine is created
+    /// at `mount` time with the server allocator, so the server owns and
+    /// destroys it. Exactly one of `.filesystem` / `.embedded` must be set.
+    pub fn init(allocator: Allocator, io: std.Io, config: SiteConfig) !Host {
         if (config.base.len == 0 or config.base[0] != '/') return error.InvalidFilePath;
-        const embedded = source == .embedded;
+        if ((config.filesystem == null) == (config.embedded == null)) return error.InvalidFilePath;
+        const embedded = config.embedded != null;
 
         var root: []u8 = undefined;
-        switch (source) {
-            .filesystem => |r| root = try allocator.dupe(u8, r),
-            .embedded => root = try allocator.dupe(u8, ""),
+        if (config.filesystem) |r| {
+            root = try allocator.dupe(u8, r);
+        } else {
+            root = try allocator.dupe(u8, "");
         }
         errdefer allocator.free(root);
 
@@ -111,12 +106,11 @@ pub const Site = struct {
             for (files.items) |f| allocator.free(f);
             files.deinit(allocator);
         }
-        switch (source) {
-            .filesystem => |r| try discoverFiles(allocator, io, r, &files),
-            .embedded => |manifest| {
-                try assetsMod.registerEmbeddedDir(allocator, manifest);
-                for (manifest) |f| try files.append(allocator, try allocator.dupe(u8, f.path));
-            },
+        if (config.filesystem) |r| {
+            try discoverFiles(allocator, io, r, &files);
+        } else if (config.embedded) |manifest| {
+            try assetsMod.registerEmbeddedDir(allocator, manifest);
+            for (manifest) |f| try files.append(allocator, try allocator.dupe(u8, f.path));
         }
         if (config.templateDir) |td| {
             var kept: std.ArrayList([]const u8) = .empty;
@@ -136,14 +130,13 @@ pub const Site = struct {
             .base = config.base,
             .urls = config.urls,
             .indexBase = config.indexBase,
-            .custom = config.custom,
         });
         errdefer table.deinit(allocator);
 
         var trimmedEnd = config.base.len;
         while (trimmedEnd > 1 and config.base[trimmedEnd - 1] == '/') trimmedEnd -= 1;
 
-        var self = Site{
+        var self = Host{
             .allocator = allocator,
             .io = io,
             .config = config,
@@ -166,7 +159,7 @@ pub const Site = struct {
         return self;
     }
 
-    pub fn deinit(self: *Site) void {
+    pub fn deinit(self: *Host) void {
         self.targets.deinit(self.allocator);
         for (self.nav.items) |e| {
             self.allocator.free(e.name);
@@ -179,11 +172,11 @@ pub const Site = struct {
         self.allocator.free(self.base);
     }
 
-    pub fn routes(self: *const Site) []const routesMod.FileRoute {
+    pub fn routes(self: *const Host) []const routesMod.FileRoute {
         return self.table.routes;
     }
 
-    pub fn collisions(self: *const Site) []const routesMod.Collision {
+    pub fn collisions(self: *const Host) []const routesMod.Collision {
         return self.table.collisions;
     }
 
@@ -194,9 +187,9 @@ pub const Site = struct {
     /// already equals the site root; otherwise mounting fails loudly
     /// instead of silently rendering from the wrong tree. Duplicate route
     /// shapes also fail loudly.
-    pub fn mount(self: *Site, server: *Server) !void {
+    pub fn mount(self: *Host, server: *Server) !void {
         // Server.init already wires router.templateEngine when it creates
-        // the engine itself; a Site-created engine is unwound below.
+        // the engine itself; a Host-created engine is unwound below.
         var created: ?*templatesMod.Engine = null;
         errdefer if (created) |e| {
             server.templateEngine = null;
@@ -300,7 +293,7 @@ pub const Site = struct {
                 const SiteReloader = struct {
                     fn reload(sitePtr: ?*anyopaque, s: *Server) void {
                         if (sitePtr) |sp| {
-                            const siteInstance: *Site = @ptrCast(@alignCast(sp));
+                            const siteInstance: *Host = @ptrCast(@alignCast(sp));
                             siteInstance.refresh(s) catch {};
                         }
                     }
@@ -316,7 +309,7 @@ pub const Site = struct {
     /// Refreshes filesystem routes dynamically during development.
     /// Safely builds a replacement route snapshot and updates the router.
     /// If file discovery or table building fails, existing routes remain untouched.
-    pub fn refresh(self: *Site, server: *Server) !void {
+    pub fn refresh(self: *Host, server: *Server) !void {
         if (self.embedded) return;
 
         var files: std.ArrayList([]const u8) = .empty;
@@ -344,11 +337,10 @@ pub const Site = struct {
             .base = self.config.base,
             .urls = self.config.urls,
             .indexBase = self.config.indexBase,
-            .custom = self.config.custom,
         });
         errdefer newTable.deinit(self.allocator);
 
-        // Pre-check new routes against server router (excluding old routes owned by this Site)
+        // Pre-check new routes against server router (excluding old routes owned by this Host)
         for (newTable.routes) |*r| {
             var isOwnOld = false;
             for (self.table.routes) |oldR| {
@@ -406,16 +398,16 @@ pub const Site = struct {
         return allocator.dupe(u8, base);
     }
 
-    fn checkPattern(self: *Site, server: *Server, pattern: []const u8) !void {
+    fn checkPattern(self: *Host, server: *Server, pattern: []const u8) !void {
         _ = self;
         if (server.router.hasConflict(.GET, pattern)) return error.DuplicateRoute;
     }
 
-    fn rootDir(self: *const Site) []const u8 {
+    fn rootDir(self: *const Host) []const u8 {
         return self.root;
     }
 
-    fn buildNav(self: *Site) !void {
+    fn buildNav(self: *Host) !void {
         for (self.table.routes) |r| {
             const url = try self.canonicalUrl(r.route, r.isIndex);
             errdefer self.allocator.free(url);
@@ -425,7 +417,7 @@ pub const Site = struct {
         }
     }
 
-    fn canonicalUrl(self: *Site, route: []const u8, isIndex: bool) ![]u8 {
+    fn canonicalUrl(self: *Host, route: []const u8, isIndex: bool) ![]u8 {
         _ = isIndex;
         if (self.config.trailing == .redirectSlash and !std.mem.eql(u8, route, "/")) {
             return std.fmt.allocPrint(self.allocator, "{s}/", .{route});
@@ -435,7 +427,7 @@ pub const Site = struct {
 
     /// Resolves a named route, substituting `{param}`/` *rest` values and
     /// appending an optional query struct. Caller owns the result.
-    pub fn urlFor(self: *Site, name: []const u8, params: anytype, query: anytype) ![]u8 {
+    pub fn urlFor(self: *Host, name: []const u8, params: anytype, query: anytype) ![]u8 {
         const entry = for (self.table.routes) |*r| {
             if (std.mem.eql(u8, r.name, name)) break r;
         } else return error.UnknownRoute;
@@ -467,7 +459,7 @@ pub const Site = struct {
     }
 
     /// Base-prefixed URL for a static asset path. Caller owns the result.
-    pub fn staticUrl(self: *Site, path: []const u8) ![]u8 {
+    pub fn staticUrl(self: *Host, path: []const u8) ![]u8 {
         var p = path;
         while (p.len > 0 and p[0] == '/') p = p[1..];
         if (uri.hasPathTraversal(p)) return error.InvalidFilePath;
@@ -656,13 +648,15 @@ test "site: navigation url building with encoding" {
     // page_allocator: the embedded manifest registers into the process
     // global registry, which outlives any single test on purpose.
     const allocator = std.heap.page_allocator;
-    var site = try Site.init(allocator, std.Io.Threaded.global_single_threaded.io(), .{
+    var site = try Host.init(allocator, std.Io.Threaded.global_single_threaded.io(), .{
         .embedded = &.{
             .{ .path = "index.html", .content = "<h1>home</h1>" },
             .{ .path = "users/[id].html", .content = "<h1>user</h1>" },
             .{ .path = "blog/[...path].html", .content = "<h1>post</h1>" },
         },
-    }, .{ .base = "/navtest", .urls = .clean });
+        .base = "/navtest",
+        .urls = .clean,
+    });
     defer site.deinit();
 
     const home = try site.urlFor("home", .{}, null);
@@ -685,3 +679,7 @@ test "site: navigation url building with encoding" {
     try std.testing.expectEqualStrings("/navtest/assets/app.css", css);
     try std.testing.expectError(error.InvalidFilePath, site.staticUrl("../secret"));
 }
+
+// ===========================================================================
+// File-based route table (asset tree paths -> router patterns).
+// ===========================================================================
