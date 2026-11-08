@@ -202,6 +202,8 @@ zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.
 >
 > For documentation matching older releases of `httpx.zig`, checkout that release's tag and generate local documentation using `zig build docs`, which emits native HTML documentation into `zig-out/docs/`.
 
+---
+
 <details>
 <summary><strong>Method 2: Latest Beta / Development Build</strong> (click to expand)</summary>
 

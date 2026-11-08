@@ -556,6 +556,28 @@ pub fn parseHttpDate(s: []const u8) ?i64 {
     return days * 86400 + @as(i64, hh) * 3600 + @as(i64, mm) * 60 + ss;
 }
 
+/// Formats epoch seconds as an IMF-fixdate string for `Last-Modified`.
+pub fn formatHttpDate(buf: []u8, epochSecs: i64) []const u8 {
+    const es = std.time.epoch.EpochSeconds{ .secs = @intCast(@max(0, epochSecs)) };
+    const day = es.getEpochDay();
+    const yearDay = day.calculateYearDay();
+    const monthDay = yearDay.calculateMonthDay();
+    const ds = es.getDaySeconds();
+
+    const wdNames = [_][]const u8{ "Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed" };
+    const wd = wdNames[@intCast(@mod(day.day, 7))];
+
+    return std.fmt.bufPrint(buf, "{s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
+        wd,
+        monthDay.day_index + 1,
+        monthNames[monthDay.month.numeric() - 1],
+        yearDay.year,
+        ds.getHoursIntoDay(),
+        ds.getMinutesIntoHour(),
+        ds.getSecondsIntoMinute(),
+    }) catch unreachable;
+}
+
 fn daysInMonth(year: i32, month: u4) u16 {
     return std.time.epoch.getDaysInMonth(@intCast(year), @fromBackingInt(@intCast(month)));
 }

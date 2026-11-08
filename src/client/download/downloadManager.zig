@@ -31,8 +31,8 @@ const req = @import("../requestBuilder.zig");
 const clientNs = @import("../httpClient.zig");
 const Client = clientNs.Client;
 const ftpClientMod = @import("../../protocols/ftp/ftpClient.zig");
-const serveMod = @import("../../web/staticFiles/staticFileServer.zig");
-const cFs = serveMod.cFs;
+const fsMod = @import("../../utils/fs.zig");
+const cFs = fsMod.cFs;
 
 pub const DownloadError = error{
     DestinationExists,
@@ -555,7 +555,7 @@ const FileOps = struct {
 
 /// Verifies a file on local disk against expected checksums and size parameters.
 pub fn verifyFile(path: []const u8, opts: VerifyOptions) DownloadError!void {
-    const meta = serveMod.statPath(path) orelse return DownloadError.FileReadFailed;
+    const meta = fsMod.statPath(path) orelse return DownloadError.FileReadFailed;
 
     if (opts.expectedSize) |sz| {
         if (meta.size != sz) return DownloadError.ChecksumMismatch;
@@ -764,7 +764,7 @@ pub const Downloader = struct {
         }
 
         // 3. Handle existing destination policy
-        const existingMeta = serveMod.statPath(dest);
+        const existingMeta = fsMod.statPath(dest);
         if (existingMeta) |meta| {
             switch (options.existing) {
                 .fail => return DownloadError.DestinationExists,
@@ -802,7 +802,7 @@ pub const Downloader = struct {
         // 5. Check for partial resume
         var resumeOffset: u64 = 0;
         if (options.existing.isResume()) {
-            if (serveMod.statPath(tempPath)) |tmeta| {
+            if (fsMod.statPath(tempPath)) |tmeta| {
                 resumeOffset = tmeta.size;
             } else if (existingMeta) |emeta| {
                 resumeOffset = emeta.size;

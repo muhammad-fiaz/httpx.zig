@@ -13,7 +13,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const clock = @import("../../common/clock.zig");
 const sync = @import("../../common/sync.zig");
-const staticMod = @import("../staticFiles/staticFileServer.zig");
+const fsMod = @import("../../utils/fs.zig");
 const events = @import("watcherEvents.zig");
 
 const windows = @import("windowsWatcher.zig");
@@ -481,7 +481,7 @@ pub const Watcher = struct {
 
                         const fullPath = std.Io.Dir.path.join(self.allocator, &.{ self.config.dirPath, entry.path }) catch continue;
 
-                        if (staticMod.statPath(fullPath)) |st| {
+                        if (fsMod.statPath(fullPath)) |st| {
                             seen.append(self.allocator, .{
                                 .path = fullPath,
                                 .mtimeNs = st.mtimeNs,
@@ -570,7 +570,7 @@ pub const Watcher = struct {
         var itEntries = self.entries.iterator();
         while (itEntries.next()) |entry| {
             if (seenSet.contains(entry.key_ptr.*)) continue;
-            if (staticMod.statPath(entry.key_ptr.*)) |st| {
+            if (fsMod.statPath(entry.key_ptr.*)) |st| {
                 if (entry.value_ptr.mtimeNs != st.mtimeNs or entry.value_ptr.size != st.size) {
                     entry.value_ptr.mtimeNs = st.mtimeNs;
                     entry.value_ptr.size = st.size;
@@ -654,7 +654,7 @@ pub const Watcher = struct {
             if (events.isEditorTempFile(entry.path)) continue;
             if (self.isIgnoredPath(entry.path)) continue;
             const fullPath = std.Io.Dir.path.join(self.allocator, &.{ dir, entry.path }) catch continue;
-            if (staticMod.statPath(fullPath)) |st| {
+            if (fsMod.statPath(fullPath)) |st| {
                 seen.append(self.allocator, .{ .path = fullPath, .mtimeNs = st.mtimeNs, .size = st.size }) catch {
                     self.allocator.free(fullPath);
                     continue;
@@ -692,7 +692,7 @@ pub const Watcher = struct {
                     break;
                 }
             }
-            if (!found and staticMod.statPath(entry.key_ptr.*) == null) {
+            if (!found and fsMod.statPath(entry.key_ptr.*) == null) {
                 gone.append(self.allocator, entry.key_ptr.*) catch {};
             }
         }
@@ -750,7 +750,7 @@ pub const Watcher = struct {
         while (it.next()) |entry| {
             const p = entry.key_ptr.*;
             if (self.config.dirPath.len > 0 and std.mem.startsWith(u8, p, self.config.dirPath)) continue;
-            if (staticMod.statPath(p)) |st| {
+            if (fsMod.statPath(p)) |st| {
                 if (entry.value_ptr.mtimeNs != st.mtimeNs or entry.value_ptr.size != st.size) {
                     entry.value_ptr.mtimeNs = st.mtimeNs;
                     entry.value_ptr.size = st.size;
@@ -780,7 +780,7 @@ pub const Watcher = struct {
     /// Re-registering refreshes in place without leaking the old key.
     /// Stats before locking (no IO under the spinlock).
     pub fn watchFile(self: *Watcher, path: []const u8) !void {
-        const st = staticMod.statPath(path) orelse return;
+        const st = fsMod.statPath(path) orelse return;
         self.mutex.lock();
         defer self.mutex.unlock();
         if (self.entries.getPtr(path)) |val| {
@@ -1019,7 +1019,7 @@ pub const Watcher = struct {
     /// Stats `path`, emitting created/modified only on real index change.
     /// Caller holds the mutex.
     fn ingestPath(self: *Watcher, path: []const u8, kind: events.WatchEventKind) void {
-        if (staticMod.statPath(path)) |st| {
+        if (fsMod.statPath(path)) |st| {
             if (self.entries.getPtr(path)) |val| {
                 if (val.mtimeNs == st.mtimeNs and val.size == st.size) return;
                 val.mtimeNs = st.mtimeNs;
@@ -1180,7 +1180,6 @@ test "ignored dirs match at any depth, not just the root" {
 }
 
 test "scan prunes ignored directories instead of only filtering their files" {
-    const fsMod = @import("../../utils/fs.zig");
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
     var pathBuf: [256]u8 = undefined;
@@ -1230,7 +1229,6 @@ test "the initial scan reports nothing to observers" {
     // Every file present at startup arrives as `created` from the first
     // walk. Those are the baseline, so neither the event queue, the callback
     // queue, nor the change count may report them.
-    const fsMod = @import("../../utils/fs.zig");
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
     var pathBuf: [256]u8 = undefined;
@@ -1271,7 +1269,6 @@ test "reload strategy maps extensions correctly" {
 }
 
 test "scan detects create/modify/delete across rescans" {
-    const fsMod = @import("../../utils/fs.zig");
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
     const probe = "watcher_scan_probe.tmp";
@@ -1349,7 +1346,6 @@ fn cleanupTestDir(io: std.Io, root: []const u8) void {
 
 test "native backend produces real filesystem events" {
     if (!hasNative) return error.SkipZigTest;
-    const fsMod = @import("../../utils/fs.zig");
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
     var pathBuf: [256]u8 = undefined;
@@ -1388,7 +1384,6 @@ test "native backend produces real filesystem events" {
 
 test "rename pairing survives atomic save patterns" {
     if (!hasNative) return error.SkipZigTest;
-    const fsMod = @import("../../utils/fs.zig");
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
     var pathBuf: [256]u8 = undefined;
@@ -1437,7 +1432,6 @@ test "reconcileDir pairs renames from stat-walk diffs" {
     // Backend-agnostic coverage for the directory-granularity path
     // (macOS kqueue): a stat-walk diff that loses a tracked file and
     // gains an untracked one with identical size+mtime is a rename.
-    const fsMod = @import("../../utils/fs.zig");
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
     var pathBuf: [256]u8 = undefined;
@@ -1566,7 +1560,6 @@ test "callback and event queues own separate copies of each path" {
 }
 
 test "stop joins the worker so no callback outlives the watcher" {
-    const fsMod = @import("../../utils/fs.zig");
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
     var pathBuf: [256]u8 = undefined;
@@ -1697,7 +1690,6 @@ test "polling scan detects directory creation and deletion" {
 }
 
 test "polling scan pairs renames when file size and mtime match" {
-    const fsMod = @import("../../utils/fs.zig");
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
     var pathBuf: [256]u8 = undefined;

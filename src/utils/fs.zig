@@ -25,7 +25,7 @@ pub const Stat = struct {
     isDir: bool,
 };
 
-const cFs = struct {
+pub const cFs = struct {
     pub const HANDLE = if (isWin) std.os.windows.HANDLE else c_int;
     pub const INVALID_HANDLE_VALUE: HANDLE = if (isWin) @ptrFromInt(std.math.maxInt(usize)) else -1;
     pub const BOOL = enum(c_int) { FALSE = 0, TRUE = 1 };
@@ -37,6 +37,25 @@ const cFs = struct {
     pub const OPEN_EXISTING: u32 = 3;
     pub const CREATE_ALWAYS: u32 = 2;
     pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+
+    pub const INVALID_HANDLE: HANDLE = INVALID_HANDLE_VALUE;
+
+    pub extern "kernel32" fn CreateFileW(
+        lpFileName: [*:0]const u16,
+        dwDesiredAccess: u32,
+        dwShareMode: u32,
+        lpSecurityAttributes: ?*anyopaque,
+        dwCreationDisposition: u32,
+        dwFlagsAndAttributes: u32,
+        hTemplateFile: ?HANDLE,
+    ) callconv(.winapi) HANDLE;
+
+    pub extern "kernel32" fn SetFilePointerEx(
+        hFile: HANDLE,
+        liDistanceToMove: i64,
+        lpDistanceToMoveHigh: ?*i64,
+        dwMoveMethod: u32,
+    ) callconv(.winapi) BOOL;
 
     pub extern "kernel32" fn CreateFileA(
         lpFileName: [*:0]const u8,

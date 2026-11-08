@@ -24,6 +24,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const routerMod = @import("../router/router.zig");
 const parseMod = @import("../../common/parse.zig");
+const fsMod = @import("../../utils/fs.zig");
 const reload = @import("../watcher/fileWatcher.zig");
 const Context = routerMod.Context;
 const Response = routerMod.Response;
@@ -165,10 +166,6 @@ pub fn register(router: *routerMod.Router, cfg: Config) MountError!void {
         st.destroy();
         return MountError.OutOfMemory;
     };
-}
-
-pub fn unregister() void {
-    // No-op: per-route userData eliminated global state
 }
 
 // handlers
@@ -383,307 +380,12 @@ fn readOpenedRange(io: std.Io, file: std.Io.File, offset: u64, dest: []u8) !void
     if (n != dest.len) return error.UnexpectedEof;
 }
 
-pub const cFs = struct {
-    pub const isWin = builtin.os.tag == .windows;
-
-    pub const FILE_HANDLE = if (isWin) std.os.windows.HANDLE else std.c.fd_t;
-    pub const INVALID_HANDLE: FILE_HANDLE = if (isWin) std.os.windows.INVALID_HANDLE_VALUE else -1;
-
-    pub fn openRead(path: []const u8) ?FILE_HANDLE {
-        if (isWin) {
-            var wideBuf: [std.os.windows.PATH_MAX_WIDE:0]u16 = undefined;
-            const wlen = std.unicode.utf8ToUtf16Le(&wideBuf, path) catch return null;
-            if (wlen >= wideBuf.len) return null;
-            wideBuf[wlen] = 0;
-
-            const GENERIC_READ: u32 = 0x80000000;
-            const FILE_SHARE_READ: u32 = 0x00000001;
-            const FILE_SHARE_WRITE: u32 = 0x00000002;
-            const FILE_SHARE_DELETE: u32 = 0x00000004;
-            const OPEN_EXISTING: u32 = 3;
-            const FILE_ATTRIBUTE_NORMAL: u32 = 0x00000080;
-
-            const h = CreateFileW(
-                wideBuf[0..wlen :0],
-                GENERIC_READ,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                null,
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                null,
-            );
-            if (h == INVALID_HANDLE) return null;
-            return h;
-        } else {
-            var nullTerm: [4096:0]u8 = undefined;
-            if (path.len >= nullTerm.len) return null;
-            @memcpy(nullTerm[0..path.len], path);
-            nullTerm[path.len] = 0;
-            const fd = std.c.open(&nullTerm, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
-            if (fd < 0) return null;
-            return fd;
-        }
-    }
-
-    pub fn openWrite(path: []const u8) ?FILE_HANDLE {
-        if (isWin) {
-            var wideBuf: [std.os.windows.PATH_MAX_WIDE:0]u16 = undefined;
-            const wlen = std.unicode.utf8ToUtf16Le(&wideBuf, path) catch return null;
-            if (wlen >= wideBuf.len) return null;
-            wideBuf[wlen] = 0;
-
-            const GENERIC_WRITE: u32 = 0x40000000;
-            const CREATE_ALWAYS: u32 = 2;
-            const FILE_ATTRIBUTE_NORMAL: u32 = 0x00000080;
-
-            const h = CreateFileW(
-                wideBuf[0..wlen :0],
-                GENERIC_WRITE,
-                0,
-                null,
-                CREATE_ALWAYS,
-                FILE_ATTRIBUTE_NORMAL,
-                null,
-            );
-            if (h == INVALID_HANDLE) return null;
-            return h;
-        } else {
-            var nullTerm: [4096:0]u8 = undefined;
-            if (path.len >= nullTerm.len) return null;
-            @memcpy(nullTerm[0..path.len], path);
-            nullTerm[path.len] = 0;
-            const fd = std.c.open(&nullTerm, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
-            if (fd < 0) return null;
-            return fd;
-        }
-    }
-
-    pub fn close(h: FILE_HANDLE) void {
-        if (isWin) {
-            _ = CloseHandle(h);
-        } else {
-            _ = std.c.close(h);
-        }
-    }
-
-    pub extern "kernel32" fn CreateFileW(
-        lpFileName: [*:0]const u16,
-        dwDesiredAccess: u32,
-        dwShareMode: u32,
-        lpSecurityAttributes: ?*anyopaque,
-        dwCreationDisposition: u32,
-        dwFlagsAndAttributes: u32,
-        hTemplateFile: ?std.os.windows.HANDLE,
-    ) callconv(.winapi) std.os.windows.HANDLE;
-
-    pub extern "kernel32" fn CloseHandle(hObject: std.os.windows.HANDLE) callconv(.winapi) std.os.windows.BOOL;
-    pub extern "kernel32" fn GetFileSizeEx(hFile: std.os.windows.HANDLE, lpFileSize: *i64) callconv(.winapi) std.os.windows.BOOL;
-    pub extern "kernel32" fn GetFileTime(
-        hFile: std.os.windows.HANDLE,
-        lpCreationTime: ?*anyopaque,
-        lpLastAccessTime: ?*anyopaque,
-        lpLastWriteTime: ?*std.os.windows.FILETIME,
-    ) callconv(.winapi) std.os.windows.BOOL;
-    pub extern "kernel32" fn ReadFile(
-        hFile: std.os.windows.HANDLE,
-        lpBuffer: [*]u8,
-        nNumberOfBytesToRead: u32,
-        lpNumberOfBytesRead: ?*u32,
-        lpOverlapped: ?*anyopaque,
-    ) callconv(.winapi) std.os.windows.BOOL;
-    pub extern "kernel32" fn WriteFile(
-        hFile: std.os.windows.HANDLE,
-        lpBuffer: [*]const u8,
-        nNumberOfBytesToWrite: u32,
-        lpNumberOfBytesWritten: ?*u32,
-        lpOverlapped: ?*anyopaque,
-    ) callconv(.winapi) std.os.windows.BOOL;
-    pub extern "kernel32" fn SetFilePointerEx(
-        hFile: std.os.windows.HANDLE,
-        liDistanceToMove: i64,
-        lpNewFilePointer: ?*i64,
-        dwMoveMethod: u32,
-    ) callconv(.winapi) std.os.windows.BOOL;
-};
 
 pub fn statPath(path: []const u8) ?FileMeta {
-    if (cFs.isWin) {
-        const h = cFs.openRead(path) orelse return null;
-        defer cFs.close(h);
-
-        var size: i64 = 0;
-        if (cFs.GetFileSizeEx(h, &size) == .FALSE) return null;
-
-        var ft: std.os.windows.FILETIME = undefined;
-        if (cFs.GetFileTime(h, null, null, &ft) == .FALSE) return null;
-
-        const ftU64: u64 = (@as(u64, ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
-        // Convert Windows 100-ns intervals from 1601 to Unix epoch ns from 1970
-        const windowsEpochDiff: i128 = 116444736000000000;
-        const mtimeNs = (@as(i128, ftU64) - windowsEpochDiff) * 100;
-
-        return .{
-            .size = @intCast(@max(0, size)),
-            .mtimeNs = mtimeNs,
-        };
-    } else if (builtin.os.tag == .linux) {
-        var nullTerm: [4096:0]u8 = undefined;
-        if (path.len >= nullTerm.len) return null;
-        @memcpy(nullTerm[0..path.len], path);
-        nullTerm[path.len] = 0;
-
-        var statxBuf: std.os.linux.Statx = undefined;
-        const mask: std.os.linux.STATX = .{
-            .TYPE = true,
-            .SIZE = true,
-            .MTIME = true,
-        };
-        const rc = std.os.linux.statx(
-            std.posix.AT.FDCWD,
-            &nullTerm,
-            0,
-            mask,
-            &statxBuf,
-        );
-        if (@as(isize, @bitCast(rc)) < 0) return null;
-        if ((statxBuf.mode & std.os.linux.S.IFMT) != std.os.linux.S.IFREG) return null;
-
-        const mtimeNs = @as(i128, statxBuf.mtime.sec) * std.time.ns_per_s + @as(i128, statxBuf.mtime.nsec);
-        return .{
-            .size = statxBuf.size,
-            .mtimeNs = mtimeNs,
-        };
-    } else {
-        var nullTerm: [4096:0]u8 = undefined;
-        if (path.len >= nullTerm.len) return null;
-        @memcpy(nullTerm[0..path.len], path);
-        nullTerm[path.len] = 0;
-
-        if (comptime std.posix.Stat != void) {
-            const statFn = switch (builtin.os.tag) {
-                .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => switch (builtin.cpu.arch) {
-                    .x86_64 => struct {
-                        extern "c" fn @"stat$INODE64"(noalias path: [*:0]const u8, noalias buf: *std.c.Stat) c_int;
-                    }.@"stat$INODE64",
-                    else => struct {
-                        extern "c" fn stat(noalias path: [*:0]const u8, noalias buf: *std.c.Stat) c_int;
-                    }.stat,
-                },
-                else => struct {
-                    extern "c" fn stat(noalias path: [*:0]const u8, noalias buf: *std.c.Stat) c_int;
-                }.stat,
-            };
-
-            var st: std.c.Stat = undefined;
-            if (statFn(&nullTerm, &st) != 0) return null;
-            if (!std.c.S.ISREG(st.mode)) return null;
-
-            const mtimeNs = @as(i128, st.mtime().sec) * std.time.ns_per_s + @as(i128, st.mtime().nsec);
-            return .{
-                .size = @intCast(@max(0, st.size)),
-                .mtimeNs = mtimeNs,
-            };
-        }
-        return null;
-    }
+    const st = fsMod.statPath(path) orelse return null;
+    if (st.isDir) return null;
+    return .{ .size = st.size, .mtimeNs = st.mtimeNs };
 }
-
-fn readAll(_: ?std.Io, path: []const u8, dest: []u8) !void {
-    if (cFs.isWin) {
-        const h = cFs.openRead(path) orelse return error.FileNotFound;
-        defer cFs.close(h);
-
-        var totalRead: usize = 0;
-        while (totalRead < dest.len) {
-            var bytesRead: u32 = 0;
-            const toRead: u32 = @intCast(@min(dest.len - totalRead, std.math.maxInt(u32)));
-            if (cFs.ReadFile(h, dest[totalRead..].ptr, toRead, &bytesRead, null) == .FALSE) return error.UnexpectedEof;
-            if (bytesRead == 0) break;
-            totalRead += bytesRead;
-        }
-        if (totalRead < dest.len) return error.UnexpectedEof;
-    } else {
-        const fd = cFs.openRead(path) orelse return error.FileNotFound;
-        defer cFs.close(fd);
-
-        var totalRead: usize = 0;
-        while (totalRead < dest.len) {
-            const rc = std.c.read(fd, dest[totalRead..].ptr, dest.len - totalRead);
-            if (rc < 0) return error.UnexpectedEof;
-            if (rc == 0) break;
-            totalRead += @intCast(rc);
-        }
-        if (totalRead < dest.len) return error.UnexpectedEof;
-    }
-}
-
-const fsMod = @import("../../utils/fs.zig");
-pub const writeFile = fsMod.writeFile;
-
-fn readRange(_: ?std.Io, path: []const u8, offset: u64, dest: []u8) !void {
-    if (cFs.isWin) {
-        const h = cFs.openRead(path) orelse return error.FileNotFound;
-        defer cFs.close(h);
-
-        const FILE_BEGIN: u32 = 0;
-        if (cFs.SetFilePointerEx(h, @intCast(offset), null, FILE_BEGIN) == .FALSE) return error.SeekFailed;
-
-        var totalRead: usize = 0;
-        while (totalRead < dest.len) {
-            var bytesRead: u32 = 0;
-            const toRead: u32 = @intCast(@min(dest.len - totalRead, std.math.maxInt(u32)));
-            if (cFs.ReadFile(h, dest[totalRead..].ptr, toRead, &bytesRead, null) == .FALSE) return error.UnexpectedEof;
-            if (bytesRead == 0) break;
-            totalRead += bytesRead;
-        }
-        if (totalRead < dest.len) return error.UnexpectedEof;
-    } else {
-        const fd = cFs.openRead(path) orelse return error.FileNotFound;
-        defer cFs.close(fd);
-
-        var totalRead: usize = 0;
-        while (totalRead < dest.len) {
-            const rc = std.c.pread(fd, dest[totalRead..].ptr, dest.len - totalRead, @intCast(offset + totalRead));
-            if (rc < 0) return error.SeekFailed;
-            if (rc == 0) break;
-            totalRead += @intCast(rc);
-        }
-        if (totalRead < dest.len) return error.UnexpectedEof;
-    }
-}
-
-// HTTP dates
-
-const monthNames = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-
-fn monthName(numeric: u4) []const u8 {
-    return if (numeric >= 1 and numeric <= 12) monthNames[numeric - 1] else "Jan";
-}
-
-/// RFC 9110 IMF-fixdate: "Tue, 25 Aug 2026 10:00:00 GMT".
-pub fn formatHttpDate(buf: []u8, epochSecs: i64) []const u8 {
-    const es = std.time.epoch.EpochSeconds{ .secs = @intCast(@max(0, epochSecs)) };
-    const day = es.getEpochDay();
-    const yearDay = day.calculateYearDay();
-    const monthDay = yearDay.calculateMonthDay();
-    const ds = es.getDaySeconds();
-
-    const wdNames = [_][]const u8{ "Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed" };
-    const wd = wdNames[@intCast(@mod(day.day, 7))];
-
-    return std.fmt.bufPrint(buf, "{s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
-        wd,
-        monthDay.day_index + 1,
-        monthName(monthDay.month.numeric()),
-        yearDay.year,
-        ds.getHoursIntoDay(),
-        ds.getMinutesIntoHour(),
-        ds.getSecondsIntoMinute(),
-    }) catch unreachable;
-}
-
-/// Parses IMF-fixdate to epoch seconds; null on malformed input.
-pub const parseHttpDate = parseMod.parseHttpDate;
 
 // ranges
 
@@ -911,7 +613,7 @@ fn respondWithFile(ctx: *Context, st: *State, file: std.Io.File, relativePath: [
 
     const etag = etagAlloc(a, meta) catch return Allocator.Error.OutOfMemory;
     var dateBuf: [40]u8 = undefined;
-    const lmStr = formatHttpDate(&dateBuf, @intCast(@divFloor(meta.mtimeNs, std.time.ns_per_s)));
+    const lmStr = parseMod.formatHttpDate(&dateBuf, @intCast(@divFloor(meta.mtimeNs, std.time.ns_per_s)));
     const lastModified = a.dupe(u8, lmStr) catch return Allocator.Error.OutOfMemory;
 
     // Conditional requests.
@@ -921,7 +623,7 @@ fn respondWithFile(ctx: *Context, st: *State, file: std.Io.File, relativePath: [
             return .{ .status = 304, .headers = hs };
         }
     } else if (ctx.header("If-Modified-Since")) |ims| {
-        if (parseHttpDate(ims)) |imsSecs| {
+        if (parseMod.parseHttpDate(ims)) |imsSecs| {
             const lmSecs: i64 = @intCast(@divFloor(meta.mtimeNs, std.time.ns_per_s));
             if (imsSecs >= lmSecs) return .{ .status = 304 };
         }
@@ -1090,13 +792,13 @@ test "openAssetNoFollow rejects symlinked parent and final components" {
 
 test "http date roundtrip rejects garbage" {
     var buf: [40]u8 = undefined;
-    const s = formatHttpDate(&buf, 86400);
+    const s = parseMod.formatHttpDate(&buf, 86400);
     try std.testing.expect(std.mem.startsWith(u8, s, "Fri, 02 Jan 1970"));
-    try std.testing.expectEqual(@as(i64, 86400), parseHttpDate(s).?);
-    try std.testing.expect(parseHttpDate("garbage") == null);
-    try std.testing.expect(parseHttpDate("") == null);
-    try std.testing.expect(parseHttpDate("Fri, 31 Apr 1970 00:00:00 GMT") == null);
-    try std.testing.expect(parseHttpDate("Fri, 02 Jan 1970 24:00:00 GMT") == null);
+    try std.testing.expectEqual(@as(i64, 86400), parseMod.parseHttpDate(s).?);
+    try std.testing.expect(parseMod.parseHttpDate("garbage") == null);
+    try std.testing.expect(parseMod.parseHttpDate("") == null);
+    try std.testing.expect(parseMod.parseHttpDate("Fri, 31 Apr 1970 00:00:00 GMT") == null);
+    try std.testing.expect(parseMod.parseHttpDate("Fri, 02 Jan 1970 24:00:00 GMT") == null);
 }
 
 test "range parsing covers fixed, open-ended, suffix, and invalid forms" {
