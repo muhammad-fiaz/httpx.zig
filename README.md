@@ -269,14 +269,20 @@ exe.root_module.addImport("httpx", httpx_dep.module("httpx"));
 
 ## Quick Start
 
-Simple HTTP client and server example with REST and GraphQL:
+Simple HTTP client and server example with REST and GraphQL. JSON keys
+are the exact Zig field names, so keys that are not valid identifiers
+keep their wire name as quoted identifiers (e.g. `@"user-name"`):
 
 ```zig
 const std = @import("std");
 const httpx = @import("httpx");
 
-const User = struct { id: u64, name: []const u8 };
-const CreateUser = struct { name: []const u8 };
+const User = struct { id: u64, @"user-name": []const u8 };
+const CreateUser = struct { @"user-name": []const u8 };
+
+// GraphQL wire shape: legal GraphQL identifiers only, declared by the
+// schema (`Type(...)`), independent of REST JSON keys.
+const GraphQLUser = struct { id: u64, name: []const u8 };
 
 const Scalar = httpx.graphql.Scalar;
 const UserType = httpx.graphql.Type("User", .{
@@ -285,7 +291,7 @@ const UserType = httpx.graphql.Type("User", .{
 });
 
 const resolvers = struct {
-    fn me(ctx: *httpx.graphql.Context) !User {
+    fn me(ctx: *httpx.graphql.Context) !GraphQLUser {
         _ = ctx;
         return .{ .id = 1, .name = "alice" };
     }
@@ -296,11 +302,11 @@ const QueryRoot = httpx.graphql.Query(.{
 });
 
 fn getUser(ctx: *httpx.router.Context) !httpx.router.Result(User) {
-    return .{ .body = .{ .id = ctx.paramUint("id") orelse 1, .name = "alice" } };
+    return .{ .body = .{ .id = ctx.paramUint("id") orelse 1, .@"user-name" = "alice" } };
 }
 
 fn createUser(_: *httpx.router.Context, body: CreateUser) !httpx.router.Result(User) {
-    return .{ .status = .created, .body = .{ .id = 1, .name = body.name } };
+    return .{ .status = .created, .body = .{ .id = 1, .@"user-name" = body.@"user-name" } };
 }
 
 fn health(_: *httpx.router.Context) anyerror!httpx.router.Response {
@@ -350,7 +356,7 @@ pub fn main() !void {
     std.debug.print("GET /users/7 -> {d}: {s}\n", .{ user_res.status, user_res.bytes() });
 
     const post_url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/users", .{port});
-    var post_res = try client.post(post_url, .{ .json = .{ .name = "bob" } });
+    var post_res = try client.post(post_url, .{ .json = .{ .@"user-name" = "bob" } });
     defer post_res.deinit();
     std.debug.print("POST /users -> {d}: {s}\n", .{ post_res.status, post_res.bytes() });
 
