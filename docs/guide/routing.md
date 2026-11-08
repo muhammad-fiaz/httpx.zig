@@ -181,7 +181,7 @@ Shared across code-based routing, file-based routing, and website serving.
 ## Typed REST Endpoints with `Server`
 
 `httpx.Server` registers routes with the path first and an optional `.{}` options
-literal second. Typed handlers return `httpx.Result(T)`; raw handlers return
+literal second. Typed handlers return `httpx.router.Result(T)`; raw handlers return
 `httpx.router.Response` and use the same verbs and metadata fields:
 
 ```zig
@@ -201,7 +201,7 @@ server.run();
 ```
 
 Handler signatures are `(*Context)` or `(*Context, RequestType)`, returning
-`!httpx.Result(T)` — a plain struct literal, no constructor:
+`!httpx.router.Result(T)` — a plain struct literal, no constructor:
 
 ```zig
 const User = struct {
@@ -210,7 +210,7 @@ const User = struct {
     @"@context": []const u8,
 };
 
-fn getUser(ctx: *httpx.router.Context) !httpx.Result(User) {
+fn getUser(ctx: *httpx.router.Context) !httpx.router.Result(User) {
     const id = ctx.paramUint("id") orelse return error.BadRequest;
     return .{ .body = .{
         .id = id,
@@ -219,7 +219,7 @@ fn getUser(ctx: *httpx.router.Context) !httpx.Result(User) {
     } };
 }
 
-fn createUser(_: *httpx.router.Context, body: CreateUserRequest) !httpx.Result(User) {
+fn createUser(_: *httpx.router.Context, body: CreateUserRequest) !httpx.router.Result(User) {
     return .{ .status = .created, .body = .{
         .id = 101,
         .@"user-name" = body.name,
@@ -227,7 +227,7 @@ fn createUser(_: *httpx.router.Context, body: CreateUserRequest) !httpx.Result(U
     } };
 }
 
-fn deleteUser(_: *httpx.router.Context) !httpx.Result(void) {
+fn deleteUser(_: *httpx.router.Context) !httpx.router.Result(void) {
     return .{ .status = .noContent };
 }
 ```

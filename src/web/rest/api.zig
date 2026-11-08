@@ -5,7 +5,7 @@
 //! explicit handler, and explicit metadata. Nothing is inferred from a string
 //! verb, and nothing is silently defaulted on the caller's behalf.
 //!
-//! Handlers return a typed `httpx.Result(T)`, a struct with `.status`
+//! Handlers return a typed `httpx.router.Result(T)`, a struct with `.status`
 //! (default `200 OK`), `.body` (default `null`), `.headers`, and
 //! `.mediaType`, so a handler is a plain struct literal with no
 //! constructor:
@@ -14,12 +14,12 @@
 //! const CreateUser = struct { name: []const u8, email: []const u8 };
 //! const User = struct { id: u64, name: []const u8, email: []const u8 };
 //!
-//! fn createUser(ctx: *httpx.router.Context, req: CreateUser) !httpx.Result(User) {
+//! fn createUser(ctx: *httpx.router.Context, req: CreateUser) !httpx.router.Result(User) {
 //!     _ = ctx;
 //!     return .{ .status = .created, .body = .{ .id = 1, .name = req.name, .email = req.email } };
 //! }
 //!
-//! fn deleteUser(_: *httpx.router.Context) !httpx.Result(void) {
+//! fn deleteUser(_: *httpx.router.Context) !httpx.router.Result(void) {
 //!     return .{ .status = .noContent };
 //! }
 //!
@@ -117,16 +117,16 @@ fn BodyField(comptime T: type) type {
 /// A handler declares the return type and returns a plain struct
 /// literal; there are no constructors to call:
 ///```zig
-/// fn getUser(ctx: *httpx.router.Context) !httpx.Result(User) {
+/// fn getUser(ctx: *httpx.router.Context) !httpx.router.Result(User) {
 ///     return .{ .body = user };                          // 200 OK
 /// }
-/// fn createUser(...) !httpx.Result(User) {
+/// fn createUser(...) !httpx.router.Result(User) {
 ///     return .{ .status = .created, .body = user };      // 201 Created
 /// }
-/// fn deleteUser(...) !httpx.Result(void) {
+/// fn deleteUser(...) !httpx.router.Result(void) {
 ///     return .{ .status = .noContent };                  // 204 No Content
 /// }
-/// fn reject(...) !httpx.Result(void) {
+/// fn reject(...) !httpx.router.Result(void) {
 ///     return .{ .status = httpx.Status.fromCode(422) };
 /// }
 /// ```
@@ -419,11 +419,11 @@ pub const Rest = struct {
         const HandlerInfo = comptime blk: {
             const retInfo = @typeInfo(ReturnType);
             if (retInfo != .error_union) {
-                @compileError("REST typed handlers must return !httpx.Result(T)");
+                @compileError("REST typed handlers must return !httpx.router.Result(T)");
             }
             const payload = retInfo.error_union.payload;
             if (@typeInfo(payload) != .@"struct" or !@hasDecl(payload, "ResponseBody") or !@hasField(payload, "body")) {
-                @compileError("REST handler must return httpx.Result(T)");
+                @compileError("REST handler must return httpx.router.Result(T)");
             }
             break :blk .{ .schema = payload, .body = payload.ResponseBody };
         };

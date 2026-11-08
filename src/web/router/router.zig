@@ -27,6 +27,11 @@ pub const HandlerFn = *const fn (*Context) anyerror!Response;
 pub const NextFn = *const fn (*Context) anyerror!Response;
 pub const MiddlewareFn = *const fn (*Context, NextFn) anyerror!Response;
 
+/// Typed REST result carrier for `httpx.router.Result(T)` handlers, defined
+/// here rather than re-exported from `rest` so the router namespace stays
+/// the single place for handler signature types.
+pub const Result = @import("../rest/api.zig").Result;
+
 pub fn contextNext(ctx: *Context) anyerror!Response {
     return ctx.next();
 }

@@ -56,7 +56,7 @@ const versionInfo = @import("../common/version.zig");
 
 pub const maxHeadBytes = 32 * 1024;
 
-/// True when `handler` returns `!httpx.Result(T)` (typed REST) rather than a
+/// True when `handler` returns `!httpx.router.Result(T)` (typed REST) rather than a
 /// raw `!httpx.router.Response`.
 fn isTypedHandler(comptime handler: anytype) bool {
     const HandlerType = @TypeOf(handler);
@@ -85,7 +85,7 @@ fn rawRouteOptions(comptime arg: anytype) routerMod.RouteOptions {
             @compileError("route: pass the path as the second argument, not `.path`");
         }
         if (comptime std.mem.eql(u8, fname, "mediaType")) {
-            @compileError("route: `.mediaType` is only valid for typed `httpx.Result(T)` handlers");
+            @compileError("route: `.mediaType` is only valid for typed `httpx.router.Result(T)` handlers");
         }
         if (@hasField(metaMod.Metadata, fname)) {
             @field(out.meta, fname) = @field(arg, fname);
@@ -835,7 +835,7 @@ pub const Server = struct {
 
     /// Registers a GET route.
     ///
-    /// The handler's return type selects typed REST (`!httpx.Result(T)`) or a
+    /// The handler's return type selects typed REST (`!httpx.router.Result(T)`) or a
     /// raw router response (`!httpx.router.Response`) at compile time. Both a bare
     /// handler and a `.{}` options literal are accepted.
     pub fn get(self: *Server, path: []const u8, comptime arg: anytype) !void {

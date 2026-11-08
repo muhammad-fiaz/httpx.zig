@@ -3,7 +3,7 @@
 //! Demonstrates the whole explicit surface:
 //!
 //! * lowercase verb registration — `server.post("/users", .{ .handler, … })`
-//! * `httpx.Result(T)` struct-literal responses: `.status` (default
+//! * `httpx.router.Result(T)` struct-literal responses: `.status` (default
 //!   `200 OK`), `.body`, `.headers`, `.mediaType`
 //! * Single-document JSON media types on input (standard and any valid `+json` type)
 //! * JSON keys that are not valid Zig identifiers via quoted identifiers
@@ -41,13 +41,13 @@ const UserWire = struct {
     @"@contact": []const u8,
 };
 
-// Handlers: (ctx) or (ctx, body) -> !httpx.Result(T)
+// Handlers: (ctx) or (ctx, body) -> !httpx.router.Result(T)
 
-fn createUser(_: *httpx.router.Context, req: CreateUserRequest) !httpx.Result(UserResponse) {
+fn createUser(_: *httpx.router.Context, req: CreateUserRequest) !httpx.router.Result(UserResponse) {
     return .{ .status = .created, .body = .{ .id = 101, .name = req.name, .email = req.email } };
 }
 
-fn getUser(ctx: *httpx.router.Context) !httpx.Result(UserResponse) {
+fn getUser(ctx: *httpx.router.Context) !httpx.router.Result(UserResponse) {
     const id = ctx.paramUint("id") orelse 1;
     return .{ .body = .{
         .id = id,
@@ -56,16 +56,16 @@ fn getUser(ctx: *httpx.router.Context) !httpx.Result(UserResponse) {
     } };
 }
 
-fn ping(_: *httpx.router.Context) !httpx.Result(MessageResponse) {
+fn ping(_: *httpx.router.Context) !httpx.router.Result(MessageResponse) {
     return .{ .body = .{ .message = "pong" } };
 }
 
 /// Uses wire keys `user-name` and `@contact` on both the request and response.
-fn updateUser(_: *httpx.router.Context, req: UserWire) !httpx.Result(UserWire) {
+fn updateUser(_: *httpx.router.Context, req: UserWire) !httpx.router.Result(UserWire) {
     return .{ .status = .accepted, .body = .{ .@"user-name" = req.@"user-name", .@"@contact" = req.@"@contact" } };
 }
 
-fn deleteUser(_: *httpx.router.Context) !httpx.Result(void) {
+fn deleteUser(_: *httpx.router.Context) !httpx.router.Result(void) {
     return .{ .status = .noContent };
 }
 
