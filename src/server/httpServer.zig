@@ -237,45 +237,6 @@ pub const Config = struct {
     maxCompressionInput: usize = 128 * 1024,
 };
 
-/// Global pointer to the active server for the Ctrl+C handler.
-var gActiveServer: ?*Server = null;
-
-fn installShutdownHandler(self: *Server) void {
-    gActiveServer = self;
-    const builtin = @import("builtin");
-    switch (builtin.os.tag) {
-        .windows => {
-            const handlerFn = struct {
-                fn callback(ctrlType: std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL {
-                    if (ctrlType <= 2) {
-                        if (gActiveServer) |s| s.requestShutdown();
-                        return @fromBackingInt(@intCast(1));
-                    }
-                    return @fromBackingInt(@intCast(0));
-                }
-            };
-            _ = SetConsoleCtrlHandler(&handlerFn.callback, @fromBackingInt(@intCast(1)));
-        },
-        else => {
-            const handlerFn = struct {
-                fn sigHandler(sig: std.posix.SIG) callconv(.c) void {
-                    _ = sig;
-                    if (gActiveServer) |s| s.requestShutdown();
-                }
-            };
-            var act: std.posix.Sigaction = std.mem.zeroes(std.posix.Sigaction);
-            act.handler = .{ .handler = @ptrCast(&handlerFn.sigHandler) };
-            act.flags = 0;
-            std.posix.sigaction(std.posix.SIG.INT, &act, null);
-        },
-    }
-}
-
-extern "kernel32" fn SetConsoleCtrlHandler(
-    handler: *const fn (std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL,
-    add: std.os.windows.BOOL,
-) callconv(.winapi) std.os.windows.BOOL;
-
 /// One in-flight HTTP/3 request. Requests are keyed by QUIC stream ID so
 /// multiple request streams can be served concurrently on one connection.
 const H3Request = struct {
@@ -1169,7 +1130,6 @@ pub const Server = struct {
             }
         }
 
-        installShutdownHandler(self);
         self.emit(.{
             .kind = .serverStarted,
             .level = .info,
