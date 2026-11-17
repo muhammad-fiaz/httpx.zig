@@ -35,8 +35,12 @@ All router verb methods take `(path, handler, options)`:
 | `head(path, handler, .{})` | Register a HEAD route |
 | `options(path, handler, .{})` | Register an OPTIONS route |
 | `add(method, path, handler, .{})` | Register any method explicitly |
-| `registerStatic(routes)` | Validate at comptime and register static `[]RouteDecl` table |
-| `registerRouteTable(routes)` | Register dynamic `[]RouteDecl` table with runtime conflict validation |
+| `register(routes)` | Register a `[]RouteDecl` table with conflict validation |
+| `remove(method, path)` | Remove one route |
+
+For build-time rejection of a comptime-known table, call
+`httpx.router.validateRoutesComptime(&routes)` in a `comptime` block before
+`register`.
 
 Route options (`httpx.router.RouteOptions`): `.name` (reversing),
 `.middleware` (route-level), `.meta` (OpenAPI), `.userData` /

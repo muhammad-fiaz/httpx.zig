@@ -109,7 +109,8 @@ try server.graphql(.{
     .inputs = &.{UserFilter},
     .endpoint = "/graphql",
 });
-try httpx.docs.mount(&server, .{
+var docs = httpx.docs.init(allocator, io, &server.router);
+try docs.mount(.{
     .graphiql = .{
         .route = "/graphiql",
         .graphqlEndpoint = "/graphql",
@@ -118,7 +119,7 @@ try httpx.docs.mount(&server, .{
         .editorTheme = "vs-dark",
     },
 });
-defer httpx.docs.unmount(&server);
+defer docs.deinit();
 
 server.run();
 ```

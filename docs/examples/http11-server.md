@@ -37,15 +37,15 @@ pub fn main() !void {
     });
     defer server.deinit();
 
-    try server.get("/", .{ .handler = helloHandler });
-    try server.get("/status", .{ .handler = statusHandler });
+    try server.router.add(.GET, "/", helloHandler, .{});
+    try server.router.add(.GET, "/status", statusHandler, .{});
 
     const port = server.localPort();
     std.debug.print("HTTP/1.1 server listening on 127.0.0.1:{d}\n", .{port});
 
     const thread = try server.start();
 
-    // Client request to verify keep-alive on the server
+    // Client request to verify HTTP/1.1 on the server
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 

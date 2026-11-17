@@ -808,48 +808,48 @@ pub const Server = struct {
     /// raw router response (`!httpx.router.Response`) at compile time. Both a bare
     /// handler and a `.{}` options literal are accepted.
     pub fn get(self: *Server, path: []const u8, comptime arg: anytype) !void {
-        try self.register(.GET, path, arg);
+        try self.addRoute(.GET, path, arg);
     }
 
     /// Registers a POST route. See [`get`] for the accepted forms.
     pub fn post(self: *Server, path: []const u8, comptime arg: anytype) !void {
-        try self.register(.POST, path, arg);
+        try self.addRoute(.POST, path, arg);
     }
 
     /// Registers a PUT route. See [`get`] for the accepted forms.
     pub fn put(self: *Server, path: []const u8, comptime arg: anytype) !void {
-        try self.register(.PUT, path, arg);
+        try self.addRoute(.PUT, path, arg);
     }
 
     /// Registers a PATCH route. See [`get`] for the accepted forms.
     pub fn patch(self: *Server, path: []const u8, comptime arg: anytype) !void {
-        try self.register(.PATCH, path, arg);
+        try self.addRoute(.PATCH, path, arg);
     }
 
     /// Registers a DELETE route. See [`get`] for the accepted forms.
     pub fn delete(self: *Server, path: []const u8, comptime arg: anytype) !void {
-        try self.register(.DELETE, path, arg);
+        try self.addRoute(.DELETE, path, arg);
     }
 
     /// Registers a HEAD route. See [`get`] for the accepted forms.
     pub fn head(self: *Server, path: []const u8, comptime arg: anytype) !void {
-        try self.register(.HEAD, path, arg);
+        try self.addRoute(.HEAD, path, arg);
     }
 
     /// Registers an OPTIONS route. See [`get`] for the accepted forms.
     pub fn options(self: *Server, path: []const u8, comptime arg: anytype) !void {
-        try self.register(.OPTIONS, path, arg);
+        try self.addRoute(.OPTIONS, path, arg);
     }
 
     /// Registers a route for an arbitrary HTTP method. See [`get`].
     pub fn add(self: *Server, comptime method: Method, path: []const u8, comptime arg: anytype) !void {
-        try self.register(method, path, arg);
+        try self.addRoute(method, path, arg);
     }
 
     /// Shared typed/raw dispatch. The handler's return type decides which
     /// registration path is used; there is no separate capitalized API and no
     /// duplicated wrapper.
-    fn register(self: *Server, comptime method: Method, path: []const u8, comptime arg: anytype) !void {
+    fn addRoute(self: *Server, comptime method: Method, path: []const u8, comptime arg: anytype) !void {
         const ArgType = @TypeOf(arg);
         const argInfo = @typeInfo(ArgType);
         const isBareFn = argInfo == .@"fn" or
@@ -878,14 +878,10 @@ pub const Server = struct {
         try self.router.mount(prefix, other, opts);
     }
 
-    /// Registers a compile-time validated static slice of route declarations on the server.
-    pub fn registerStatic(self: *Server, comptime routes: []const routerMod.RouteDecl) routerMod.RouteError!void {
-        try self.router.registerStatic(routes);
-    }
-
-    /// Registers a dynamic route table with runtime conflict validation on the server.
-    pub fn registerRouteTable(self: *Server, routes: []const routerMod.RouteDecl) routerMod.RouteError!void {
-        try self.router.registerRouteTable(routes);
+    /// Registers a route table on the server's router. Conflicting tables are
+    /// rejected without modifying the active route table.
+    pub fn register(self: *Server, routes: []const routerMod.RouteDecl) routerMod.RouteError!void {
+        try self.router.register(routes);
     }
 
     /// Attaches a global middleware to the server's routing pipeline.

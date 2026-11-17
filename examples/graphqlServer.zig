@@ -138,7 +138,8 @@ pub fn main() !void {
         .introspection = true,
         .endpoint = graphqlEndpoint,
     });
-    try httpx.docs.mount(&server, .{
+    var docs = httpx.docs.init(allocator, io, &server.router);
+    try docs.mount(.{
         .title = "HTTPX GraphQL & REST API",
         .version = httpx.version,
         .description = "Full-featured native HTTP server with OpenAPI documentation.",
@@ -155,7 +156,7 @@ pub fn main() !void {
             .editorTheme = "vs-dark",
         },
     });
-    defer httpx.docs.unmount(&server);
+    defer docs.deinit();
 
     const port = server.localPort();
     std.debug.print("GraphQL server listening on http://127.0.0.1:{d}\n", .{port});

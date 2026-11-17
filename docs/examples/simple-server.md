@@ -5,6 +5,14 @@ Start a minimal server with plain-text and JSON routes.
 ## Example
 
 ```zig
+//! Minimal HTTP/1.1 server with two routes.
+//!
+//! Run with: `zig build run-simple-server`
+//!
+//! Demonstrates router registration, the explicit `httpx.Server` lifecycle,
+//! and graceful shutdown. The server runs on a background thread; the
+//! main thread sends a few requests and then signals shutdown.
+
 const std = @import("std");
 const httpx = @import("httpx");
 
@@ -24,6 +32,10 @@ fn jsonHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     };
 }
 
+fn notFoundHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
+    return .{ .status = 404, .body = "not found" };
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
@@ -37,8 +49,9 @@ pub fn main() !void {
     });
     defer server.deinit();
 
-    try server.get("/", .{ .handler = indexHandler });
-    try server.get("/json", .{ .handler = jsonHandler });
+    try server.router.add(.GET, "/", indexHandler, .{});
+    try server.router.add(.GET, "/json", jsonHandler, .{});
+    try server.router.add(.GET, "/*rest", notFoundHandler, .{});
 
     const port = server.localPort();
     std.debug.print("listening on 127.0.0.1:{d}\n", .{port});
@@ -49,6 +62,12 @@ pub fn main() !void {
         }
     };
     const t = try std.Thread.spawn(.{}, ServerThread.run, .{&server});
+
+    // Give the worker thread a moment to enter the accept loop. `Thread.yield`
+    // is a portable busy-wait primitive; for a real application use a robust
+    // readiness signal (semaphore, channel, etc.) rather than a fixed pause.
+    var spin: usize = 0;
+    while (spin < 1000) : (spin += 1) std.Thread.yield() catch {};
 
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();

@@ -5,7 +5,7 @@
 //! - Lexer & Parser (parser.zig)
 //! - Schema, Type System, Resolvers, and Introspection (schema.zig)
 //! - HTTP Endpoint & Handler (server.zig)
-//! - GraphiQL 6.0.1 UI integration via `httpx.docs` or `httpx.graphql.mount`
+//! - GraphiQL 6.0.1 UI integration via `httpx.docs` or `Server.graphql`
 //!
 //! Types are spec-driven: list every field explicitly with a scalar kind
 //! (`Scalar.id`, `Scalar.string`, …) or a declared object, enum, interface, or
@@ -90,11 +90,10 @@ pub fn Payload(comptime T: type) type {
     };
 }
 pub const HandlerConfig = server.HandlerConfig;
-pub const mount = server.mount;
-pub const unmount = server.unmount;
-// NOTE: client GraphQL requests live on Client.graphql
-// (client.graphql(url, query, variables, .{})); they are not
-// re-exported here to keep server/client namespaces distinct.
+// NOTE: server GraphQL routes are owned by `Server.graphql(...)`; the
+// internal mount/unmount helpers are not re-exported. Client GraphQL requests
+// live on Client.graphql (client.graphql(url, query, variables, .{})).
+// They are not re-exported here to keep server/client namespaces distinct.
 
 test {
     _ = ast;

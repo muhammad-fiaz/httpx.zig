@@ -13,7 +13,8 @@ assets beneath `/docs`.
 
 ```zig
 var server = try httpx.Server.init(allocator, io, .{});
-try httpx.docs.mount(&server, .{
+var docs = httpx.docs.init(allocator, io, &server.router);
+try docs.mount(.{
     .swagger = .{
         .enabled = true,
         .route = "/api/docs",
@@ -27,7 +28,7 @@ try httpx.docs.mount(&server, .{
         .defaultModelsExpandDepth = 2,
     },
 });
-defer httpx.docs.unmount(&server);
+defer docs.deinit();
 defer server.deinit();
 ```
 

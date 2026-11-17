@@ -9,7 +9,7 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 pub const stdOptions: std.Options = .{
-    .unexpected_error_tracing = false,
+    .unexpectedErrorTracing = false,
 };
 
 fn listItemsHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
@@ -52,7 +52,7 @@ fn homePageHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
         \\<body>
         \\  <div class="card">
         \\    <h1>httpx.zig</h1>
-         \\    <p>Actively developed HTTP/1.x, HTTP/2, HTTP/3 client &amp; server for Zig.</p>
+        \\    <p>Actively developed HTTP/1.x, HTTP/2, HTTP/3 client &amp; server for Zig.</p>
         \\    <div>
         \\      <span class="badge">HTTP/1.1</span>
         \\      <span class="badge">HTTP/2</span>
@@ -85,16 +85,19 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
+        .limits = .{ .maxConnections = 5 },
+        .logging = .{},
     });
     defer server.deinit();
+
     try server.get("/", homePageHandler);
     try server.get("/api/items", listItemsHandler);
     try server.get("/api/items/{id}", getItemHandler);
-    try httpx.docs.mount(&server, .{
+    var docs = httpx.docs.init(allocator, io, &server.router);
+    try docs.mount(.{
         .title = "HTTPX Modern API Suite",
         .version = httpx.version,
         .description = "Full-featured native HTTP server with OpenAPI & GraphQL documentation.",
-        // Every UI option is explicit here; nothing is hidden in a preset.
         .swagger = .{
             .enabled = true,
             .route = "/docs",
@@ -134,7 +137,7 @@ pub fn main() !void {
             .editorTheme = "vs-dark",
         },
     });
-    defer httpx.docs.unmount(&server);
+    defer docs.deinit();
 
     const port = server.localPort();
     std.debug.print("[INFO] Server started on http://127.0.0.1:{d}\n", .{port});

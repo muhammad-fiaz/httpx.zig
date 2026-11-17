@@ -13,7 +13,8 @@ under the configured route.
 
 ```zig
 var server = try httpx.Server.init(allocator, io, .{});
-try httpx.docs.mount(&server, .{
+var docs = httpx.docs.init(allocator, io, &server.router);
+try docs.mount(.{
     .scalar = .{
         .enabled = true,
         .route = "/reference",
@@ -24,7 +25,7 @@ try httpx.docs.mount(&server, .{
         .showSidebar = true,
     },
 });
-defer httpx.docs.unmount(&server);
+defer docs.deinit();
 defer server.deinit();
 ```
 

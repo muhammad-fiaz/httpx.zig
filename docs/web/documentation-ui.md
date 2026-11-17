@@ -15,30 +15,17 @@ GraphiQL uses the configured GraphQL endpoint.
 
 ## Shared configuration
 
-Documentation routes are an explicit opt-in mounted on a router with
-`httpx.docs.mount`. The server does not import or mount these interfaces by
-default, which keeps their embedded UI assets out of applications that do not
-use them. Each interface has `enabled`, `route`, and `title` fields plus
+Documentation routes are an explicit opt-in owned by a `httpx.docs.init`
+value. The server does not import or mount these interfaces by default, which
+keeps their embedded UI assets out of applications that do not use them. Each interface has `enabled`, `route`, and `title` fields plus
 explicit, typed vendor options. Every option is a typed field with a declared
 default; there is no string-based passthrough.
 
 Each UI bundle is imported only in the compile-time branch that mounts that
-interface. A ReleaseSmall measurement with Zig 0.17.0 on Windows x86_64 built
-consumers that initialize `Server` and mount one docs configuration:
-
-| Configuration | Executable size |
-|---|---:|
-| Documentation disabled | 680,448 bytes |
-| OpenAPI JSON only | 766,464 bytes |
-| Swagger UI only | 2,945,536 bytes |
-| ReDoc only | 3,111,424 bytes |
-| Scalar only | 5,797,888 bytes |
-| GraphiQL only | 8,241,152 bytes |
-
-Binary scans found the unique JavaScript bundle marker only in its matching
-single-UI build; the OpenAPI-only and docs-disabled builds contained none of
-the four bundle markers. These are representative executable sizes, not a
-stable ABI or a promise about other targets or optimization modes.
+interface, so a consumer that enables one UI does not embed the other three.
+The OpenAPI-only and docs-disabled configurations contain none of the four
+JavaScript bundle markers. These are representative executable properties,
+not a stable ABI or a promise about other targets or optimization modes.
 
 OpenAPI generation and its JSON route can also be disabled independently. If
 a UI remains enabled in that configuration, provide its configured OpenAPI
@@ -48,7 +35,8 @@ route from the application; Httpx skips generating an unused spec.
 
 ```zig
 var server = try httpx.Server.init(allocator, io, .{});
-try httpx.docs.mount(&server, .{
+var docs = httpx.docs.init(allocator, io, &server.router);
+try docs.mount(.{
     .title = "My API",
     .swagger = .{
         .route = "/docs",
@@ -81,7 +69,7 @@ try httpx.docs.mount(&server, .{
         .headers = .{ .authorization = "Bearer token" },
     },
 });
-defer httpx.docs.unmount(&server);
+defer docs.deinit();
 defer server.deinit();
 ```
 

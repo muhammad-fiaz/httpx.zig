@@ -21,7 +21,9 @@ pub fn main() !void {
     defer client.deinit();
 
     // 2. High-level DNS resolution using the client's cached resolver
-    var addresses = client.resolve("httpbun.com", .{ .port = 443 }) catch |err| {
+    var addresses = client.resolve("httpbun.com", .{
+        .port = 443,
+    }) catch |err| {
         std.debug.print("DNS lookup failed: {s}\n", .{@errorName(err)});
         return;
     };

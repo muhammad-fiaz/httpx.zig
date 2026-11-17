@@ -101,18 +101,6 @@ pub const Headers = struct {
         return null;
     }
 
-    /// Returns all values for a header name (for multi-value headers).
-    pub fn getAll(self: *const Headers, allocator: Allocator, name: []const u8) ![]const []const u8 {
-        var results = std.ArrayList([]const u8).empty;
-        errdefer results.deinit(allocator);
-        for (self.entries.items) |h| {
-            if (std.ascii.eqlIgnoreCase(h.name, name)) {
-                try results.append(allocator, h.value);
-            }
-        }
-        return results.toOwnedSlice(allocator);
-    }
-
     pub fn remove(self: *Headers, name: []const u8) bool {
         var removed = false;
         var i: usize = 0;

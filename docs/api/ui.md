@@ -1,7 +1,19 @@
 # Documentation UI API
 
 The documentation UI integration is exposed through `httpx.docs` and mounted
-explicitly on a router with `httpx.docs.mount`.
+explicitly through an owned `httpx.docs.init` value:
+
+```zig
+var docs = httpx.docs.init(allocator, io, &server.router);
+defer docs.deinit();
+try docs.mount(.{});
+```
+
+`httpx.docs.init` borrows the allocator, I/O context, and router. `mount`
+registers the configured routes and transfers ownership of the rendered pages
+and OpenAPI snapshot; `deinit` removes the routes and releases every
+allocation. A `Docs` value mounts at most once and there is no process-wide
+registry.
 
 ## Configuration
 
@@ -126,7 +138,8 @@ escaped inside inline scripts. There is no string-based option passthrough.
 // every option is set, so nothing depends on a hidden default.
 var server = try httpx.Server.init(allocator, io, .{});
 defer server.deinit();
-try httpx.docs.mount(&server, .{
+var docs = httpx.docs.init(allocator, io, &server.router);
+try docs.mount(.{
     .enabled = true,
     .title = "Quick Start API",
     .version = httpx.version,
@@ -176,7 +189,7 @@ try httpx.docs.mount(&server, .{
         .docExplorerOpen = true,
     },
 });
-defer httpx.docs.unmount(&server);
+defer docs.deinit();
 ```
 
 The mount registers the OpenAPI document first, then the enabled UI pages

@@ -15,34 +15,61 @@ Demonstrates HTTPX's thread-safe in-memory DNS caching subsystem with positive/n
 const std = @import("std");
 const httpx = @import("httpx");
 
+fn getHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
+    return .{ .status = 200, .body = "ok-get" };
+}
+
+fn headersHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
+    return .{ .status = 200, .body = "ok-headers" };
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    // Initialize client with custom cache settings
+    var server = try httpx.Server.init(allocator, io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+    });
+    defer server.deinit();
+    try server.router.add(.GET, "/get", getHandler, .{});
+    try server.router.add(.GET, "/headers", headersHandler, .{});
+    const port = server.localPort();
+    const thread = try server.start();
+
     var client = httpx.Client.init(allocator, io, .{
         .dnsCache = .{
             .enable = true,
-            .ttlMs = 120_000,         // 2 minutes positive TTL
-            .negativeTtlMs = 3_000,  // 3 seconds negative TTL
-            .maxEntries = 2048,
+            .ttlMs = 60_000,
         },
     });
     defer client.deinit();
 
-    // First lookup: queries DNS and populates cache
-    var addrs1 = try client.resolve("httpbun.com", .{ .port = 443 });
-    defer addrs1.deinit();
+    var urlBuf: [64]u8 = undefined;
+    const url1 = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/get", .{port});
+    var r1 = client.get(url1, .{}) catch |err| {
+        std.debug.print("R1 failed: {s}\n", .{@errorName(err)});
+        server.requestShutdown();
+        thread.join();
+        return;
+    };
+    defer r1.deinit();
+    std.debug.print("R1 Status: {d}\n", .{r1.status});
 
-    // Second lookup: served instantly from cache
-    var addrs2 = try client.resolve("httpbun.com", .{ .port = 443 });
-    defer addrs2.deinit();
+    const url2 = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/headers", .{port});
+    var r2 = client.get(url2, .{}) catch |err| {
+        std.debug.print("R2 failed: {s}\n", .{@errorName(err)});
+        server.requestShutdown();
+        thread.join();
+        return;
+    };
+    defer r2.deinit();
+    std.debug.print("R2 Status: {d}\n", .{r2.status});
 
-    // Force fresh lookup bypassing cache
-    var fresh = try client.resolve("httpbun.com", .{ .port = 443, .useCache = false });
-    defer fresh.deinit();
+    server.requestShutdown();
+    thread.join();
 }
 ```
 

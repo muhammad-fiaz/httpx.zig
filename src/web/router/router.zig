@@ -1072,28 +1072,14 @@ pub const Router = struct {
         try self.statusHandlers.put(statusCode, handler);
     }
 
-    /// Registers a compile-time validated static slice of route declarations.
-    /// Emits a compile-time error if any conflicts (duplicate paths, shape collisions,
-    /// duplicate names, invalid patterns) are detected.
-    pub fn registerStatic(self: *Router, comptime routes: []const RouteDecl) RouteError!void {
-        comptime validateRoutesComptime(routes);
-        for (routes) |r| {
-            if (r.handler) |h| {
-                try self.add(r.method, r.path, h, .{
-                    .name = r.name,
-                    .meta = r.meta,
-                    .middleware = r.middleware,
-                    .userData = r.userData,
-                    .deinitData = r.deinitData,
-                });
-            }
-        }
-    }
-
-    /// Registers a dynamic route table with runtime conflict validation.
-    /// Returns DuplicateRoute or InvalidPattern if any conflicts are detected,
-    /// without modifying the active route table.
-    pub fn registerRouteTable(self: *Router, routes: []const RouteDecl) RouteError!void {
+    /// Registers a route table.
+    ///
+    /// Every declaration is validated before any route is added: a conflicting
+    /// table returns `DuplicateRoute`, `DuplicateName`, or `InvalidPattern`
+    /// without modifying the active route table. For build-time rejection of a
+    /// comptime-known table, call `validateRoutesComptime` in a `comptime`
+    /// block before registering it.
+    pub fn register(self: *Router, routes: []const RouteDecl) RouteError!void {
         if (validateRouteDeclarations(routes)) |conflict| {
             return switch (conflict.reason) {
                 .duplicateRouteName => RouteError.DuplicateName,
@@ -1379,21 +1365,6 @@ pub const Router = struct {
     pub fn mount(self: *Router, prefix: []const u8, other: *Router, opts: MountOptions) RouteError!void {
         const g = self.group(prefix, .{});
         try g.mountRouter(other, opts);
-    }
-
-    /// Removes the route registered under `name`. Returns true when found.
-    pub fn removeByName(self: *Router, name: []const u8) bool {
-        for (self.routes.items, 0..) |existing, i| {
-            if (existing.name) |n| {
-                if (std.mem.eql(u8, n, name)) {
-                    const entry = self.routes.orderedRemove(i);
-                    self.allocator.free(entry.path);
-                    if (entry.ownsMiddleware) self.allocator.free(entry.middleware);
-                    return true;
-                }
-            }
-        }
-        return false;
     }
 
     /// Writes one anonymous-struct field into `out` for `url()`.
@@ -2339,17 +2310,6 @@ test "route middleware runs global, router, route in order" {
     try std.testing.expectEqual('h', order.items[2]);
 }
 
-test "removeByName releases the route" {
-    const a = std.testing.allocator;
-    var router = Router.init(a, .{});
-    defer router.deinit();
-    try router.get("/tmp", dummyHandler, .{ .name = "tmp" });
-    try std.testing.expect(router.removeByName("tmp"));
-    try std.testing.expect(!router.removeByName("tmp"));
-    var ctx = Context{ .allocator = a };
-    try std.testing.expect(router.match(.GET, "/tmp", &ctx) == null);
-}
-
 test "dynamic websocket-style route matches" {
     const a = std.testing.allocator;
     var router = Router.init(a, .{});
@@ -2437,7 +2397,8 @@ test "comptime and static route registration with compile-time conflict detectio
     };
 
     // Validates at comptime and registers all static declarations
-    try router.registerStatic(&staticRoutes);
+    comptime validateRoutesComptime(&staticRoutes);
+    try router.register(&staticRoutes);
 
     var ctx = Context{ .allocator = a };
     const h1 = router.match(.GET, "/users/123", &ctx);
@@ -2557,7 +2518,7 @@ test "route conflict validation catches duplicate paths, shape collisions, and i
     }
 }
 
-test "registerRouteTable rejects conflicting update without corrupting table" {
+test "register rejects conflicting update without corrupting table" {
     const a = std.testing.allocator;
     var router = Router.init(a, .{});
     defer router.deinit();
@@ -2565,14 +2526,14 @@ test "registerRouteTable rejects conflicting update without corrupting table" {
     const good = [_]RouteDecl{
         .{ .method = .GET, .path = "/api/status", .handler = dummyHandler },
     };
-    try router.registerRouteTable(&good);
+    try router.register(&good);
 
     // Attempt to register table with collision
     const conflicting = [_]RouteDecl{
         .{ .method = .GET, .path = "/u/{id}", .handler = dummyHandler },
         .{ .method = .GET, .path = "/u/{name}", .handler = dummyHandler },
     };
-    try std.testing.expectError(RouteError.DuplicateRoute, router.registerRouteTable(&conflicting));
+    try std.testing.expectError(RouteError.DuplicateRoute, router.register(&conflicting));
 
     // Active route table remains intact and functional
     var ctx = Context{ .allocator = a };

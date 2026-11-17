@@ -12,7 +12,8 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 - `client.fetch(url, options)` - Fetch-style convenience using the native client transport
 - `client.get / post / put / patch / delete / head / options / request(url, options)`
 - `client.checkConnectivity(options)` — connectivity probe using client I/O
-- Additional operations: `client.download`, `client.graphql`, `client.lookupFileInfo`, `client.updateFile`, `httpx.client.download.verifyFile`, `client.sitemap.fetch`, `client.resolve`, `client.resolveUrl`
+- Additional operations: `client.download`, `client.graphql`, `client.lookupFileInfo`, `client.updateFile`, `httpx.client.download.verifyFile`, `client.resolve`, `client.resolveUrl`
+- Parsing shortcuts: `client.document.fetch` (auto-detected), `client.html.fetch`, `client.xml.fetch`, `client.feed.fetch`, `client.robots.fetch`, `client.sitemap.fetch`
 
 ### Client Lifecycle
 

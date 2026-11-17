@@ -55,7 +55,6 @@ See [Server](/api/server).
 | `set(name, value)` | Set/overwrite value |
 | `append(name, value)` | Append value (multi-value headers) |
 | `get(name)` | First value, case-insensitive |
-| `getAll(allocator, name)` | All values |
 | `remove(name)` | Remove header |
 | `contains(name)` | Presence check |
 | `count()` / `clear()` | Size and reset |

@@ -95,7 +95,8 @@ pub fn main() !void {
         .endpoint = graphqlEndpoint,
     });
 
-    try httpx.docs.mount(&server, .{
+    var docs = httpx.docs.init(allocator, io, &server.router);
+    try docs.mount(.{
         .graphiql = .{
             .route = "/graphiql",
             .graphqlEndpoint = graphqlEndpoint,
@@ -104,7 +105,7 @@ pub fn main() !void {
             .editorTheme = "vs-dark",
         },
     });
-    defer httpx.docs.unmount(&server);
+    defer docs.deinit();
 
     server.run();
 }

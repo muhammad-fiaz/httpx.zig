@@ -101,8 +101,9 @@ const staticRoutes = [_]httpx.router.RouteDecl{
     .{ .method = .GET, .path = "/files/{path:path}", .name = "files", .handler = fileHandler },
 };
 
-// Validates all routes at comptime and registers into the active router:
-try server.registerStatic(&staticRoutes);
+// Validates all routes at comptime, then registers into the active router:
+comptime httpx.router.validateRoutesComptime(&staticRoutes);
+try server.register(&staticRoutes);
 ```
 
 ### Detected Conflicts:
@@ -116,7 +117,7 @@ Any violation produces an actionable **`@compileError`** identifying the conflic
 
 ### Runtime Route Table Registration
 
-Dynamic routes discovered at runtime use `registerRouteTable(&routes)`, applying the identical validation logic and returning structured `RouteError.DuplicateRoute`, `RouteError.DuplicateName`, or `RouteError.InvalidPattern` without corrupting the active route table.
+Dynamic routes discovered at runtime use `register(&routes)`, applying the identical validation logic and returning structured `RouteError.DuplicateRoute`, `RouteError.DuplicateName`, or `RouteError.InvalidPattern` without corrupting the active route table.
 
 ## File-Based Routing Conventions
 

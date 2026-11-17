@@ -8,19 +8,41 @@ Demonstrates downloadResume.zig using the canonical HTTPX API.
 const std = @import("std");
 const httpx = @import("httpx");
 
+fn pdfHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
+    const data = try ctx.allocator.alloc(u8, 2048);
+    @memset(data, '%');
+    return .{
+        .status = 200,
+        .body = data,
+        .contentType = "application/pdf",
+        .headers = &.{
+            .{ .name = "Accept-Ranges", .value = "bytes" },
+        },
+    };
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
+    var server = try httpx.Server.init(allocator, io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+    });
+    defer server.deinit();
+    try server.router.add(.GET, "/sample-local-pdf.pdf", pdfHandler, .{});
+    const port = server.localPort();
+    const thread = try server.start();
+
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    const sampleUrl = "https://ontheline.trincoll.edu/images/bookdown/sample-local-pdf.pdf";
-    std.debug.print("==> Downloading {s} with Range resume policy (.resumePartial)...\n", .{sampleUrl});
+    var urlBuf: [64]u8 = undefined;
+    const sampleUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/sample-local-pdf.pdf", .{port});
 
-    // Uses .resumePartial (clean non-reserved keyword name)
+    // Uses .resumePartial (short canonical resume policy)
     const result = client.download(
         sampleUrl,
         .{
@@ -32,6 +54,8 @@ pub fn main() !void {
         },
     ) catch |err| {
         std.debug.print("Resume download handled: {s}\n", .{@errorName(err)});
+        server.requestShutdown();
+        thread.join();
         return;
     };
 
@@ -40,6 +64,9 @@ pub fn main() !void {
         result.downloadedBytes,
         result.destination,
     });
+
+    server.requestShutdown();
+    thread.join();
 }
 ```
 

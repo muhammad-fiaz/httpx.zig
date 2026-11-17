@@ -69,18 +69,18 @@ Latency figures move between runs; they are not a contract. On the machine used 
 | `basic_auth_encode` | Security | 24.44 ns/op | **40924567 ops/sec** |
 | `basic_auth_decode` | Security | 14.63 ns/op | **68358774 ops/sec** |
 | `bearer_token_parse` | Security | 1.09 ns/op | **913634162 ops/sec** |
-| `gzip_compress` | Compression | 14.88 -�s/op | **67217 ops/sec** |
-| `gzip_decompress` | Compression | 4.13 -�s/op | **242071 ops/sec** |
-| `deflate_compress` | Compression | 13.47 -�s/op | **74248 ops/sec** |
-| `deflate_decompress` | Compression | 4.06 -�s/op | **246455 ops/sec** |
-| `html_parse` | Parsing | 11.55 -�s/op | **86583 ops/sec** |
-| `template_parse` | Parsing | 2.39 -�s/op | **418704 ops/sec** |
-| `template_render` | Parsing | 1.33 -�s/op | **754289 ops/sec** |
-| `template_incremental` | Parsing | 18.69 -�s/op | **53508 ops/sec** |
-| `json_feed_parse` | Parsing | 3.24 -�s/op | **308669 ops/sec** |
+| `gzip_compress` | Compression | 14.88 -µs/op | **67217 ops/sec** |
+| `gzip_decompress` | Compression | 4.13 -µs/op | **242071 ops/sec** |
+| `deflate_compress` | Compression | 13.47 -µs/op | **74248 ops/sec** |
+| `deflate_decompress` | Compression | 4.06 -µs/op | **246455 ops/sec** |
+| `html_parse` | Parsing | 11.55 -µs/op | **86583 ops/sec** |
+| `template_parse` | Parsing | 2.39 -µs/op | **418704 ops/sec** |
+| `template_render` | Parsing | 1.33 -µs/op | **754289 ops/sec** |
+| `template_incremental` | Parsing | 18.69 -µs/op | **53508 ops/sec** |
+| `json_feed_parse` | Parsing | 3.24 -µs/op | **308669 ops/sec** |
 | `live_reload_inject` | Parsing | 231.07 ns/op | **4327662 ops/sec** |
-| `watcher_scan` | Watcher | 657.92 -�s/op | **1519 ops/sec** |
-| `watcher_deps` | Watcher | 3.18 -�s/op | **314606 ops/sec** |
+| `watcher_scan` | Watcher | 657.92 -µs/op | **1519 ops/sec** |
+| `watcher_deps` | Watcher | 3.18 -µs/op | **314606 ops/sec** |
 | `static_safe_join` | Static Files | 95.81 ns/op | **10437803 ops/sec** |
 | `spa_fallback_policy` | SPA | 92.54 ns/op | **10806489 ops/sec** |
 | `worker_pool_submit` | Concurrency | 198.00 ns/op | **5050484 ops/sec** |
@@ -94,10 +94,10 @@ Latency figures move between runs; they are not a contract. On the machine used 
 | `h3_frame_header` | Protocols | 2.43 ns/op | **411815819 ops/sec** |
 | `h3_varint_encode` | Protocols | 3.42 ns/op | **292106408 ops/sec** |
 | `h3_varint_decode` | Protocols | 3.22 ns/op | **310161190 ops/sec** |
-| `tls_record_seal` | TLS | 1.11 -�s/op | **899435 ops/sec** |
+| `tls_record_seal` | TLS | 1.11 -µs/op | **899435 ops/sec** |
 | `tls_cert_parse` | TLS | 974.69 ns/op | **1025963 ops/sec** |
-| `client_server_get` | Network | 81.44 -�s/op | **12279 req/sec** |
-| `h2_pooled_get` | Network | 52.93 -�s/op | **18894 req/sec** |
+| `client_server_get` | Network | 81.44 -µs/op | **12279 req/sec** |
+| `h2_pooled_get` | Network | 52.93 -µs/op | **18894 req/sec** |
 | `h3_get` | Network | 203.29 ms/op | **4 req/sec** |
 | `tls_full_handshake` | TLS | 3.26 ms/op | **307 ops/sec** |
 | `tls_resumed_handshake` | TLS | 2.65 ms/op | **377 ops/sec**

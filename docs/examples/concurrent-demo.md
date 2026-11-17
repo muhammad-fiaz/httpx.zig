@@ -21,15 +21,17 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
 
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
     });
     defer server.deinit();
-    try server.get("/get", .{ .handler = okHandler });
-    try server.get("/headers", .{ .handler = okHandler });
-    try server.get("/ip", .{ .handler = okHandler });
+    try server.router.add(.GET, "/get", okHandler, .{});
+    try server.router.add(.GET, "/headers", okHandler, .{});
+    try server.router.add(.GET, "/ip", okHandler, .{});
     const port = server.localPort();
     const thread = try server.start();
 
@@ -40,6 +42,7 @@ pub fn main() !void {
     const urlHeaders = try std.fmt.bufPrint(&u2Buf, "http://127.0.0.1:{d}/headers", .{port});
     const urlIp = try std.fmt.bufPrint(&u3Buf, "http://127.0.0.1:{d}/ip", .{port});
 
+    // Run requests concurrently using httpx.concurrency.Pool
     var pool = try httpx.concurrency.Pool.init(allocator, io, .{ .workers = 4 });
     defer pool.deinit();
 

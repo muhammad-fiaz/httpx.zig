@@ -13,7 +13,8 @@ assets beneath the configured route.
 
 ```zig
 var server = try httpx.Server.init(allocator, io, .{});
-try httpx.docs.mount(&server, .{
+var docs = httpx.docs.init(allocator, io, &server.router);
+try docs.mount(.{
     .redoc = .{
         .enabled = true,
         .route = "/reference",
@@ -24,7 +25,7 @@ try httpx.docs.mount(&server, .{
         .expandResponses = "200,201",
     },
 });
-defer httpx.docs.unmount(&server);
+defer docs.deinit();
 defer server.deinit();
 ```
 

@@ -16,8 +16,9 @@
 //! Route conflicts are surfaced as Router errors, never silently overwritten.
 //!
 //! Handlers are capture-less fn pointers, so mounted state is carried in
-//! `Context.userData`. Each server mount owns its own state; `unmount`
-//! releases one mount and `unmountAll` releases every remaining mount.
+//! `Context.userData`. Each `Docs` value owns exactly one mount; `deinit`
+//! releases that mount's pages, spec, and routes. There is no process-wide
+//! registry.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -29,7 +30,6 @@ const Method = @import("../../common/method.zig").Method;
 const mediaTypeMod = @import("../../common/mediaType.zig");
 const openapi = @import("../openApi/spec.zig");
 const assetFile = @import("assetFile.zig");
-const testAssets = @import("assets.zig");
 const metaMod = @import("../router/routeMetadata.zig");
 const versionInfo = @import("../../common/version.zig");
 const z = @import("zigantic");
@@ -187,8 +187,6 @@ const DocsState = struct {
     graphqlEndpoint: ?[]u8 = null,
     title: []u8 = &.{},
     router: *const Router,
-    /// Next mount in the process-wide registry used by `unmount`.
-    next: ?*DocsState = null,
     info: openapi.Info,
     /// Pages are rendered once at mount; handlers hand out borrowed slices
     /// so request handling performs zero dynamic allocation.
@@ -212,7 +210,36 @@ const DocsState = struct {
     }
 };
 
-var gMounts: ?*DocsState = null;
+/// Explicitly owned documentation mount.
+///
+/// `init` borrows the caller's allocator, I/O context, and router; `mount`
+/// registers the configured routes and transfers ownership of the rendered
+/// pages and OpenAPI snapshot to this value; `deinit` removes the routes and
+/// releases every allocation. A `Docs` value mounts at most once.
+pub const Docs = struct {
+    allocator: Allocator,
+    io: std.Io,
+    router: *Router,
+    state: ?*DocsState = null,
+
+    pub fn init(allocator: Allocator, io: std.Io, router: *Router) Docs {
+        return .{ .allocator = allocator, .io = io, .router = router };
+    }
+
+    /// Mounts every enabled documentation interface using `cfg`.
+    pub fn mount(self: *Docs, comptime cfg: Config) !void {
+        if (self.state != null) return error.AlreadyMounted;
+        try mountRouter(self, cfg);
+    }
+
+    /// Removes this mount's routes and releases its pages and spec.
+    pub fn deinit(self: *Docs) void {
+        if (self.state) |st| {
+            self.state = null;
+            freeState(st);
+        }
+    }
+};
 
 fn removeRoutes(st: *DocsState) void {
     const a = st.allocator;
@@ -266,24 +293,10 @@ fn freeState(st: *DocsState) void {
     a.destroy(st);
 }
 
-/// Mounts documentation on an initialized server. Its router and allocator
-/// are borrowed from the server owner, and `cfg` is compile-time so disabled
-/// UI bundles can be eliminated when the compiler can prove them unreachable.
-pub fn mount(server: anytype, comptime cfg: Config) !void {
-    try mountRouter(server.allocator, &server.router, cfg);
-}
-
-/// Removes only the documentation mount belonging to this initialized server.
-pub fn unmount(server: anytype) void {
-    unmountFromRouter(&server.router);
-}
-
 /// Internal router-level implementation shared with the module tests.
-fn mountRouter(
-    allocator: Allocator,
-    router: *Router,
-    comptime cfg: Config,
-) !void {
+fn mountRouter(self: *Docs, comptime cfg: Config) !void {
+    const allocator = self.allocator;
+    const router = self.router;
     if (comptime (!cfg.enabled or !(cfg.openapi.enabled or cfg.swagger.enabled or cfg.redoc.enabled or cfg.scalar.enabled or cfg.graphiql.enabled))) return;
     {
         var scratch: [4096]u8 = undefined;
@@ -443,32 +456,7 @@ fn mountRouter(
             }
         }
     }
-    st.next = gMounts;
-    gMounts = st;
-}
-
-/// Frees docs state mounted on one router. Other mounts are untouched.
-fn unmountFromRouter(router: *const Router) void {
-    var link = &gMounts;
-    while (link.*) |st| {
-        if (st.router == router) {
-            link.* = st.next;
-            freeState(st);
-            return;
-        }
-        link = &st.next;
-    }
-}
-
-/// Frees every mounted docs state. Intended for process/test teardown.
-pub fn unmountAll() void {
-    var current = gMounts;
-    gMounts = null;
-    while (current) |st| {
-        const next = st.next;
-        freeState(st);
-        current = next;
-    }
+    self.state = st;
 }
 
 fn normalizeRoute(allocator: Allocator, route: []const u8) Allocator.Error![]u8 {
@@ -788,14 +776,33 @@ fn invoke(router: *Router, method: Method, path: []const u8, a: Allocator) !?Res
     return try h(&ctx);
 }
 
+test "mounting the same Docs value twice is rejected" {
+    const a = std.testing.allocator;
+    var router = Router.init(a, .{});
+    defer router.deinit();
+
+    var docs = testDocs(a, &router);
+    try docs.mount(.{});
+    defer docs.deinit();
+
+    try std.testing.expectError(error.AlreadyMounted, docs.mount(.{}));
+    // The first mount is untouched and still serves.
+    try std.testing.expect((try invoke(&router, .GET, "/openapi.json", a)) != null);
+}
+
+fn testDocs(a: Allocator, router: *Router) Docs {
+    return Docs.init(a, std.Io.Threaded.global_single_threaded.io(), router);
+}
+
 test "mount registers spec, pages, and local assets" {
     const a = std.testing.allocator;
     var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/hello", helloHandler, .{});
 
-    try mountRouter(a, &router, .{});
-    defer unmountAll();
+    var docs = testDocs(a, &router);
+    try docs.mount(.{});
+    defer docs.deinit();
 
     // Spec excludes docs routes but includes user routes.
     const res = (try invoke(&router, .GET, "/openapi.json", a)).?;
@@ -819,7 +826,7 @@ test "mount registers spec, pages, and local assets" {
 
     // Bundle served from embedded bytes.
     const bundle = (try invoke(&router, .GET, "/docs/swagger-ui-bundle.js", a)).?;
-    try std.testing.expect(bundle.body.len == testAssets.swaggerUiBundleJs.len);
+    try std.testing.expect(bundle.body.len == @import("swaggerAssets.zig").files[0].data.len);
     try std.testing.expect(std.mem.startsWith(u8, bundle.body, "/*!"));
 
     // Unknown asset name does not fall through to any catch-all route.
@@ -833,13 +840,13 @@ test "mount registers spec, pages, and local assets" {
     try std.testing.expect(std.mem.indexOf(u8, redocPage.body, "import { init }") != null);
     try std.testing.expect(std.mem.indexOf(u8, redocPage.body, "fonts.googleapis.com") == null);
     const redocJs = (try invoke(&router, .GET, "/redoc/redoc.standalone.js", a)).?;
-    try std.testing.expect(redocJs.body.len == testAssets.redocStandaloneJs.len);
+    try std.testing.expect(redocJs.body.len == @import("redocAssets.zig").files[0].data.len);
 
     // Scalar page + bundle (enabled by default).
     const scalarPage = (try invoke(&router, .GET, "/scalar", a)).?;
     try std.testing.expect(std.mem.indexOf(u8, scalarPage.body, "id=\"api-reference\"") != null);
     const scalarJs = (try invoke(&router, .GET, "/scalar/standalone.js", a)).?;
-    try std.testing.expectEqual(testAssets.scalarStandaloneJs.len, scalarJs.body.len);
+    try std.testing.expectEqual(@import("scalarAssets.zig").files[0].data.len, scalarJs.body.len);
 }
 
 test "scalar opt-in mounts its page and bundle" {
@@ -848,13 +855,14 @@ test "scalar opt-in mounts its page and bundle" {
     defer router.deinit();
     try router.get("/users/{id}", helloHandler, .{});
 
-    try mountRouter(a, &router, .{ .redoc = .{ .enabled = false }, .scalar = .{ .enabled = true } });
-    defer unmountAll();
+    var docs = testDocs(a, &router);
+    try docs.mount(.{ .redoc = .{ .enabled = false }, .scalar = .{ .enabled = true } });
+    defer docs.deinit();
 
     const page = (try invoke(&router, .GET, "/scalar", a)).?;
     try std.testing.expect(std.mem.indexOf(u8, page.body, "id=\"api-reference\"") != null);
     const js = (try invoke(&router, .GET, "/scalar/standalone.js", a)).?;
-    try std.testing.expectEqual(testAssets.scalarStandaloneJs.len, js.body.len);
+    try std.testing.expectEqual(@import("scalarAssets.zig").files[0].data.len, js.body.len);
 
     const res = (try invoke(&router, .GET, "/openapi.json", a)).?;
     const parsed = try std.json.parseFromSlice(std.json.Value, a, res.body, .{});
@@ -867,7 +875,8 @@ test "disabled config registers nothing" {
     var router = Router.init(a, .{});
     defer router.deinit();
 
-    try mountRouter(a, &router, .{ .enabled = false });
+    var docs = testDocs(a, &router);
+    try docs.mount(.{ .enabled = false });
     try std.testing.expect((try invoke(&router, .GET, "/openapi.json", a)) == null);
 }
 
@@ -876,13 +885,15 @@ test "all docs endpoints disabled skips mounting" {
     var router = Router.init(a, .{});
     defer router.deinit();
 
-    try mountRouter(a, &router, .{
+    var docs = testDocs(a, &router);
+    try docs.mount(.{
         .openapi = .{ .enabled = false },
         .swagger = .{ .enabled = false },
         .redoc = .{ .enabled = false },
         .scalar = .{ .enabled = false },
         .graphiql = .{ .enabled = false },
     });
+    defer docs.deinit();
     try std.testing.expect((try invoke(&router, .GET, "/openapi.json", a)) == null);
     try std.testing.expect((try invoke(&router, .GET, "/docs", a)) == null);
     try std.testing.expect((try invoke(&router, .GET, "/redoc", a)) == null);
@@ -895,7 +906,9 @@ test "disabled docs releases routes to the application" {
     var router = Router.init(a, .{});
     defer router.deinit();
 
-    try mountRouter(a, &router, .{ .enabled = false });
+    var docs = testDocs(a, &router);
+    try docs.mount(.{ .enabled = false });
+    defer docs.deinit();
 
     // The application can now own /docs; requests reach its handler.
     try router.get("/docs", helloHandler, .{});
@@ -909,10 +922,11 @@ test "openapi disabled option suppresses /openapi.json only" {
     defer router.deinit();
     try router.get("/ping", helloHandler, .{});
 
-    try mountRouter(a, &router, .{ .openapi = .{ .enabled = false }, .swagger = .{ .enabled = true } });
-    defer unmountAll();
+    var docs = testDocs(a, &router);
+    try docs.mount(.{ .openapi = .{ .enabled = false }, .swagger = .{ .enabled = true } });
+    defer docs.deinit();
 
-    try std.testing.expect(gMounts.?.spec == null);
+    try std.testing.expect(docs.state.?.spec == null);
     try std.testing.expect((try invoke(&router, .GET, "/openapi.json", a)) == null);
     try std.testing.expect((try invoke(&router, .GET, "/docs", a)) != null);
 }
@@ -923,8 +937,9 @@ test "conflicting user route is reported, not overwritten" {
     defer router.deinit();
     try router.get("/docs", helloHandler, .{}); // user already owns /docs
 
-    try std.testing.expectError(error.DuplicateRoute, mountRouter(a, &router, .{}));
-    unmountAll(); // partial state cleaned up
+    var docs = testDocs(a, &router);
+    try std.testing.expectError(error.DuplicateRoute, docs.mount(.{}));
+    docs.deinit(); // partial state cleaned up
 }
 
 test "graphiql opt-in mounts its page and all worker assets" {
@@ -933,8 +948,9 @@ test "graphiql opt-in mounts its page and all worker assets" {
     defer router.deinit();
     try router.get("/graphql", helloHandler, .{});
 
-    try mountRouter(a, &router, .{ .graphiql = .{ .enabled = true, .graphqlEndpoint = "/graphql" } });
-    defer unmountAll();
+    var docs = testDocs(a, &router);
+    try docs.mount(.{ .graphiql = .{ .enabled = true, .graphqlEndpoint = "/graphql" } });
+    defer docs.deinit();
 
     const page = (try invoke(&router, .GET, "/graphiql", a)).?;
     try std.testing.expect(std.mem.indexOf(u8, page.body, "id=\"graphiql\"") != null);
@@ -943,10 +959,10 @@ test "graphiql opt-in mounts its page and all worker assets" {
     try std.testing.expect(std.mem.indexOf(u8, page.body, "<base href=\"/graphiql/\">") != null);
 
     const js = (try invoke(&router, .GET, "/graphiql/graphiql.js", a)).?;
-    try std.testing.expectEqual(testAssets.graphiqlJs.len, js.body.len);
+    try std.testing.expectEqual(@import("graphiqlAssets.zig").files[0].data.len, js.body.len);
 
     const css = (try invoke(&router, .GET, "/graphiql/graphiql.css", a)).?;
-    try std.testing.expectEqual(testAssets.graphiqlCss.len, css.body.len);
+    try std.testing.expectEqual(@import("graphiqlAssets.zig").files[1].data.len, css.body.len);
     try std.testing.expect(std.mem.indexOf(u8, css.body, "codicon-mxdk0fnd.ttf") != null);
 
     const font = (try invoke(&router, .GET, "/graphiql/codicon-mxdk0fnd.ttf", a)).?;
@@ -960,8 +976,9 @@ test "graphiql codicon font resolves under a custom mount route" {
     defer router.deinit();
     try router.get("/graphql", helloHandler, .{});
 
-    try mountRouter(a, &router, .{ .graphiql = .{ .enabled = true, .route = "/internal/ide", .graphqlEndpoint = "/graphql" } });
-    defer unmountAll();
+    var docs = testDocs(a, &router);
+    try docs.mount(.{ .graphiql = .{ .enabled = true, .route = "/internal/ide", .graphqlEndpoint = "/graphql" } });
+    defer docs.deinit();
 
     const css = (try invoke(&router, .GET, "/internal/ide/graphiql.css", a)).?;
     try std.testing.expect(std.mem.indexOf(u8, css.body, "url(\"codicon-mxdk0fnd.ttf\")") != null);
@@ -981,7 +998,8 @@ test "every ui option reaches the rendered page" {
     defer router.deinit();
     try router.get("/ping", helloHandler, .{});
 
-    try mountRouter(a, &router, .{
+    var docs = testDocs(a, &router);
+    try docs.mount(.{
         .swagger = .{
             .route = "/api-docs",
             .docExpansion = .full,
@@ -1016,7 +1034,7 @@ test "every ui option reaches the rendered page" {
             .docExplorerOpen = true,
         },
     });
-    defer unmountAll();
+    defer docs.deinit();
 
     const swagger = (try invoke(&router, .GET, "/api-docs", a)).?;
     try std.testing.expect(std.mem.indexOf(u8, swagger.body, "\"docExpansion\":\"full\"") != null);
@@ -1054,8 +1072,9 @@ test "all documentation pages are self-hosted and offline" {
     defer router.deinit();
     try router.get("/hello", helloHandler, .{});
 
-    try mountRouter(a, &router, .{});
-    defer unmountAll();
+    var docs = testDocs(a, &router);
+    try docs.mount(.{});
+    defer docs.deinit();
 
     const Pages = struct {
         fn page(r: *Router, path: []const u8, alloc: Allocator) !Response {
@@ -1080,8 +1099,9 @@ test "all vendored assets serve with correct mime and markers" {
     defer router.deinit();
     try router.get("/hello", helloHandler, .{});
 
-    try mountRouter(a, &router, .{});
-    defer unmountAll();
+    var docs = testDocs(a, &router);
+    try docs.mount(.{});
+    defer docs.deinit();
 
     const Case = struct {
         path: []const u8,
@@ -1138,8 +1158,9 @@ test "disabling swagger and redoc leaves scalar and spec" {
     defer router.deinit();
     try router.get("/ping", helloHandler, .{});
 
-    try mountRouter(a, &router, .{ .swagger = .{ .enabled = false }, .redoc = .{ .enabled = false } });
-    defer unmountAll();
+    var docs = testDocs(a, &router);
+    try docs.mount(.{ .swagger = .{ .enabled = false }, .redoc = .{ .enabled = false } });
+    defer docs.deinit();
 
     try std.testing.expect((try invoke(&router, .GET, "/docs", a)) == null);
     try std.testing.expect((try invoke(&router, .GET, "/redoc", a)) == null);
@@ -1147,7 +1168,7 @@ test "disabling swagger and redoc leaves scalar and spec" {
     try std.testing.expect((try invoke(&router, .GET, "/openapi.json", a)) != null);
 }
 
-test "docs mounts are isolated per router and unmount removes routes" {
+test "docs mounts are isolated per router and deinit removes routes" {
     const a = std.testing.allocator;
     var first = Router.init(a, .{});
     defer first.deinit();
@@ -1157,9 +1178,12 @@ test "docs mounts are isolated per router and unmount removes routes" {
     try first.get("/first", helloHandler, .{});
     try second.get("/second", helloHandler, .{});
 
-    try mountRouter(a, &first, .{});
-    try mountRouter(a, &second, .{});
-    defer unmountAll();
+    var first_docs = testDocs(a, &first);
+    try first_docs.mount(.{});
+    defer first_docs.deinit();
+    var second_docs = testDocs(a, &second);
+    try second_docs.mount(.{});
+    defer second_docs.deinit();
 
     // Both mounts serve independently.
     try std.testing.expect((try invoke(&first, .GET, "/openapi.json", a)) != null);
@@ -1168,14 +1192,14 @@ test "docs mounts are isolated per router and unmount removes routes" {
 
     // Unmounting one router leaves the other mount usable and removes only
     // the first router's docs routes.
-    unmountFromRouter(&first);
+    first_docs.deinit();
     try std.testing.expect((try invoke(&first, .GET, "/openapi.json", a)) == null);
     try std.testing.expect((try invoke(&first, .GET, "/docs", a)) == null);
     try std.testing.expect((try invoke(&second, .GET, "/openapi.json", a)) != null);
     try std.testing.expect((try invoke(&second, .GET, "/docs", a)) != null);
 }
 
-test "public docs mount borrows server resources and unmount is owner-scoped" {
+test "public docs mount borrows server resources and deinit is owner-scoped" {
     const Owner = struct {
         allocator: Allocator,
         router: Router,
@@ -1186,14 +1210,15 @@ test "public docs mount borrows server resources and unmount is owner-scoped" {
     };
     defer owner.router.deinit();
 
-    try mount(&owner, .{
+    var docs = Docs.init(owner.allocator, std.Io.Threaded.global_single_threaded.io(), &owner.router);
+    try docs.mount(.{
         .swagger = .{ .enabled = false },
         .redoc = .{ .enabled = false },
         .scalar = .{ .enabled = false },
         .graphiql = .{ .enabled = false },
     });
     try std.testing.expect(owner.router.hasConflict(.GET, "/openapi.json"));
-    unmount(&owner);
+    docs.deinit();
     try std.testing.expect(!owner.router.hasConflict(.GET, "/openapi.json"));
 }
 
@@ -1203,8 +1228,9 @@ test "openapi document is a stable mount-time snapshot" {
     defer router.deinit();
     try router.get("/before", helloHandler, .{});
 
-    try mountRouter(a, &router, .{});
-    defer unmountAll();
+    var docs = testDocs(a, &router);
+    try docs.mount(.{});
+    defer docs.deinit();
 
     const first = (try invoke(&router, .GET, "/openapi.json", a)).?;
     const first_copy = try a.dupe(u8, first.body);

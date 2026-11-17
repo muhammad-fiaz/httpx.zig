@@ -51,7 +51,6 @@ pub const Headers = struct {
     pub fn set(self: *Headers, name: []const u8, value: []const u8) !void;
     pub fn append(self: *Headers, name: []const u8, value: []const u8) !void;
     pub fn get(self: *const Headers, name: []const u8) ?[]const u8;
-    pub fn getAll(self: *const Headers, allocator: Allocator, name: []const u8) ![]const []const u8;
     pub fn remove(self: *Headers, name: []const u8) bool;
     pub fn contains(self: *const Headers, name: []const u8) bool;
     pub fn count(self: *const Headers) usize;
@@ -79,9 +78,6 @@ Appends a new header entry without removing existing matching names, enabling mu
 
 ### `headers.get(name) ?[]const u8`
 Finds the first value matching `name` case-insensitively. Returns `null` if not found.
-
-### `headers.getAll(name, allocator) ![]const []const u8`
-Returns all values for a header name (for multi-value headers).
 
 ### `headers.remove(name) bool`
 Removes all header entries matching `name`. Returns `true` if any entries were removed.

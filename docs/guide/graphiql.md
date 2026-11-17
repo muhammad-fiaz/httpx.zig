@@ -13,7 +13,8 @@ served beneath the configured route.
 
 ```zig
 var server = try httpx.Server.init(allocator, io, .{});
-try httpx.docs.mount(&server, .{
+var docs = httpx.docs.init(allocator, io, &server.router);
+try docs.mount(.{
     .graphiql = .{
         .enabled = true,
         .route = "/explorer",
@@ -24,7 +25,7 @@ try httpx.docs.mount(&server, .{
         .headers = .{ .authorization = "Bearer token" },
     },
 });
-defer httpx.docs.unmount(&server);
+defer docs.deinit();
 defer server.deinit();
 ```
 

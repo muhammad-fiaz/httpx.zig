@@ -8,17 +8,39 @@ Perform a minimal HTTP GET request with `httpx.Client`.
 const std = @import("std");
 const httpx = @import("httpx");
 
+fn getHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
+    return .{
+        .status = 200,
+        .body = "{\"url\":\"http://127.0.0.1/get\",\"origin\":\"127.0.0.1\"}",
+        .contentType = "application/json",
+    };
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
+    var server = try httpx.Server.init(allocator, io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .limits = .{ .maxConnections = 1 },
+    });
+    defer server.deinit();
+    try server.router.add(.GET, "/get", getHandler, .{});
+    const port = server.localPort();
+    const thread = try server.start();
+    defer thread.join();
+
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    // Unified fetch request
-    var response = try client.get("https://httpbun.com/get", .{});
+    var urlBuf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/get", .{port});
+
+    // GET request
+    var response = try client.get(url, .{});
     defer response.deinit();
 
     std.debug.print("Status: {d}\n", .{response.status});

@@ -12,7 +12,7 @@ Demonstrates openapi.zig using the canonical HTTPX API.
 //! Demonstrates building a router with documented routes and producing
 //! the OpenAPI JSON spec to stdout. The same data drives the built-in
 //! /openapi.json, /docs (Swagger UI), and /redoc endpoints when
-//! Docs are mounted explicitly with `httpx.docs.mount`.
+//! Docs are mounted explicitly with `httpx.docs.init`.
 
 const std = @import("std");
 const httpx = @import("httpx");
@@ -37,14 +37,14 @@ pub fn main() !void {
 
     var router = httpx.Router.init(allocator, .{});
     defer router.deinit();
-    try router.add(.GET, "/widgets", listHandler, .{.meta = .{
+    try router.add(.GET, "/widgets", listHandler, .{ .meta = .{
         .summary = "List all widgets",
         .description = "Returns the full set of widgets.",
-    }});
-    try router.add(.GET, "/widgets/{id}", getHandler, .{.meta = .{
+    } });
+    try router.add(.GET, "/widgets/{id}", getHandler, .{ .meta = .{
         .summary = "Fetch a single widget",
         .description = "Looks up a widget by its opaque id.",
-    }});
+    } });
 
     const spec = try httpx.openapi.generate(&router, .{
         .title = "Widgets API",

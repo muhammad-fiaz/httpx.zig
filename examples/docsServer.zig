@@ -86,7 +86,8 @@ pub fn main() !void {
     try server.get("/", homePageHandler);
     try server.get("/api/items", listItemsHandler);
     try server.get("/api/items/{id}", getItemHandler);
-    try httpx.docs.mount(&server, .{
+    var docs = httpx.docs.init(allocator, io, &server.router);
+    try docs.mount(.{
         .title = "HTTPX Modern API Suite",
         .version = httpx.version,
         .description = "Full-featured native HTTP server with OpenAPI & GraphQL documentation.",
@@ -129,7 +130,7 @@ pub fn main() !void {
             .editorTheme = "vs-dark",
         },
     });
-    defer httpx.docs.unmount(&server);
+    defer docs.deinit();
 
     const port = server.localPort();
     std.debug.print("[INFO] Server started on http://127.0.0.1:{d}\n", .{port});

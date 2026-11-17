@@ -17,10 +17,11 @@ an out-of-range value fails loudly instead of silently degrading:
 var server = try httpx.Server.init(allocator, io, .{
     .port = 0,
 });
-try httpx.docs.mount(&server, .{
+var docs = httpx.docs.init(allocator, io, &server.router);
+try docs.mount(.{
     .swagger = .{ .route = "/api-docs" },
 });
-defer httpx.docs.unmount(&server);
+defer docs.deinit();
 defer server.deinit();
 ```
 
@@ -83,8 +84,9 @@ var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 8080,
 });
-try httpx.docs.mount(&server, .{});
-defer httpx.docs.unmount(&server);
+var docs = httpx.docs.init(allocator, io, &server.router);
+try docs.mount(.{});
+defer docs.deinit();
 defer server.deinit();
 ```
 
@@ -105,7 +107,7 @@ the [Server API](/api/server) and [Router API](/api/router).
 | `src/parsing` | `httpx.parsing` | [Parsing](/api/parsing) |
 | `src/protocols` | `httpx.http1`, `httpx.http2`, `httpx.http3`, `httpx.quic`, `httpx.tls`, `httpx.protocols.ftp` | [Protocols](/api/protocol), [TLS](/api/tls), [FTP](/api/ftp) |
 | `src/server` | `httpx.Server` | [Server](/api/server) |
-| `src/web` | `httpx.web`, `httpx.router`, `httpx.middleware`, `httpx.docs` | [Router](/api/router), [Middleware](/api/middleware), [Documentation UI](/api/ui) |
+| `src/web` | `httpx.router`, `httpx.middleware`, `httpx.templates`, `httpx.assets`, `httpx.static`, `httpx.metrics`, `httpx.rest`, `httpx.openapi`, `httpx.docs`, `httpx.graphql` | [Router](/api/router), [Middleware](/api/middleware), [Documentation UI](/api/ui) |
 | `src/utils` | `httpx.fs`, `httpx.mime` | [Utilities](/api/utils) |
 
 The source tree also contains internal protocol engines and platform

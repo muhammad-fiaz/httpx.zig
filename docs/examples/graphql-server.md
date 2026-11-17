@@ -11,10 +11,11 @@ Renders typed GraphQL queries through the full type system (`Type`, `Enum`,
 //! Demonstrates:
 //! - The full type system: objects, enums, input objects, arguments, lists
 //! - Typed resolvers with a shared `httpx.graphql.Context`
-//! - One `httpx.Server.init(allocator, io, …)` owning listener, router,
+//! - One `httpx.Server.init(allocator, io, …)` owning the listener, router,
 //!   and GraphQL mount
 //! - REST routes through `server.get(...)`
 //! - GraphQL mounted with `server.graphql(.{ ... })`, torn down by `deinit`
+//! - Every documentation UI from the single `.docs` config, all served offline
 //! - String queries with typed client decoding via `httpx.graphql.Payload(T)`
 
 const std = @import("std");
@@ -114,8 +115,8 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    // The server owns its listener and router; documentation is an optional
-    // router mount with a separate lifetime.
+    // The server owns the listener and router; documentation assets are
+    // mounted explicitly below so applications that omit them stay small.
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
@@ -127,8 +128,7 @@ pub fn main() !void {
     // Raw route on the same server.
     try server.get("/", helloHandler);
 
-    // Typed REST route (auto-documented, quoted JSON keys). The server's own
-    // typed/raw dispatch reuses its allocator and io.
+    // REST endpoint next to GraphQL. Quoted JSON keys are exact field names.
     try server.get("/api/status", .{
         .handler = statusHandler,
         .summary = "Typed status report",
@@ -137,6 +137,7 @@ pub fn main() !void {
 
     // GraphQL schema and endpoint in one literal. Every declared type
     // reaches introspection, so GraphiQL / ReDoc / Scalar render them.
+    // The mount is owned by the server and removed by `server.deinit()`.
     try server.graphql(.{
         .query = QueryRoot,
         .types = &.{UserType},
@@ -145,8 +146,8 @@ pub fn main() !void {
         .introspection = true,
         .endpoint = graphqlEndpoint,
     });
-
-    try httpx.docs.mount(&server, .{
+    var docs = httpx.docs.init(allocator, io, &server.router);
+    try docs.mount(.{
         .title = "HTTPX GraphQL & REST API",
         .version = httpx.version,
         .description = "Full-featured native HTTP server with OpenAPI documentation.",
@@ -163,7 +164,7 @@ pub fn main() !void {
             .editorTheme = "vs-dark",
         },
     });
-    defer httpx.docs.unmount(&server);
+    defer docs.deinit();
 
     const port = server.localPort();
     std.debug.print("GraphQL server listening on http://127.0.0.1:{d}\n", .{port});

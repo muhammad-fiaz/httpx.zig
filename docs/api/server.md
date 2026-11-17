@@ -99,6 +99,7 @@ defer env_server.deinit();
 | `liveReload.enabled` | `bool` | `false` | Enable the SSE live-reload endpoint and script injection. |
 | `liveReload.path` | `[]const u8` | `"/__httpx_liveReload"` | Mount path for the live-reload endpoint. |
 | `templates` | `?templates.Config` | `null` | Template engine config (auto-discovers `templates/` when null). |
+| `site` | `?site.SiteConfig` | `null` | File-based website config; exactly one of `filesystem` or `embedded` must be set. |
 | `tls` | `?tls.Server.Config` | `null` | TLS/HTTPS config (certificate + private key). |
 
 All server settings are passed inline as the final `.{}` argument to `httpx.Server.init`. Omitted fields use the built-in defaults; `.{}` is the safe default.
@@ -108,12 +109,13 @@ Documentation UIs are an explicit optional feature and are not mounted by
 application routes and release their state before `server.deinit()`:
 
 ```zig
-try httpx.docs.mount(&server, .{
+var docs = httpx.docs.init(allocator, io, &server.router);
+try docs.mount(.{
     .title = "Inventory API",
     .openapi = .{ .enabled = true, .route = "/openapi.json" },
     .swagger = .{ .enabled = true, .route = "/docs" },
 });
-defer httpx.docs.unmount(&server);
+defer docs.deinit();
 ```
 
 See [Documentation UI](/api/ui) for the available interfaces and options.

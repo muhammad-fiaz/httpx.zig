@@ -5,6 +5,10 @@ Demonstrates serving an interactive browser WebSocket client and handling WebSoc
 ## Example
 
 ```zig
+//! WebSocket Server and Browser Client Example.
+//! Demonstrates serving an interactive browser WebSocket client and handling WebSocket requests.
+//! Run with: `zig build run-websocket-server`
+
 const std = @import("std");
 const httpx = @import("httpx");
 
@@ -48,8 +52,35 @@ pub fn main() !void {
     std.debug.print("WebSocket server verification completed successfully.\n", .{});
 }
 
+fn indexHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
+    return ctx.html(
+        \\<!DOCTYPE html>
+        \\<html lang="en">
+        \\<head>
+        \\  <meta charset="UTF-8">
+        \\  <title>httpx.zig WebSocket Demo</title>
+        \\  <style>
+        \\    body { font-family: 'Segoe UI', sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; }
+        \\    .box { max-width: 600px; margin: 0 auto; background: #1e293b; padding: 2rem; border-radius: 12px; border: 1px solid #334155; }
+        \\    h1 { color: #38bdf8; margin-top: 0; }
+        \\    .status { padding: 0.5rem 1rem; border-radius: 6px; background: #0369a1; color: white; display: inline-block; margin-bottom: 1rem; }
+        \\    pre { background: #020617; padding: 1rem; border-radius: 6px; color: #a5f3fc; }
+        \\  </style>
+        \\</head>
+        \\<body>
+        \\  <div class="box">
+        \\    <h1>httpx.zig WebSocket Endpoint</h1>
+        \\    <div class="status">WebSocket Ready (RFC 6455)</div>
+        \\    <p>This endpoint supports RFC 6455 upgrade handshakes, frame encoding, and framing.</p>
+        \\    <pre>Endpoint URL: ws://127.0.0.1:8080/ws</pre>
+        \\  </div>
+        \\</body>
+        \\</html>
+    );
+}
+
 fn wsHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    // If request contains Sec-WebSocket-Key, compute Sec-WebSocket-Accept.
+    // If request contains Sec-WebSocket-Key, compute Sec-WebSocket-Accept
     if (ctx.header("sec-websocket-key")) |key| {
         var acceptBuf: [28]u8 = undefined;
         httpx.websocket.computeAccept(key, &acceptBuf);

@@ -19,12 +19,13 @@ pub fn main() !void {
     });
     defer server.deinit();
     try server.get("/api/items", itemsHandler);
-    try httpx.docs.mount(&server, .{
+    var docs = httpx.docs.init(allocator, io, &server.router);
+    try docs.mount(.{
         .title = "Inventory API",
         .version = "1.0.0",
         .description = "Automated OpenAPI generation with HTTPX",
     });
-    defer httpx.docs.unmount(&server);
+    defer docs.deinit();
 
     server.run();
 }

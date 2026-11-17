@@ -19,12 +19,13 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
     defer server.deinit();
     try server.get("/users", usersHandler);
-    try httpx.docs.mount(&server, .{
+    var docs = httpx.docs.init(allocator, io, &server.router);
+    try docs.mount(.{
         .title = "Users API",
         .version = "1.0.0",
         .description = "Production API built with HTTPX",
     });
-    defer httpx.docs.unmount(&server);
+    defer docs.deinit();
 
     server.run();
 }

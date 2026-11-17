@@ -3,10 +3,18 @@
 Local TCP listener/client round trip over loopback with `httpx.tcp`.
 
 ```zig
+//! Local TCP listener/client round trip over loopback with `httpx.socket.tcp`.
+//!
+//! Run with:
+//!   zig build run-tcp-local
+
 const std = @import("std");
 const httpx = @import("httpx");
 
 pub fn main() !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
     var addr = httpx.Address.loopback4(0);
