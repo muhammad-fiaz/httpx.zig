@@ -62,6 +62,22 @@ pub fn build(b: *std.Build) void {
     // duplicate-module error; resolved with empty dependency options).
     const tintDep = loadersDep.builder.dependency("tint", .{});
 
+    // zigantic also depends on tint with its own target/optimize options. Build
+    // the zigantic root module here instead of taking `ziganticDep.module`, so
+    // it imports the SAME tint module instance as loaders and httpx. Two
+    // instances of the same tint source file produce Zig's duplicate-module
+    // error (`tint` vs `tint0`).
+    const ziganticDep = b.dependency("zigantic", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const ziganticModule = b.createModule(.{
+        .root_source_file = ziganticDep.path("src/zigantic.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ziganticModule.addImport("tint", tintDep.module("tint"));
+
     // Create the public module that will be exported as "httpx" to consumers.
     // Dependencies must be added here so they propagate to downstream packages.
     const httpxModule = b.addModule("httpx", .{
@@ -75,8 +91,22 @@ pub fn build(b: *std.Build) void {
     httpxModule.addImport("treesitter", treesitterDep.module("treesitter"));
     httpxModule.addImport("tint", tintDep.module("tint"));
     httpxModule.addImport("regex", regexDep.module("regex"));
+    httpxModule.addImport("zigantic", ziganticModule);
 
-    const examples = [_]struct { name: []const u8, path: []const u8 }{
+    const examples = [_]struct { name: []const u8, path: []const u8, run: bool = true }{
+        // Size targets are compile-only measurement programs. In particular,
+        // protocol client samples intentionally use unreachable destinations.
+        .{ .name = "size-minimal", .path = "bench/size/minimal.zig", .run = false },
+        .{ .name = "size-client", .path = "bench/size/client.zig", .run = false },
+        .{ .name = "size-server", .path = "bench/size/server.zig", .run = false },
+        .{ .name = "size-server-docs", .path = "bench/size/server_docs.zig", .run = false },
+        .{ .name = "size-server-http11", .path = "bench/size/server_http11.zig", .run = false },
+        .{ .name = "size-http11", .path = "bench/size/http11.zig", .run = false },
+        .{ .name = "size-http2", .path = "bench/size/http2.zig", .run = false },
+        .{ .name = "size-http3", .path = "bench/size/http3.zig", .run = false },
+        .{ .name = "size-compression", .path = "bench/size/compression.zig", .run = false },
+        .{ .name = "size-parsing", .path = "bench/size/parsing.zig", .run = false },
+        .{ .name = "size-web", .path = "bench/size/web.zig", .run = false },
         .{ .name = "simple-get", .path = "examples/simpleGet.zig" },
         .{ .name = "post-json", .path = "examples/postJson.zig" },
         .{ .name = "custom-headers", .path = "examples/customHeaders.zig" },
@@ -170,7 +200,6 @@ pub fn build(b: *std.Build) void {
 
     const buildAllExamples = b.step("build-all-examples", "Build all example executables");
     const runAllExamples = b.step("run-all-examples", "Run all examples sequentially");
-
     inline for (examples) |example| {
         const exe = b.addExecutable(.{
             .name = example.name,
@@ -189,14 +218,15 @@ pub fn build(b: *std.Build) void {
         const exampleStep = b.step("example-" ++ example.name, "Build " ++ example.name ++ " example");
         exampleStep.dependOn(&installExe.step);
 
-        const runExe = b.addRunArtifact(exe);
-        runExe.has_side_effects = true;
-        runExe.step.dependOn(&installExe.step);
+        if (example.run) {
+            const runExe = b.addRunArtifact(exe);
+            runExe.has_side_effects = true;
+            runExe.step.dependOn(&installExe.step);
+            const runStep = b.step("run-" ++ example.name, "Run " ++ example.name ++ " example");
+            runStep.dependOn(&runExe.step);
 
-        const runStep = b.step("run-" ++ example.name, "Run " ++ example.name ++ " example");
-        runStep.dependOn(&runExe.step);
-
-        runAllExamples.dependOn(&runExe.step);
+            runAllExamples.dependOn(&runExe.step);
+        }
     }
 
     const test_filter = b.option([]const u8, "test-filter", "Only run tests whose name contains this substring");
@@ -216,6 +246,7 @@ pub fn build(b: *std.Build) void {
     tests.root_module.addImport("treesitter", treesitterDep.module("treesitter"));
     tests.root_module.addImport("tint", tintDep.module("tint"));
     tests.root_module.addImport("regex", regexDep.module("regex"));
+    tests.root_module.addImport("zigantic", ziganticModule);
     linkPlatformLibs(tests, target);
 
     const runTests = b.addRunArtifact(tests);
@@ -263,6 +294,7 @@ pub fn build(b: *std.Build) void {
     librootModule.addImport("treesitter", treesitterDep.module("treesitter"));
     librootModule.addImport("tint", tintDep.module("tint"));
     librootModule.addImport("regex", regexDep.module("regex"));
+    librootModule.addImport("zigantic", ziganticModule);
 
     const lib = b.addLibrary(.{
         .name = "httpx",

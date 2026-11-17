@@ -35,6 +35,7 @@ pub const BenchMetric = struct {
     rounds: usize,
     iterations: usize,
     minNs: f64,
+    medianNs: f64,
     avgNs: f64,
     maxNs: f64,
     opsPerSec: u64,
@@ -91,11 +92,13 @@ fn runBench(
         func();
     }
 
+    std.debug.assert(cfg.rounds <= 16 and cfg.rounds % 2 == 1);
+    var roundNs: [16]u64 = undefined;
     var minNs: u64 = std.math.maxInt(u64);
     var maxNs: u64 = 0;
     var totalNs: u128 = 0;
 
-    for (0..cfg.rounds) |_| {
+    for (0..cfg.rounds) |round| {
         const start = nowNanos();
         for (0..cfg.iterations) |_| {
             func();
@@ -103,13 +106,26 @@ fn runBench(
         const end = nowNanos();
 
         const elapsedNs = @as(u64, @intCast(end - start));
+        roundNs[round] = elapsedNs;
         minNs = @min(minNs, elapsedNs);
         maxNs = @max(maxNs, elapsedNs);
         totalNs += elapsedNs;
     }
 
+    // The suite uses an odd count of rounds (3 or 5), making the middle
+    // round a stable median without allocating in the harness.
+    for (1..cfg.rounds) |i| {
+        const value = roundNs[i];
+        var j = i;
+        while (j > 0 and roundNs[j - 1] > value) : (j -= 1) {
+            roundNs[j] = roundNs[j - 1];
+        }
+        roundNs[j] = value;
+    }
+
     const avgNs = @as(u64, @intCast(totalNs / cfg.rounds));
     const minNsPerOp = @as(f64, @floatFromInt(minNs)) / @as(f64, @floatFromInt(cfg.iterations));
+    const medianNsPerOp = @as(f64, @floatFromInt(roundNs[cfg.rounds / 2])) / @as(f64, @floatFromInt(cfg.iterations));
     const avgNsPerOp = @as(f64, @floatFromInt(avgNs)) / @as(f64, @floatFromInt(cfg.iterations));
     const maxNsPerOp = @as(f64, @floatFromInt(maxNs)) / @as(f64, @floatFromInt(cfg.iterations));
 
@@ -120,11 +136,12 @@ fn runBench(
 
     const failures = benchFailures - failuresBefore;
 
-    std.debug.print("  {s: <24} rounds={d} iters={d: >7} min={d: >8.2}ns avg={d: >8.2}ns max={d: >8.2}ns throughput={d: >10} {s}", .{
+    std.debug.print("  {s: <24} rounds={d} iters={d: >7} min={d: >8.2}ns median={d: >8.2}ns avg={d: >8.2}ns max={d: >8.2}ns throughput={d: >10} {s}", .{
         name,
         cfg.rounds,
         cfg.iterations,
         minNsPerOp,
+        medianNsPerOp,
         avgNsPerOp,
         maxNsPerOp,
         throughput,
@@ -141,12 +158,15 @@ fn runBench(
         .rounds = cfg.rounds,
         .iterations = cfg.iterations,
         .minNs = minNsPerOp,
+        .medianNs = medianNsPerOp,
         .avgNs = avgNsPerOp,
         .maxNs = maxNsPerOp,
         .opsPerSec = throughput,
         .unit = unit,
         .failures = failures,
-    }) catch {};
+    }) catch {
+        noteFailure();
+    };
 }
 
 // Global benchmark states
@@ -167,17 +187,28 @@ fn benchHeadersParse() void {
     var headers = httpx.headers.Headers.init(benchAllocator);
     defer headers.deinit();
 
-    headers.append("Content-Type", "application/json") catch {};
-    headers.append("Authorization", "Bearer token-xyz-123456789") catch {};
-    headers.append("Accept", "application/json, text/plain, */*") catch {};
-    headers.append("User-Agent", "httpx.zig-benchmark/" ++ httpx.version) catch {};
+    headers.append("Content-Type", "application/json") catch {
+        noteFailure();
+    };
+    headers.append("Authorization", "Bearer token-xyz-123456789") catch {
+        noteFailure();
+    };
+    headers.append("Accept", "application/json, text/plain, */*") catch {
+        noteFailure();
+    };
+    headers.append("User-Agent", "httpx.zig-benchmark/" ++ httpx.version) catch {
+        noteFailure();
+    };
 
     std.mem.doNotOptimizeAway(headers.get("Content-Type").?.len);
     std.mem.doNotOptimizeAway(headers.get("Authorization").?.len);
 }
 
 fn benchUriParse() void {
-    const u = httpx.uri.parse("https://httpbun.com:8080/users/123?page=1&limit=10#section") catch return;
+    const u = httpx.uri.parse("https://httpbun.com:8080/users/123?page=1&limit=10#section") catch {
+        noteFailure();
+        return;
+    };
     std.mem.doNotOptimizeAway(u.host.len + u.path.len);
 }
 
@@ -192,38 +223,53 @@ fn benchMethodLookup() void {
     for (names) |n| std.mem.doNotOptimizeAway(@backingInt(httpx.Method.fromString(n) orelse .GET));
 }
 
-const rawReqHead = "GET /api/v1/users?page=1 HTTP/1.1\r\nHost: httpbun.com\r\nUser-Agent: " ++ httpx.versionInfo.userAgent ++ "\r\nAccept: application/json\r\n\r\n";
+const rawReqHead = "GET /api/v1/users?page=1 HTTP/1.1\r\nHost: httpbun.com\r\nUser-Agent: httpx/" ++ httpx.versionInfo.defaultInfo.version ++ "\r\nAccept: application/json\r\n\r\n";
 
 fn benchHttp1RequestHead() void {
-    const head = httpx.protocols.http1.parser.parseRequestHead(rawReqHead, .{}) catch return;
+    const head = httpx.protocols.http1.parser.parseRequestHead(rawReqHead, .{}) catch {
+        noteFailure();
+        return;
+    };
     std.mem.doNotOptimizeAway(head.method.len + head.path.len);
 }
 
-const rawHdrBlock = "Host: httpbun.com\r\nUser-Agent: " ++ httpx.versionInfo.userAgent ++ "\r\nAccept: application/json\r\nAuthorization: Bearer secret-tok\r\nContent-Type: application/json\r\n\r\n";
+const rawHdrBlock = "Host: httpbun.com\r\nUser-Agent: httpx/" ++ httpx.versionInfo.defaultInfo.version ++ "\r\nAccept: application/json\r\nAuthorization: Bearer secret-tok\r\nContent-Type: application/json\r\n\r\n";
 
 fn benchHttp1HeaderBlock() void {
     var fields: [16]httpx.protocols.http1.parser.Field = undefined;
-    const n = httpx.protocols.http1.parser.parseHeaderBlock(rawHdrBlock, 0, &fields, .{}) catch return;
+    const n = httpx.protocols.http1.parser.parseHeaderBlock(rawHdrBlock, 0, &fields, .{}) catch {
+        noteFailure();
+        return;
+    };
     std.mem.doNotOptimizeAway(n);
 }
 
 const sampleAuthority = "api.subdomain.service.internal:8443";
 fn benchAuthorityParse() void {
-    const authority = httpx.parse.parseAuthority(sampleAuthority) orelse return;
+    const authority = httpx.parse.parseAuthority(sampleAuthority) orelse {
+        noteFailure();
+        return;
+    };
     std.mem.doNotOptimizeAway(authority.host.len + (authority.port orelse 0));
 }
 
 const sampleEncoded = "Hello%20World%21%20This%20is%20a%20test%20query%3Dvalue%26foo%3Dbar";
 fn benchPercentDecode() void {
     var out: [128]u8 = undefined;
-    const res = httpx.parse.percentDecode(&out, sampleEncoded) catch return;
+    const res = httpx.parse.percentDecode(&out, sampleEncoded) catch {
+        noteFailure();
+        return;
+    };
     std.mem.doNotOptimizeAway(res.len);
 }
 
 const sampleRaw = "Hello World! This is a test query=value&foo=bar";
 fn benchPercentEncode() void {
     var out: [128]u8 = undefined;
-    const res = httpx.parse.percentEncode(&out, sampleRaw) catch return;
+    const res = httpx.parse.percentEncode(&out, sampleRaw) catch {
+        noteFailure();
+        return;
+    };
     std.mem.doNotOptimizeAway(res.len);
 }
 
@@ -305,7 +351,10 @@ fn benchRouterMiss() void {
 }
 
 fn benchRouterReverse() void {
-    const u = benchRouter.url("bench_user_post", .{ .userId = 7, .postId = 9 }) catch return;
+    const u = benchRouter.url("bench_user_post", .{ .userId = 7, .postId = 9 }) catch {
+        noteFailure();
+        return;
+    };
     defer benchAllocator.free(u);
     std.mem.doNotOptimizeAway(u.len);
 }
@@ -331,13 +380,19 @@ const sampleUserVal = UserProfile{
 const sampleJsonBytes = "{\"id\":1001,\"username\":\"alice_dev\",\"email\":\"alice@example.com\",\"active\":true,\"score\":99.4}";
 
 fn benchJsonStringify() void {
-    const str = std.json.Stringify.valueAlloc(benchAllocator, sampleUserVal, .{}) catch return;
+    const str = std.json.Stringify.valueAlloc(benchAllocator, sampleUserVal, .{}) catch {
+        noteFailure();
+        return;
+    };
     defer benchAllocator.free(str);
     std.mem.doNotOptimizeAway(str.len);
 }
 
 fn benchJsonParse() void {
-    const parsed = std.json.parseFromSlice(UserProfile, benchAllocator, sampleJsonBytes, .{}) catch return;
+    const parsed = std.json.parseFromSlice(UserProfile, benchAllocator, sampleJsonBytes, .{}) catch {
+        noteFailure();
+        return;
+    };
     defer parsed.deinit();
     std.mem.doNotOptimizeAway(parsed.value.id);
 }
@@ -352,7 +407,10 @@ fn benchBasicAuthEncode() void {
 
 fn benchBasicAuthDecode() void {
     var decodeBuf: [256]u8 = undefined;
-    const parsed = authBench.basic.parse("Basic YmVuY2htYXJrX3VzZXI6cGFzc3dvcmQxMjMh", &decodeBuf) catch return;
+    const parsed = authBench.basic.parse("Basic YmVuY2htYXJrX3VzZXI6cGFzc3dvcmQxMjMh", &decodeBuf) catch {
+        noteFailure();
+        return;
+    };
     std.mem.doNotOptimizeAway(parsed.username.len + parsed.password.len);
 }
 
@@ -364,25 +422,37 @@ fn benchBearerTokenParse() void {
 // Group 5: Compression & Codecs
 
 fn benchGzipCompress() void {
-    const compressed = codec.compress(benchAllocator, .gzip, sampleCompressRaw) catch return;
+    const compressed = codec.compress(benchAllocator, .gzip, sampleCompressRaw) catch {
+        noteFailure();
+        return;
+    };
     defer benchAllocator.free(compressed);
     std.mem.doNotOptimizeAway(compressed.len);
 }
 
 fn benchGzipDecompress() void {
-    const decompressed = codec.decompress(benchAllocator, .gzip, sampleGzipPayload) catch return;
+    const decompressed = codec.decompress(benchAllocator, .gzip, sampleGzipPayload) catch {
+        noteFailure();
+        return;
+    };
     defer benchAllocator.free(decompressed);
     std.mem.doNotOptimizeAway(decompressed.len);
 }
 
 fn benchDeflateCompress() void {
-    const compressed = codec.compress(benchAllocator, .deflate, sampleCompressRaw) catch return;
+    const compressed = codec.compress(benchAllocator, .deflate, sampleCompressRaw) catch {
+        noteFailure();
+        return;
+    };
     defer benchAllocator.free(compressed);
     std.mem.doNotOptimizeAway(compressed.len);
 }
 
 fn benchDeflateDecompress() void {
-    const decompressed = codec.decompress(benchAllocator, .deflate, sampleDeflatePayload) catch return;
+    const decompressed = codec.decompress(benchAllocator, .deflate, sampleDeflatePayload) catch {
+        noteFailure();
+        return;
+    };
     defer benchAllocator.free(decompressed);
     std.mem.doNotOptimizeAway(decompressed.len);
 }
@@ -417,13 +487,19 @@ fn buildLargeHtmlDoc(allocator: std.mem.Allocator, cards: usize) ![]u8 {
 }
 
 fn benchHtmlParse() void {
-    var doc = httpx.parsing.init(benchAllocator, std.Io.Threaded.global_single_threaded.io(), .{}).parseHtml(sampleHtmlDoc) catch return;
+    var doc = httpx.parsing.init(benchAllocator, std.Io.Threaded.global_single_threaded.io(), .{}).parseHtml(sampleHtmlDoc) catch {
+        noteFailure();
+        return;
+    };
     defer doc.deinit();
     std.mem.doNotOptimizeAway(doc.source.len);
 }
 
 fn benchHtmlParseLarge() void {
-    var doc = httpx.parsing.init(benchAllocator, std.Io.Threaded.global_single_threaded.io(), .{}).parseHtml(sampleHtmlLargeDoc) catch return;
+    var doc = httpx.parsing.init(benchAllocator, std.Io.Threaded.global_single_threaded.io(), .{}).parseHtml(sampleHtmlLargeDoc) catch {
+        noteFailure();
+        return;
+    };
     defer doc.deinit();
     std.mem.doNotOptimizeAway(doc.source.len);
 }
@@ -432,29 +508,47 @@ const sampleTemplateSrc = "<h1>{{ title }}</h1>{% for item in items %}<p>{{ item
 
 fn benchTemplateParse() void {
     var parser = httpx.templates.parser.Parser.init(benchAllocator, "bench.html", sampleTemplateSrc);
-    var ast = parser.parse() catch return;
+    var ast = parser.parse() catch {
+        noteFailure();
+        return;
+    };
     defer ast.deinit();
 }
 
 var benchTemplateAst: ?httpx.templates.parser.TemplateAst = null;
 
 fn benchTemplateRender() void {
-    const ast = benchTemplateAst orelse return;
+    const ast = benchTemplateAst orelse {
+        noteFailure();
+        return;
+    };
     var ctx = httpx.templates.Context.init(benchAllocator, .{
         .title = "Bench",
         .items = [_][]const u8{ "a", "b", "c" },
-    }) catch return;
+    }) catch {
+        noteFailure();
+        return;
+    };
     defer ctx.deinit();
     const renderer = httpx.templates.renderer.Renderer{};
-    const out = renderer.renderToString(benchAllocator, &ast, &ctx, null) catch return;
+    const out = renderer.renderToString(benchAllocator, &ast, &ctx, null) catch {
+        noteFailure();
+        return;
+    };
     defer benchAllocator.free(out);
     std.mem.doNotOptimizeAway(out.len);
 }
 
 fn benchTemplateIncremental() void {
-    var doc = httpx.parsing.init(benchAllocator, std.Io.Threaded.global_single_threaded.io(), .{}).parseHtml(sampleHtmlDoc) catch return;
+    var doc = httpx.parsing.init(benchAllocator, std.Io.Threaded.global_single_threaded.io(), .{}).parseHtml(sampleHtmlDoc) catch {
+        noteFailure();
+        return;
+    };
     defer doc.deinit();
-    const changed = doc.incrementalUpdate(sampleHtmlDoc) catch return;
+    const changed = doc.incrementalUpdate(sampleHtmlDoc) catch {
+        noteFailure();
+        return;
+    };
     std.mem.doNotOptimizeAway(changed);
 }
 
@@ -472,15 +566,21 @@ const sampleJsonFeed =
 ;
 
 fn benchJsonFeedParse() void {
-    var feed = httpx.parsing.init(benchAllocator, std.Io.Threaded.global_single_threaded.io(), .{}).parseFeed(sampleJsonFeed, "application/feed+json") catch return;
-    defer feed.deinit();
+    var feed = httpx.parsing.init(benchAllocator, std.Io.Threaded.global_single_threaded.io(), .{}).parseFeed(sampleJsonFeed, "application/feed+json") catch {
+        noteFailure();
+        return;
+    };
+    defer httpx.parsing.feed.deinitFeed(&feed, benchAllocator);
     std.mem.doNotOptimizeAway(feed.entries.len);
 }
 
 const sampleReloadPage = "<!DOCTYPE html><html><head><link rel=\"stylesheet\" href=\"/a.css\"></head><body><h1>x</h1></body></html>";
 
 fn benchLiveReloadInject() void {
-    const out = httpx.static.reload.inject(benchAllocator, sampleReloadPage, "/__httpx_liveReload") catch return;
+    const out = httpx.static.reload.inject(benchAllocator, sampleReloadPage, "/__httpx_liveReload") catch {
+        noteFailure();
+        return;
+    };
     std.mem.doNotOptimizeAway(out.len);
     benchAllocator.free(out);
 }
@@ -488,15 +588,27 @@ fn benchLiveReloadInject() void {
 var benchWatcher: ?*httpx.static.Watcher = null;
 
 fn benchWatcherScan() void {
-    const w = benchWatcher orelse return;
-    _ = w.scan() catch false;
+    const w = benchWatcher orelse {
+        noteFailure();
+        return;
+    };
+    _ = w.scan() catch {
+        noteFailure();
+        false;
+    };
 }
 
 var benchDepGraph: ?*httpx.static.dependency.DependencyGraph = null;
 
 fn benchWatcherDeps() void {
-    const g = benchDepGraph orelse return;
-    const affected = g.affectedSet(benchAllocator, "base.html") catch return;
+    const g = benchDepGraph orelse {
+        noteFailure();
+        return;
+    };
+    const affected = g.affectedSet(benchAllocator, "base.html") catch {
+        noteFailure();
+        return;
+    };
     defer {
         for (affected) |s| benchAllocator.free(s);
         benchAllocator.free(affected);
@@ -506,7 +618,10 @@ fn benchWatcherDeps() void {
 
 const sampleStaticUrl = "/assets/stylesheets/main.theme.min.css";
 fn benchStaticSafeJoin() void {
-    const joined = httpx.static.safeJoin(benchAllocator, sampleStaticUrl, "/var/www/html/dist") catch return;
+    const joined = httpx.static.safeJoin(benchAllocator, sampleStaticUrl, "/var/www/html/dist") catch {
+        noteFailure();
+        return;
+    };
     if (joined) |j| {
         benchAllocator.free(j);
         std.mem.doNotOptimizeAway(j.len);
@@ -525,12 +640,21 @@ fn benchWorkerPoolSubmit() void {
     const Noop = struct {
         fn run(_: ?*anyopaque, _: *std.atomic.Value(bool)) anyerror!void {}
     };
-    benchPool.submit(Noop.run, null, null) catch return;
+    benchPool.submit(Noop.run, null, null) catch {
+        noteFailure();
+        return;
+    };
 }
 
 fn benchConcurrencyQueue() void {
-    benchQueue.push(42) catch return;
-    _ = benchQueue.pop() catch return;
+    benchQueue.push(42) catch {
+        noteFailure();
+        return;
+    };
+    _ = benchQueue.pop() catch {
+        noteFailure();
+        return;
+    };
 }
 
 // Group 8: DNS Subsystem
@@ -547,7 +671,10 @@ fn dummyDnsLookup(
 }
 
 fn benchDnsCacheHit() void {
-    const addrs = benchDnsCache.resolve("httpbun.com") catch return;
+    const addrs = benchDnsCache.resolve("httpbun.com") catch {
+        noteFailure();
+        return;
+    };
     defer {
         for (addrs) |a| benchAllocator.free(a);
         benchAllocator.free(addrs);
@@ -577,7 +704,10 @@ fn benchHpackIntEncode() void {
     var buf: [16]u8 = undefined;
     const values = [_]u64{ 10, 1337, 65536, 1000000 };
     for (values) |v| {
-        const n = httpx.protocols.common.integer.encode(&buf, 5, 0x20, v) catch return;
+        const n = httpx.protocols.common.integer.encode(&buf, 5, 0x20, v) catch {
+            noteFailure();
+            return;
+        };
         std.mem.doNotOptimizeAway(&buf);
         std.mem.doNotOptimizeAway(n);
     }
@@ -591,7 +721,10 @@ fn benchHpackIntDecode() void {
     };
     for (encodeds) |encoded| {
         var offset: usize = 0;
-        const v = httpx.protocols.common.integer.decode(encoded, &offset, 5) catch return;
+        const v = httpx.protocols.common.integer.decode(encoded, &offset, 5) catch {
+            noteFailure();
+            return;
+        };
         std.mem.doNotOptimizeAway(v);
         std.mem.doNotOptimizeAway(offset);
     }
@@ -601,7 +734,10 @@ fn benchQpackIntEncode() void {
     var buf: [16]u8 = undefined;
     const values = [_]u64{ 10, 1337, 65536, 1000000 };
     for (values) |v| {
-        const n = httpx.protocols.http3.qpack.encodeInt(&buf, 6, v) catch return;
+        const n = httpx.protocols.http3.qpack.encodeInt(&buf, 6, v) catch {
+            noteFailure();
+            return;
+        };
         std.mem.doNotOptimizeAway(&buf);
         std.mem.doNotOptimizeAway(n);
     }
@@ -615,7 +751,10 @@ fn benchQpackIntDecode() void {
     };
     for (encodeds) |encoded| {
         var offset: usize = 0;
-        const v = httpx.protocols.http3.qpack.decodeInt(encoded, &offset, 6) catch return;
+        const v = httpx.protocols.http3.qpack.decodeInt(encoded, &offset, 6) catch {
+            noteFailure();
+            return;
+        };
         std.mem.doNotOptimizeAway(v);
         std.mem.doNotOptimizeAway(offset);
     }
@@ -623,11 +762,17 @@ fn benchQpackIntDecode() void {
 
 fn benchH3FrameHeader() void {
     var buf: [16]u8 = undefined;
-    const n = httpx.protocols.http3.frame.encodeFrameHeader(&buf, 0x01, 1024) catch return;
+    const n = httpx.protocols.http3.frame.encodeFrameHeader(&buf, 0x01, 1024) catch {
+        noteFailure();
+        return;
+    };
     std.mem.doNotOptimizeAway(&buf);
     std.mem.doNotOptimizeAway(n);
     var offset: usize = 0;
-    const hdr = httpx.protocols.http3.frame.parseFrameHeader(buf[0..n], &offset) catch return;
+    const hdr = httpx.protocols.http3.frame.parseFrameHeader(buf[0..n], &offset) catch {
+        noteFailure();
+        return;
+    };
     std.mem.doNotOptimizeAway(hdr.frameType);
     std.mem.doNotOptimizeAway(hdr.length);
 }
@@ -638,7 +783,10 @@ fn benchH3VarIntEncode() void {
     // constant and makes the 1/2/4/8-byte branches all get exercised.
     const values = [_]u64{ 25, 15293, 494878333, 1512888099419124471 };
     for (values) |v| {
-        const n = httpx.protocols.quic.varint.encode(&buf, v) catch 0;
+        const n = httpx.protocols.quic.varint.encode(&buf, v) catch {
+            noteFailure();
+            continue;
+        };
         std.mem.doNotOptimizeAway(&buf);
         std.mem.doNotOptimizeAway(n);
     }
@@ -653,7 +801,10 @@ fn benchH3VarIntDecode() void {
     };
     for (encodeds) |encoded| {
         var offset: usize = 0;
-        const v = httpx.protocols.quic.varint.decode(encoded, &offset) catch return;
+        const v = httpx.protocols.quic.varint.decode(encoded, &offset) catch {
+            noteFailure();
+            return;
+        };
         std.mem.doNotOptimizeAway(v);
         std.mem.doNotOptimizeAway(offset);
     }
@@ -686,12 +837,18 @@ fn benchTlsRecordSeal() void {
         &sampleTlsKey,
         &sampleTlsIv,
         .chacha20Poly1305,
-    ) catch return;
+    ) catch {
+        noteFailure();
+        return;
+    };
     std.mem.doNotOptimizeAway(rec.len);
 }
 
 fn benchCertParse() void {
-    var chain = httpx.protocols.tls.certificate.parseCertificateChainPem(benchAllocator, sampleCertPem) catch return;
+    var chain = httpx.protocols.tls.certificate.parseCertificateChainPem(benchAllocator, sampleCertPem) catch {
+        noteFailure();
+        return;
+    };
     defer chain.deinit();
     std.mem.doNotOptimizeAway(chain.count());
 }
@@ -751,7 +908,9 @@ fn h2BenchServe() void {
             continue;
         };
         defer conn.close();
-        httpx.protocols.http2.transport.serveConnection(benchAllocator, &conn, h2BenchHandler, null) catch {};
+        httpx.protocols.http2.transport.serveConnection(benchAllocator, &conn, h2BenchHandler, null) catch {
+            noteFailure();
+        };
     }
 }
 
@@ -787,7 +946,10 @@ const H3BenchServer = struct {
         const acc: *Acc = @ptrCast(@alignCast(c.?));
         if (acc.sid == std.math.maxInt(u64) and sid % 4 == 0) acc.sid = sid;
         if (sid != acc.sid) return;
-        acc.buf.appendSlice(benchAllocator, data) catch return;
+        acc.buf.appendSlice(benchAllocator, data) catch {
+            noteFailure();
+            return;
+        };
         if (fin) acc.fin = true;
     }
 
@@ -1052,7 +1214,9 @@ pub fn main() !void {
     while (gi < 64) : (gi += 1) {
         var nb: [32]u8 = undefined;
         const dep = try std.fmt.bufPrint(&nb, "page-{d}.html", .{gi});
-        benchG.addEdge(dep, "base.html") catch {};
+        benchG.addEdge(dep, "base.html") catch {
+            noteFailure();
+        };
     }
     benchDepGraph = &benchG;
 
@@ -1077,9 +1241,8 @@ pub fn main() !void {
     // 6. Initialize Local Loopback Server & Client
     var srv = try httpx.Server.init(benchAllocator, io, .{
         .port = 0,
-        .enableDocs = false,
         .keepAlive = true,
-        .maxConnections = 100000,
+        .limits = .{ .maxConnections = 100000 },
     });
     try srv.router.get("/ping", loopbackPingHandler, .{});
     loopbackServer = &srv;
