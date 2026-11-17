@@ -96,17 +96,6 @@ pub fn build(b: *std.Build) void {
     const examples = [_]struct { name: []const u8, path: []const u8, run: bool = true }{
         // Size targets are compile-only measurement programs. In particular,
         // protocol client samples intentionally use unreachable destinations.
-        .{ .name = "size-minimal", .path = "bench/size/minimal.zig", .run = false },
-        .{ .name = "size-client", .path = "bench/size/client.zig", .run = false },
-        .{ .name = "size-server", .path = "bench/size/server.zig", .run = false },
-        .{ .name = "size-server-docs", .path = "bench/size/server_docs.zig", .run = false },
-        .{ .name = "size-server-http11", .path = "bench/size/server_http11.zig", .run = false },
-        .{ .name = "size-http11", .path = "bench/size/http11.zig", .run = false },
-        .{ .name = "size-http2", .path = "bench/size/http2.zig", .run = false },
-        .{ .name = "size-http3", .path = "bench/size/http3.zig", .run = false },
-        .{ .name = "size-compression", .path = "bench/size/compression.zig", .run = false },
-        .{ .name = "size-parsing", .path = "bench/size/parsing.zig", .run = false },
-        .{ .name = "size-web", .path = "bench/size/web.zig", .run = false },
         .{ .name = "simple-get", .path = "examples/simpleGet.zig" },
         .{ .name = "post-json", .path = "examples/postJson.zig" },
         .{ .name = "custom-headers", .path = "examples/customHeaders.zig" },
