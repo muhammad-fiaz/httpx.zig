@@ -113,6 +113,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "resolve", .path = "examples/resolve.zig" },
         .{ .name = "openapi", .path = "examples/openapi.zig" },
         .{ .name = "rest-api", .path = "examples/restApi.zig" },
+        .{ .name = "testing-server", .path = "examples/testingServer.zig" },
         .{ .name = "http10-client", .path = "examples/http10Client.zig" },
         .{ .name = "http11-client", .path = "examples/http11Client.zig" },
         .{ .name = "http11-server", .path = "examples/http11Server.zig" },

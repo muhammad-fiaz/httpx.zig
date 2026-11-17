@@ -35,6 +35,7 @@ zig build run-http3-client -Dtarget=aarch64-macos
 - [SOCKS5h Proxy](/examples/socks5-proxy): Route requests through a SOCKS5h proxy with remote DNS resolution.
 - [Simplified API Aliases](/examples/simplified-api-aliases): Use short top-level helper APIs with local loopback success mode by default.
 - [Simple Server](/examples/simple-server): Start a minimal HTTP server.
+- [Testing Server](/examples/testing-server): Exercise the real client against a local production server with routes, dynamic handlers, multiple instances, and request capture.
 - [Thread Pool / Async Server](/examples/async-server-example): Start a concurrent HTTP server with thread pool connection dispatching.
 - [Router Example](/examples/router-example): Route params and grouped endpoints.
 - [Middleware Example](/examples/middleware-example): Chain middleware with shared behavior.

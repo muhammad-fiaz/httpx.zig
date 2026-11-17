@@ -248,30 +248,60 @@ const Http3OptionsSchema = z.objectOf(.{
 }, .{});
 pub const Http3Options = Http3OptionsSchema.Value;
 
-const ConfigSchema = z.objectOf(.{
-    .host = z.withDefault(z.string(.{ .min = 1 }), "0.0.0.0"),
-    .port = z.withDefault(z.integer(u16, .{}), 8080),
-    .portStrategy = z.withDefault(z.enumType(PortStrategy, .{}), .incremental),
-    .maxPortAttempts = z.withDefault(z.positiveInt(u16, .{}), 50),
-    .maxBody = z.withDefault(z.positiveInt(usize, .{}), 8 * 1024 * 1024),
-    .limits = z.withDefault(ConnectionLimitsSchema, .{}),
-    .timeouts = z.withDefault(TimeoutsSchema, .{}),
-    .logging = z.withDefault(LoggingOptionsSchema, .{}),
-    .keepAlive = z.withDefault(z.boolean(.{}), false),
-    .maxRequestsPerConn = z.withDefault(z.positiveInt(usize, .{}), 1000),
-    .allowLfLineEndings = z.withDefault(z.boolean(.{}), false),
-    .trustForwardedHeaders = z.withDefault(z.boolean(.{}), false),
-    .trustedProxies = z.withDefault(z.array(z.string(.{ .min = 1 }), .{}), &.{}),
-    .protocols = z.withDefault(ProtocolsSchema, .{}),
-    .http3Options = z.withDefault(Http3OptionsSchema, .{}),
-    .liveReload = z.withDefault(LiveReloadSchema, .{}),
-    .templates = z.optional(templatesMod.ConfigSchema),
-    .site = z.optional(siteMod.SiteConfigSchema),
-    .tls = z.optional(tlsServerMod.Server.ConfigSchema),
-    .compression = z.withDefault(compression.ConfigSchema, .{}),
-    .maxCompressionInput = z.withDefault(z.nonNegativeInt(usize, .{}), 128 * 1024),
-}, .{});
+/// Bind defaults that differ between production and local testing. Everything
+/// else in the configuration schema is shared, so both surfaces accept the
+/// same field names, types, validation, and feature dependencies.
+pub const ConfigDefaults = struct {
+    host: []const u8,
+    port: u16,
+};
+
+fn makeConfigSchema(comptime defaults: ConfigDefaults) type {
+    return z.objectOf(.{
+        .host = z.withDefault(z.string(.{ .min = 1 }), defaults.host),
+        .port = z.withDefault(z.integer(u16, .{}), defaults.port),
+        .portStrategy = z.withDefault(z.enumType(PortStrategy, .{}), .incremental),
+        .maxPortAttempts = z.withDefault(z.positiveInt(u16, .{}), 50),
+        .maxBody = z.withDefault(z.positiveInt(usize, .{}), 8 * 1024 * 1024),
+        .limits = z.withDefault(ConnectionLimitsSchema, .{}),
+        .timeouts = z.withDefault(TimeoutsSchema, .{}),
+        .logging = z.withDefault(LoggingOptionsSchema, .{}),
+        .keepAlive = z.withDefault(z.boolean(.{}), false),
+        .maxRequestsPerConn = z.withDefault(z.positiveInt(usize, .{}), 1000),
+        .allowLfLineEndings = z.withDefault(z.boolean(.{}), false),
+        .trustForwardedHeaders = z.withDefault(z.boolean(.{}), false),
+        .trustedProxies = z.withDefault(z.array(z.string(.{ .min = 1 }), .{}), &.{}),
+        .protocols = z.withDefault(ProtocolsSchema, .{}),
+        .http3Options = z.withDefault(Http3OptionsSchema, .{}),
+        .liveReload = z.withDefault(LiveReloadSchema, .{}),
+        .templates = z.optional(templatesMod.ConfigSchema),
+        .site = z.optional(siteMod.SiteConfigSchema),
+        .tls = z.optional(tlsServerMod.Server.ConfigSchema),
+        .compression = z.withDefault(compression.ConfigSchema, .{}),
+        .maxCompressionInput = z.withDefault(z.nonNegativeInt(usize, .{}), 128 * 1024),
+    }, .{});
+}
+
+const ConfigSchema = makeConfigSchema(.{ .host = "0.0.0.0", .port = 8080 });
 pub const Config = ConfigSchema.Value;
+
+/// Same schema with loopback binding and an OS-assigned port, used by
+/// `httpx.testing.Server`. Testing defaults never widen exposure; the
+/// production schema remains the only definition of the fields.
+const TestingConfigSchema = makeConfigSchema(.{ .host = "127.0.0.1", .port = 0 });
+pub const TestingConfig = TestingConfigSchema.Value;
+
+/// Copies a testing configuration into the production configuration value.
+/// Both schemas share every field name and type; only host/port defaults
+/// differ, so this is a lossless structural conversion.
+pub fn fromTestingConfig(cfg: TestingConfig) Config {
+    var out: Config = undefined;
+    const info = @typeInfo(Config).@"struct";
+    inline for (info.field_names) |name| {
+        @field(out, name) = @field(cfg, name);
+    }
+    return out;
+}
 
 /// Global pointer to the active server for the Ctrl+C handler.
 var gActiveServer: ?*Server = null;
@@ -468,6 +498,11 @@ const H3PumpCtx = struct {
         p.queue(r);
     }
 };
+/// Transport-level request observer. Called once per successfully parsed
+/// request, before routing, on the connection's worker thread. The context
+/// and its slices are borrowed for the duration of the call.
+pub const RequestObserver = *const fn (userData: ?*anyopaque, ctx: *const Context) void;
+
 pub const Server = struct {
     /// HTTP/3 endpoint information, namespaced so protocol-specific
     /// helpers do not accumulate as flat methods on `Server`.
@@ -492,6 +527,11 @@ pub const Server = struct {
     listener: tcp.Listener,
     router: Router,
     cfg: Config,
+    /// Optional transport-level request observer, invoked for every parsed
+    /// request before routing. Used by `httpx.testing.Server` to capture
+    /// requests without installing middleware or changing dispatch order.
+    requestObserver: ?RequestObserver = null,
+    requestObserverUserData: ?*anyopaque = null,
     stopFlag: std.atomic.Value(bool) = .init(false),
     /// Resolved event callback — null means silent (no events generated).
     eventCallback: ?logging.ServerEventCallback = null,
@@ -959,6 +999,22 @@ pub const Server = struct {
     /// Sets a custom error page / response handler for a specific HTTP status code (e.g. 403, 404, 500, 502, 503).
     pub fn setStatusHandler(self: *Server, statusCode: u16, handler: *const fn (*Context) anyerror!Response) !void {
         try self.router.setStatusHandler(statusCode, handler);
+    }
+
+    /// Installs the transport-level request observer. Passing null disables
+    /// observation. The observer must be cheap and must not retain borrowed
+    /// context slices after it returns.
+    pub fn setRequestObserver(
+        self: *Server,
+        observer: ?RequestObserver,
+        userData: ?*anyopaque,
+    ) void {
+        self.requestObserver = observer;
+        self.requestObserverUserData = userData;
+    }
+
+    fn notifyRequest(self: *Server, ctx: *const Context) void {
+        if (self.requestObserver) |observer| observer(self.requestObserverUserData, ctx);
     }
 
     pub fn deinit(self: *Server) void {
@@ -1591,6 +1647,7 @@ pub const Server = struct {
 
                 // Full pipeline: match + router/route middleware + 404/405 +
                 // auto-OPTIONS, exactly like HTTP/1.
+                serverPtr.notifyRequest(&ctx);
                 const res = serverPtr.router.dispatch(&ctx);
                 // The response is copied into the request arena and the
                 // transport consumes it before this callback can run again.
@@ -1935,10 +1992,10 @@ pub const Server = struct {
             .trustedProxies = self.cfg.trustedProxies,
         };
 
-        var res = if (knownMethod != null)
-            self.router.dispatch(&ctx)
-        else
-            Response{ .status = 501, .body = "method not supported" };
+        var res = if (knownMethod != null) blk: {
+            self.notifyRequest(&ctx);
+            break :blk self.router.dispatch(&ctx);
+        } else Response{ .status = 501, .body = "method not supported" };
 
         // The same content coding the HTTP/1 and HTTP/2 paths apply, so one
         // handler behaves identically across protocol versions.
@@ -2278,6 +2335,7 @@ pub const Server = struct {
             .trustForwarded = self.trustForwardedFor(conn.peerAddress()),
             .trustedProxies = self.cfg.trustedProxies,
         };
+        self.notifyRequest(&ctx);
         const res: Response = self.router.dispatch(&ctx);
 
         conn.setWriteTimeoutMs(self.cfg.timeouts.write);

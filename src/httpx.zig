@@ -351,6 +351,7 @@ pub const rest = @import("web/rest/api.zig");
 pub const JsonSchema = rest.JsonSchema;
 pub const openapi = @import("web/openApi/spec.zig");
 pub const docs = @import("web/docs/docs.zig");
+pub const testing = @import("testing/testing.zig");
 pub const graphql = @import("web/graphql/graphql.zig");
 // Middleware
 pub const middleware = struct {
@@ -623,18 +624,18 @@ test {
 }
 
 test "installed packages stay internal and are not part of the public facade" {
-    const testing = std.testing;
-    try testing.expect(!@hasDecl(@This(), "brotli"));
-    try testing.expect(!@hasDecl(@This(), "zstd"));
-    try testing.expect(!@hasDecl(@This(), "regex"));
-    try testing.expect(!@hasDecl(@This(), "tint"));
-    try testing.expect(!@hasDecl(@This(), "loaders"));
-    try testing.expect(!@hasDecl(@This(), "zigantic"));
+    const std_testing = std.testing;
+    try std_testing.expect(!@hasDecl(@This(), "brotli"));
+    try std_testing.expect(!@hasDecl(@This(), "zstd"));
+    try std_testing.expect(!@hasDecl(@This(), "regex"));
+    try std_testing.expect(!@hasDecl(@This(), "tint"));
+    try std_testing.expect(!@hasDecl(@This(), "loaders"));
+    try std_testing.expect(!@hasDecl(@This(), "zigantic"));
 }
 
 test "Full template engine integration: variables, loops, conditionals, and raw HTML" {
-    const testing = std.testing;
-    const alloc = testing.allocator;
+    const std_testing = std.testing;
+    const alloc = std_testing.allocator;
 
     var engine = try templates.Engine.init(alloc, undefined, .{
         .enableCache = true,
@@ -672,55 +673,55 @@ test "Full template engine integration: variables, loops, conditionals, and raw 
     }, &lw);
 
     const out = list.items;
-    try testing.expect(std.mem.indexOf(u8, out, "<h1>HTTPX Web Framework</h1>") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "Welcome, Muhammad (Architect)") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "<li>#1: Engine</li>") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "<li>#2: Watcher</li>") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "<li>#3: LiveReload</li>") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "<small>&copy; 2026 HTTPX</small>") != null);
+    try std_testing.expect(std.mem.indexOf(u8, out, "<h1>HTTPX Web Framework</h1>") != null);
+    try std_testing.expect(std.mem.indexOf(u8, out, "Welcome, Muhammad (Architect)") != null);
+    try std_testing.expect(std.mem.indexOf(u8, out, "<li>#1: Engine</li>") != null);
+    try std_testing.expect(std.mem.indexOf(u8, out, "<li>#2: Watcher</li>") != null);
+    try std_testing.expect(std.mem.indexOf(u8, out, "<li>#3: LiveReload</li>") != null);
+    try std_testing.expect(std.mem.indexOf(u8, out, "<small>&copy; 2026 HTTPX</small>") != null);
 }
 
 test "public facade exposes non-redundant canonical namespaces and types" {
-    const testing = std.testing;
-    const a = testing.allocator;
+    const std_testing = std.testing;
+    const a = std_testing.allocator;
 
     // Root types
-    try testing.expect(@sizeOf(Client) > 0);
-    try testing.expect(@sizeOf(Server) > 0);
-    try testing.expect(@sizeOf(Response) > 0);
-    try testing.expect(@sizeOf(Headers) > 0);
-    try testing.expect(@sizeOf(Method) > 0);
-    try testing.expect(@sizeOf(Status) > 0);
-    try testing.expect(@sizeOf(Uri) > 0);
+    try std_testing.expect(@sizeOf(Client) > 0);
+    try std_testing.expect(@sizeOf(Server) > 0);
+    try std_testing.expect(@sizeOf(Response) > 0);
+    try std_testing.expect(@sizeOf(Headers) > 0);
+    try std_testing.expect(@sizeOf(Method) > 0);
+    try std_testing.expect(@sizeOf(Status) > 0);
+    try std_testing.expect(@sizeOf(Uri) > 0);
 
     // Shallow, simplified words client APIs
-    try testing.expect(@sizeOf(client.builder) > 0);
-    try testing.expect(@sizeOf(client.pool) > 0);
-    try testing.expect(@sizeOf(client.jar) > 0);
-    try testing.expect(@sizeOf(client.cookie) > 0);
-    try testing.expect(@sizeOf(client.download.Result) > 0);
-    try testing.expect(@sizeOf(client.download.Task) > 0);
-    try testing.expect(@sizeOf(client.download.Progress) > 0);
-    try testing.expect(@sizeOf(client.stream) > 0);
-    try testing.expect(@hasDecl(client.download, "parseChecksumFile"));
-    try testing.expect(@hasDecl(client.ftp, "init"));
-    try testing.expect(!@hasDecl(client.ftp, "Client"));
-    try testing.expect(!@hasDecl(client.ftp, "ftpDownload"));
-    try testing.expect(!@hasDecl(client, "Downloader"));
+    try std_testing.expect(@sizeOf(client.builder) > 0);
+    try std_testing.expect(@sizeOf(client.pool) > 0);
+    try std_testing.expect(@sizeOf(client.jar) > 0);
+    try std_testing.expect(@sizeOf(client.cookie) > 0);
+    try std_testing.expect(@sizeOf(client.download.Result) > 0);
+    try std_testing.expect(@sizeOf(client.download.Task) > 0);
+    try std_testing.expect(@sizeOf(client.download.Progress) > 0);
+    try std_testing.expect(@sizeOf(client.stream) > 0);
+    try std_testing.expect(@hasDecl(client.download, "parseChecksumFile"));
+    try std_testing.expect(@hasDecl(client.ftp, "init"));
+    try std_testing.expect(!@hasDecl(client.ftp, "Client"));
+    try std_testing.expect(!@hasDecl(client.ftp, "ftpDownload"));
+    try std_testing.expect(!@hasDecl(client, "Downloader"));
 
     // Root namespaces
-    try testing.expect(@sizeOf(http1.parser.Options) > 0);
-    try testing.expect(@sizeOf(http2.connection.Session) > 0);
-    try testing.expect(@sizeOf(http3.connection.Connection) > 0);
-    try testing.expect(@sizeOf(quic.connection.Connection) > 0);
-    try testing.expect(@sizeOf(tls.Client) > 0);
-    try testing.expect(@sizeOf(Router) > 0);
-    try testing.expect(@sizeOf(net.address.Address) > 0);
+    try std_testing.expect(@sizeOf(http1.parser.Options) > 0);
+    try std_testing.expect(@sizeOf(http2.connection.Session) > 0);
+    try std_testing.expect(@sizeOf(http3.connection.Connection) > 0);
+    try std_testing.expect(@sizeOf(quic.connection.Connection) > 0);
+    try std_testing.expect(@sizeOf(tls.Client) > 0);
+    try std_testing.expect(@sizeOf(Router) > 0);
+    try std_testing.expect(@sizeOf(net.address.Address) > 0);
 
     // Test defaultable options with .{}
     var hdrs = Headers.init(a);
     defer hdrs.deinit();
-    try testing.expectEqual(@as(usize, 0), hdrs.entries.items.len);
+    try std_testing.expectEqual(@as(usize, 0), hdrs.entries.items.len);
 
     // Cookie jar operations via canonical client.jar
     const io = std.Io.Threaded.global_single_threaded.io();
@@ -729,6 +730,6 @@ test "public facade exposes non-redundant canonical namespaces and types" {
     jar.setFromHeader("session=token123; Path=/; HttpOnly", "example.com");
     var cbuf: [128]u8 = undefined;
     const cookieHdr = jar.cookieHeader("example.com", "/dashboard", false, &cbuf);
-    try testing.expect(cookieHdr != null);
-    try testing.expectEqualStrings("session=token123", cookieHdr.?);
+    try std_testing.expect(cookieHdr != null);
+    try std_testing.expectEqualStrings("session=token123", cookieHdr.?);
 }

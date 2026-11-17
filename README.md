@@ -395,6 +395,43 @@ pub fn main() !void {
 
 ---
 
+## Testing Your Client
+
+`httpx.testing.Server` runs the real production server on a local loopback
+socket, so your tests exercise the actual `httpx.Client` transport, URL
+parsing, serialization, and response parsing without an external process.
+
+```zig
+var server = try httpx.testing.Server.init(allocator, io, .{});
+defer server.deinit();
+
+try server.route("/get", httpx.testing.json("{\"ok\":true}"));
+try server.route("/echo", .{ .method = .POST, .handler = httpx.testing.echo });
+try server.start();
+
+var client = httpx.Client.init(allocator, io, .{});
+defer client.deinit();
+
+const url = try server.url("/get");
+defer allocator.free(url);
+
+var response = try client.get(url, .{});
+defer response.deinit();
+try std.testing.expectEqual(@as(u16, 200), response.status);
+
+// Bounded capture: method, path, query, headers, and body.
+const captured = try server.requests(allocator);
+defer httpx.testing.freeCaptured(allocator, captured);
+try std.testing.expectEqual(@as(usize, 1), server.routeRequestCount("/get"));
+```
+
+The testing configuration uses the production schema with `127.0.0.1` and
+ephemeral port `0` defaults. Multiple servers run independently, `start()` is
+deterministic, `stop()` is repeatable, and every applicable production server
+method is available.
+
+---
+
 ## Performance
 
 Run the benchmarks with:
