@@ -48,6 +48,18 @@ const netResolve = @import("../net/resolve.zig");
 const addressMod = @import("../net/address.zig");
 const compression = @import("../compression/codec.zig");
 const dnsCacheNs = @import("../net/dns/dnsCache.zig");
+const z = @import("zigantic");
+
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
+
 pub const HttpVersion = @import("../common/httpVersion.zig").HttpVersion;
 const versionInfo = @import("../common/version.zig");
 const proxyMod = @import("../net/proxy.zig");
@@ -55,9 +67,9 @@ const socks5 = @import("../net/socks5.zig");
 const socks4 = @import("../net/socks4.zig");
 const quicConn = @import("../protocols/quic/connection.zig");
 const quicEp = @import("../protocols/quic/transport.zig");
-const quicHs = @import("../protocols/quic/handshake.zig");
 const h3Transport = @import("../protocols/http3/transport.zig");
 const bodySourceMod = @import("../common/bodySource.zig");
+const headersMod = @import("../common/headers.zig");
 pub const BodySource = bodySourceMod.BodySource;
 pub const SliceReader = bodySourceMod.SliceReader;
 pub const CallbackReader = bodySourceMod.CallbackReader;
@@ -102,34 +114,26 @@ pub fn parseAddrString(s: []const u8, port: u16) ?addressMod.Address {
 /// TLS verification policy for one request.
 /// Secure by construction: HTTPS defaults to system trust verification and
 /// rejects TLS truncation unless the caller explicitly opts in.
-pub const TlsOptions = struct {
-    verify: tlsTransport.VerifyMode = .caBundle,
-    /// CA bundle required when verify == .caBundle.
-    caBundle: ?*std.crypto.Certificate.Bundle = null,
-    /// PEM bundle of extra/custom CAs for the native TLS paths
-    /// (HTTP/2 over TLS). Null means system trust only.
-    caPem: ?[]const u8 = null,
-    /// Client certificate chain (PEM) presented when the server requests
-    /// mutual TLS. Requires `clientKeyPem`; only the native TLS paths
-    /// can present it.
-    clientCertPem: ?[]const u8 = null,
-    /// Client private key (PEM, P-256 ECDSA) for `clientCertPem`.
-    clientKeyPem: ?[]const u8 = null,
-    /// Only safe when the caller validates completeness via framing.
-    allowTruncation: bool = false,
-};
+pub const TlsOptionsSchema = z.objectOf(.{
+    .verify = z.withDefault(z.enumType(tlsTransport.VerifyMode, .{}), .caBundle),
+    .caBundle = z.optional(typedSchema(*std.crypto.Certificate.Bundle)),
+    .caPem = z.optional(z.string(.{ .min = 1 })),
+    .clientCertPem = z.optional(z.string(.{ .min = 1 })),
+    .clientKeyPem = z.optional(z.string(.{ .min = 1 })),
+    .allowTruncation = z.withDefault(z.boolean(.{}), false),
+}, .{});
+pub const TlsOptions = TlsOptionsSchema.Value;
 
 /// Early data (0-RTT) options for TLS 1.3 / QUIC / HTTP/3.
-pub const EarlyDataOptions = struct {
-    /// Explicit opt-in required. Default is false (safe by default).
-    enabled: bool = false,
-    /// Whether to allow replay-sensitive methods (POST, PUT, DELETE, PATCH).
-    /// Default is false (only GET, HEAD, OPTIONS are eligible).
-    allowUnsafeMethods: bool = false,
-};
+pub const EarlyDataOptionsSchema = z.objectOf(.{
+    .enabled = z.withDefault(z.boolean(.{}), false),
+    .allowUnsafeMethods = z.withDefault(z.boolean(.{}), false),
+}, .{});
+pub const EarlyDataOptions = EarlyDataOptionsSchema.Value;
 
 /// A single HTTP header name/value pair.
-pub const Header = struct { name: []const u8, value: []const u8 };
+pub const HeaderSchema = headersMod.HeaderSchema;
+pub const Header = headersMod.Header;
 
 /// How a `Request` body is interpreted.
 pub const BodyKind = enum {
@@ -359,24 +363,41 @@ pub const ResponseStream = struct {
     }
 
     /// Bounded helper to consume remainder of stream into newly allocated slice.
-    pub fn readAllAlloc(self: *ResponseStream, a: Allocator, maxBytes: usize) ![]u8 {
+    pub fn readAllAlloc(self: *ResponseStream, maxBytes: usize) ![]u8 {
         var list = std.ArrayList(u8).empty;
-        errdefer list.deinit(a);
+        errdefer list.deinit(self.allocator);
         var chunkBuf: [16 * 1024]u8 = undefined;
         while (true) {
             const n = try self.body.read(&chunkBuf);
             if (n == 0) break;
             if (n > maxBytes -| list.items.len) return Error.ResponseTooLarge;
-            try list.appendSlice(a, chunkBuf[0..n]);
+            try list.appendSlice(self.allocator, chunkBuf[0..n]);
         }
-        return list.toOwnedSlice(a);
+        return list.toOwnedSlice(self.allocator);
     }
 
     /// Retrieve trailers if available after body EOF.
-    pub fn trailers(self: *ResponseStream, a: Allocator) anyerror!?[]const Header {
-        return self.body.getTrailers(a);
+    /// The returned headers are allocated by this stream's allocator.
+    pub fn trailers(self: *ResponseStream) anyerror!?[]const Header {
+        return self.body.getTrailers(self.allocator);
     }
 };
+
+test "response stream reuses its owning allocator for bounded reads" {
+    const allocator = std.testing.allocator;
+    var sourceReader = SliceReader.init("stream body");
+    var stream = ResponseStream{
+        .allocator = allocator,
+        .status = 200,
+        .headers = &.{},
+        .body = sourceReader.source(),
+    };
+    defer stream.deinit();
+
+    const body = try stream.readAllAlloc(32);
+    defer allocator.free(body);
+    try std.testing.expectEqualStrings("stream body", body);
+}
 
 /// Helper: convert struct fields to Header array (for headers/query).
 pub fn headersFromStruct(allocator: Allocator, value: anytype) ![]Header {
@@ -433,10 +454,6 @@ pub const Error = error{
     /// Explicit h2 requested but the server did not select it via ALPN,
     /// or no ALPN agreement was reached. Never silently downgraded.
     AlpnNegotiationFailed,
-    /// Retained for API stability; no longer returned now that the live
-    /// QUIC transport backs `.http3` (out-of-scope conditions use the
-    /// precise errors above instead).
-    Http3NotImplemented,
     /// HTTP/3 over a proxy: CONNECT-UDP tunneling is not implemented.
     Http3ProxyUnsupported,
     /// HTTP/3 operation exceeded its deadline (handshake or exchange).
@@ -446,6 +463,8 @@ pub const Error = error{
     /// HTTP/2 framing/HPACK violation from the peer.
     ProtocolViolation,
     InvalidRequestBody,
+    /// The client configuration failed schema validation.
+    InvalidConfig,
     /// A `.json` payload could not be encoded by its schema.
     InvalidJsonBody,
     /// GraphQL variables were not valid JSON.
@@ -541,7 +560,7 @@ fn headerLinesWithAuth(a: Allocator, hdrs: []const Header, contentType: ?[]const
         try lines.append(a, l);
     }
     if (!hasUserAgent) {
-        const l = try std.fmt.allocPrint(a, "User-Agent: {s}", .{versionInfo.userAgent});
+        const l = try std.fmt.allocPrint(a, "User-Agent: httpx/{s}", .{versionInfo.defaultInfo.version});
         try lines.append(a, l);
     }
     if (contentType) |ct| if (!hasContentType) {
@@ -821,20 +840,6 @@ fn h3DoRequest(
     }
 
     return resp;
-}
-
-/// Maps QUIC handshake failures onto the request error set, preserving
-/// the driver's precise cause (ALPN vs certificate vs generic).
-fn mapQuicHandshakeError(err: anyerror, detail: quicHs.Detail) Error {
-    return switch (err) {
-        error.OutOfMemory => Error.OutOfMemory,
-        error.HandshakeTimeout => Error.Timeout,
-        else => switch (detail) {
-            .alpnMismatch => Error.AlpnNegotiationFailed,
-            .certFailed => Error.TlsCertificateNotVerified,
-            else => Error.TlsHandshakeFailed,
-        },
-    };
 }
 
 /// One HTTP/2 request/response exchange over an established H2 session
@@ -1209,7 +1214,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
             }
         }
 
-        var port = u.effectivePort();
+        var port = uriMod.effectivePort(&u);
         if (port == 0) return Error.InvalidUrl;
         // DNS names are limited to 253 octets (255 including a trailing dot)
         // and the pool/host scratch buffers below are sized for that bound.
@@ -1218,7 +1223,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
 
         // Worst case: 255-byte host + "[]" + ":" + five port digits.
         var authBuf: [320]u8 = undefined;
-        const authorityStr = u.authority(&authBuf) catch return Error.InvalidUrl;
+        const authorityStr = uriMod.authority(&u, &authBuf) catch return Error.InvalidUrl;
 
         const target = try buildTarget(a, u.path, u.query, req.query);
         defer a.free(target);
@@ -1965,7 +1970,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                 .remainingCl = if (framing.framing == .contentLength) framing.length else 0,
                 .maxBodySize = streamResponseLimit,
                 .leftover = .empty,
-                .chunkDecoder = parserMod.ChunkedDecoder.initWithOptions(.{ .allowLfLineEndings = req.allowLfLineEndings }),
+                .chunkDecoder = parserMod.ChunkedDecoder.init(.{ .allowLfLineEndings = req.allowLfLineEndings }),
                 .wire = .empty,
                 .decodedBuf = .empty,
             };
@@ -2314,7 +2319,7 @@ test "client compression advertisement respects explicit override" {
         a.free(defaults);
     }
     const userAgentPrefix = "User-Agent: ";
-    try std.testing.expectEqualStrings(versionInfo.userAgent, defaults[0][userAgentPrefix.len..]);
+    try std.testing.expectEqualStrings("httpx/" ++ versionInfo.defaultInfo.version, defaults[0][userAgentPrefix.len..]);
     const aePrefix = "Accept-Encoding: ";
     try std.testing.expectEqualStrings(aePrefix, defaults[1][0..aePrefix.len]);
     try std.testing.expectEqualStrings(compression.acceptEncodingValue(), defaults[1][aePrefix.len..]);
@@ -2326,7 +2331,7 @@ test "client compression advertisement respects explicit override" {
     }
     try std.testing.expectEqual(@as(usize, 2), custom.len);
     try std.testing.expectEqualStrings("Accept-Encoding: identity", custom[0]);
-    try std.testing.expectEqualStrings(versionInfo.userAgent, custom[1][userAgentPrefix.len..]);
+    try std.testing.expectEqualStrings("httpx/" ++ versionInfo.defaultInfo.version, custom[1][userAgentPrefix.len..]);
 }
 
 /// `reusable` is true ONLY when the body was framed and fully consumed —
@@ -2513,7 +2518,7 @@ fn readChunkedResponseBody(
 
     var decoded: std.ArrayList(u8) = .empty;
     errdefer decoded.deinit(a);
-    var decoder = parserMod.ChunkedDecoder.initWithOptions(.{ .allowLfLineEndings = allowLfLineEndings });
+    var decoder = parserMod.ChunkedDecoder.init(.{ .allowLfLineEndings = allowLfLineEndings });
 
     while (true) {
         _ = decoder.decode(wire.items) catch |err| switch (err) {
@@ -2554,7 +2559,7 @@ fn readChunkedResponseBody(
 fn decodeChunked(a: Allocator, wireIn: []const u8) ![]u8 {
     const wire = try a.dupe(u8, wireIn);
     defer a.free(wire);
-    var decoder = parserMod.ChunkedDecoder.init();
+    var decoder = parserMod.ChunkedDecoder.init(.{});
     _ = try decoder.decode(wire);
     if (!decoder.isDone()) return error.Incomplete;
     return a.dupe(u8, wire[0..decoder.decodedLen]);
@@ -2711,7 +2716,7 @@ fn isRedirect(status: u16) bool {
 fn sameOrigin(base: *const uriMod.Uri, target: *const uriMod.Uri) bool {
     return std.ascii.eqlIgnoreCase(base.scheme, target.scheme) and
         std.ascii.eqlIgnoreCase(base.host, target.host) and
-        base.effectivePort() == target.effectivePort();
+        uriMod.effectivePort(base) == uriMod.effectivePort(target);
 }
 
 fn isSecureDowngrade(fromScheme: []const u8, toScheme: []const u8) bool {
@@ -2801,7 +2806,7 @@ fn resolveLocation(a: Allocator, baseUrl: []const u8, loc: []const u8) ![]u8 {
     try out.appendSlice(a, base.scheme);
     try out.appendSlice(a, "://");
     var ab: [512]u8 = undefined;
-    const baseAuthority = try base.authority(&ab);
+    const baseAuthority = try uriMod.authority(&base, &ab);
     try out.appendSlice(a, baseAuthority);
     try out.appendSlice(a, resolvedPath);
     if (query) |q| {
@@ -2914,8 +2919,7 @@ fn startTestServer(
     errdefer ctx.deinit();
     var srv = try lifecycle.Server.init(a, ctx.io, .{
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 1,
+        .limits = .{ .maxConnections = 1 },
         .keepAlive = keepAlive,
     });
     errdefer srv.deinit();
@@ -2932,19 +2936,18 @@ test "HTTP/3 client reaches the built-in server and decodes dynamic QPACK" {
     const lifecycle = @import("../server/httpServer.zig");
     const routerNs = @import("../web/router/router.zig");
 
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
     var srv = lifecycle.Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .http3 = true,
+        .protocols = .{ .http3 = true },
         .tls = .{
             .certificatePem = lifecycle.h3TestCertPem,
             .privateKeyPem = lifecycle.h3TestKeyPem,
         },
-        .enableDocs = false,
-    }) catch return;
+    }) catch |err| return err;
     defer srv.deinit();
 
     try srv.router.add(.GET, "/h3", struct {
@@ -2958,7 +2961,7 @@ test "HTTP/3 client reaches the built-in server and decodes dynamic QPACK" {
         }
     }.h, .{});
 
-    const th = std.Thread.spawn(.{}, lifecycle.Server.run, .{&srv}) catch return;
+    const th = std.Thread.spawn(.{}, lifecycle.Server.run, .{&srv}) catch |err| return err;
     var joined = false;
     defer {
         srv.requestShutdown();
@@ -3002,7 +3005,7 @@ test "keep-alive: second request reuses pooled connection" {
     defer srv.deinit();
     defer S.ctx.deinit();
 
-    const th = std.Thread.spawn(.{}, @import("../server/httpServer.zig").Server.run, .{srv}) catch return;
+    const th = std.Thread.spawn(.{}, @import("../server/httpServer.zig").Server.run, .{srv}) catch |err| return err;
 
     // Client with pool; two requests over hostname.
     // Manual lifecycle: client must be FULLY torn down (releasing pooled
@@ -3220,7 +3223,7 @@ test "connection close response is not pooled" {
     var ctx = try tTcp.IoContext.init(a);
     defer ctx.deinit();
     // keepAlive=false server => always responds Connection: close
-    var srv = try lifecycle.Server.init(a, ctx.io, .{ .port = 0, .enableDocs = false, .maxConnections = 2 });
+    var srv = try lifecycle.Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConnections = 2 } });
     defer srv.deinit();
     try srv.router.add(.GET, "/x", struct {
         fn h(_: *routerNs.Context) anyerror!routerNs.Response {
@@ -3233,7 +3236,7 @@ test "connection close response is not pooled" {
             s.run();
         }
     };
-    const th = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    const th = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch |err| return err;
 
     var client = @import("httpClient.zig").Client.init(a, ctx.io, .{});
     defer client.deinit();
@@ -3278,7 +3281,7 @@ test "connection-close body without Content-Length is read to EOF" {
             sock.writeAll("HTTP/1.1 200 OK\r\n\r\nclose-delimited-body") catch {};
         }
     };
-    const th = std.Thread.spawn(.{}, RawServer.run, .{ &lst, ctx.io }) catch return;
+    const th = std.Thread.spawn(.{}, RawServer.run, .{ &lst, ctx.io }) catch |err| return err;
     defer th.join();
 
     var ub: [64]u8 = undefined;
