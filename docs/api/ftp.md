@@ -37,7 +37,7 @@ pub fn main() !void {
 
 ## High-Level File Download
 
-For file downloads with automated progress bars, cryptographic hash verification, and atomic file replacement, initialize `httpx.client.ftp.Client` once and reuse it:
+For file downloads with automated progress bars, cryptographic hash verification, and atomic file replacement, initialize `httpx.client.ftp` once and reuse it:
 
 ```zig
 var ftp = try httpx.client.ftp.init(allocator, io, .{
@@ -63,17 +63,19 @@ The allocator and I/O engine are provided only to `Client.init`; every
 
 ## Types and Configuration
 
-### `httpx.protocols.ftp.Options`
+### FTP client options
+
+The client takes an inline options literal; `.{}` keeps every default except
+the required host:
 
 ```zig
-pub const Options = struct {
-    host: []const u8,
-    port: u16 = 21,
-    user: []const u8 = "anonymous",
-    password: []const u8 = "anonymous@",
-    /// Explicit FTPS (AUTH TLS). Rejects plaintext if true when TLS is unavailable.
-    secure: bool = false,
-};
+var client = try httpx.protocols.ftp.Client.init(allocator, io, .{
+    .host = "ftp.example.com",
+    .port = 21,
+    .user = "anonymous",
+    .password = "anonymous@",
+    .secure = false, // explicit FTPS (AUTH TLS)
+});
 ```
 
 | Field | Type | Default | Description |

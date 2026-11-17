@@ -44,8 +44,12 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 4,
+        .limits = .{ .maxConnections = 4 },
+        .liveReload = .{
+            .enabled = true,
+            .watch = true,
+            .watchDir = ".",
+        },
     });
     defer server.deinit();
 

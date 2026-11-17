@@ -49,14 +49,14 @@ Immutable point-in-time copy. All multi-word fields are camelCase:
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `errorRate()` | `f64` | `errorsTotal / requestsTotal` (0.0 when empty) |
-| `averageLatencySeconds()` | `f64` | Mean latency in seconds |
-| `averageLatencyMs()` | `f64` | Mean latency in milliseconds |
+| `httpx.metrics.serverErrorRate(snapshot)` | `f64` | `errorsTotal / requestsTotal` (0.0 when empty) |
+| `httpx.metrics.averageLatencySeconds(snapshot)` | `f64` | Mean latency in seconds |
+| `httpx.metrics.averageLatencyMs(snapshot)` | `f64` | Mean latency in milliseconds |
 
 ## ServerSnapshot
 
 `server.snapshot()` returns uptime, gauges, totals, and the embedded
-`metrics: MetricsSnapshot`. `errorRate()` and `requestsPerSecond()` are
+`metrics: MetricsSnapshot`. `httpx.metrics.serverErrorRate(snapshot)` and `httpx.metrics.requestsPerSecond(snapshot)` are
 computed from the snapshot (no duplicated stored state).
 
 ## Prometheus exposition

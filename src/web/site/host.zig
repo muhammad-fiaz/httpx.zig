@@ -34,30 +34,33 @@ const spa = @import("../spa/server.zig");
 const watcherMod = @import("../watcher/watcherBackend.zig");
 const reload = @import("../watcher/fileWatcher.zig");
 const Server = @import("../../server/httpServer.zig").Server;
+const z = @import("zigantic");
 
 pub const TrailingSlash = routerMod.TrailingSlash;
 
-pub const SiteConfig = struct {
-    /// Filesystem directory (development). Mutually exclusive with `embedded`.
-    filesystem: ?[]const u8 = null,
-    /// Explicit embedded-file manifest (production single-executable).
-    /// Mutually exclusive with `filesystem`.
-    embedded: ?[]const assetsMod.EmbeddedFile = null,
-    base: []const u8 = "/",
-    urls: routesMod.UrlStyle = .both,
-    trailing: TrailingSlash = .serveBoth,
-    indexBase: []const u8 = "index",
-    /// SPA fallback file (e.g. "index.html"); null disables SPA fallback.
-    spaFallback: ?[]const u8 = null,
-    /// Filesystem mode: drive the server watcher on the site root.
-    watch: bool = true,
-    /// Filesystem mode: enable live-reload script injection + SSE endpoint.
-    reload: bool = true,
-    templates: templatesMod.Config = .{},
-    /// Subtree reserved for templates: rendered through the engine and
-    /// never routed as pages (null disables the reservation).
-    templateDir: ?[]const u8 = "templates",
-};
+const SiteConfigBase = z.objectOf(.{
+    .filesystem = z.optional(z.string(.{ .min = 1 })),
+    .embedded = z.optional(z.array(assetsMod.EmbeddedFileSchema, .{})),
+    .base = z.withDefault(z.string(.{ .min = 1, .prefix = "/" }), "/"),
+    .urls = z.withDefault(z.enumType(routesMod.UrlStyle, .{}), .both),
+    .trailing = z.withDefault(z.enumType(TrailingSlash, .{}), .serveBoth),
+    .indexBase = z.withDefault(z.string(.{ .min = 1 }), "index"),
+    .spaFallback = z.optional(z.string(.{ .min = 1 })),
+    .watch = z.withDefault(z.boolean(.{}), true),
+    .reload = z.withDefault(z.boolean(.{}), true),
+    .templates = z.withDefault(templatesMod.ConfigSchema, .{}),
+    .templateDir = z.optional(z.string(.{ .min = 1 })),
+}, .{});
+
+fn hasExactlyOneSource(cfg: SiteConfigBase.Value) bool {
+    return (cfg.filesystem == null) != (cfg.embedded == null);
+}
+
+pub const SiteConfigSchema = z.refine(SiteConfigBase, .{
+    .check = hasExactlyOneSource,
+    .message = "exactly one of filesystem or embedded must be set",
+});
+pub const SiteConfig = SiteConfigSchema.Value;
 
 pub const NavEntry = struct {
     name: []const u8,
@@ -89,8 +92,10 @@ pub const Host = struct {
     /// at `mount` time with the server allocator, so the server owns and
     /// destroys it. Exactly one of `.filesystem` / `.embedded` must be set.
     pub fn init(allocator: Allocator, io: std.Io, config: SiteConfig) !Host {
-        if (config.base.len == 0 or config.base[0] != '/') return error.InvalidFilePath;
-        if ((config.filesystem == null) == (config.embedded == null)) return error.InvalidFilePath;
+        var scratch: [4096]u8 = undefined;
+        const issue = z.checkFirst(SiteConfigSchema, config, &scratch, .{}) catch
+            return error.InvalidFilePath;
+        if (issue != null) return error.InvalidFilePath;
         const embedded = config.embedded != null;
 
         var root: []u8 = undefined;
@@ -188,6 +193,10 @@ pub const Host = struct {
     /// instead of silently rendering from the wrong tree. Duplicate route
     /// shapes also fail loudly.
     pub fn mount(self: *Host, server: *Server) !void {
+        // The loader validates its directory as non-empty. Embedded
+        // templates resolve from the asset registry before filesystem
+        // lookup, so use a harmless relative prefix in that mode.
+        const templateRoot = if (self.embedded) "." else self.root;
         // Server.init already wires router.templateEngine when it creates
         // the engine itself; a Host-created engine is unwound below.
         var created: ?*templatesMod.Engine = null;
@@ -198,10 +207,10 @@ pub const Host = struct {
             server.allocator.destroy(e);
         };
         if (server.templateEngine) |existing| {
-            if (!std.mem.eql(u8, existing.config.directory, self.root)) return error.TemplateEngineAlreadyConfigured;
+            if (!std.mem.eql(u8, existing.config.directory, templateRoot)) return error.TemplateEngineAlreadyConfigured;
         } else {
             var engineCfg = self.config.templates;
-            engineCfg.directory = self.root;
+            engineCfg.directory = templateRoot;
             const engine = try server.allocator.create(templatesMod.Engine);
             errdefer server.allocator.destroy(engine);
             // Engine.init either fully succeeds or leaves nothing to deinit.
@@ -213,7 +222,7 @@ pub const Host = struct {
 
         // Sync the reload endpoint path before any handler can capture it.
         self.allocator.free(self.ssePath);
-        self.ssePath = try self.allocator.dupe(u8, server.cfg.liveReloadPath);
+        self.ssePath = try self.allocator.dupe(u8, server.cfg.liveReload.path);
 
         // Atomicity: pre-check every pattern (file routes plus the asset
         // layer's two patterns) before registering anything.
@@ -288,8 +297,8 @@ pub const Host = struct {
 
         if (!embeddedOnly) {
             if (self.config.watch) {
-                server.cfg.watch = true;
-                server.cfg.watchDir = self.rootDir();
+                server.cfg.liveReload.watch = true;
+                server.cfg.liveReload.watchDir = self.rootDir();
                 const SiteReloader = struct {
                     fn reload(sitePtr: ?*anyopaque, s: *Server) void {
                         if (sitePtr) |sp| {
@@ -301,7 +310,7 @@ pub const Host = struct {
                 server.sitePtr = self;
                 server.siteReloadFn = SiteReloader.reload;
             }
-            if (self.config.reload) server.cfg.liveReload = true;
+            if (self.config.reload) server.cfg.liveReload.enabled = true;
         }
         self.mounted = true;
     }
@@ -678,6 +687,40 @@ test "site: navigation url building with encoding" {
     defer allocator.free(css);
     try std.testing.expectEqualStrings("/navtest/assets/app.css", css);
     try std.testing.expectError(error.InvalidFilePath, site.staticUrl("../secret"));
+}
+
+test "embedded site adopts a configured template engine with a valid root" {
+    const allocator = std.testing.allocator;
+    defer assetsMod.deinitGlobalStore();
+
+    var server = try Server.init(allocator, std.Io.Threaded.global_single_threaded.io(), .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .templates = .{ .enabled = true, .directory = "." },
+        .site = .{
+            .embedded = &.{.{ .path = "index.html", .content = "<h1>embedded home</h1>" }},
+            .watch = false,
+            .reload = false,
+        },
+    });
+    defer server.deinit();
+
+    if (server.siteHost) |*host| {
+        try host.mount(&server);
+    } else {
+        return error.TestExpectedEmbeddedHost;
+    }
+
+    var ctx = Context{
+        .allocator = allocator,
+        .io = server.io,
+        .path = "/",
+        .method = .GET,
+    };
+    const response = server.router.dispatch(&ctx);
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    defer allocator.free(response.body);
+    try std.testing.expectEqualStrings("<h1>embedded home</h1>", response.body);
 }
 
 // ===========================================================================

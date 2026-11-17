@@ -14,18 +14,9 @@
 
 const std = @import("std");
 
-// External dependencies
-pub const tint = @import("tint");
-pub const loaders = @import("loaders");
-pub const brotli = @import("brotli");
-pub const zstd = @import("zstd");
-pub const env = @import("common/env.zig");
-pub const regex = @import("regex");
-
 // Common primitives
 pub const versionInfo = @import("common/version.zig");
-pub const name = versionInfo.name;
-pub const version = versionInfo.version;
+pub const version = versionInfo.defaultInfo.version;
 pub const errors = @import("common/errors.zig");
 pub const status = @import("common/status.zig");
 pub const headers = @import("common/headers.zig");
@@ -42,12 +33,13 @@ pub const common = struct {
     pub const parse = @import("common/parse.zig");
     pub const mediaType = @import("common/mediaType.zig");
     pub const bodySource = @import("common/bodySource.zig");
-    pub const env = @import("common/env.zig");
-    pub const json = @import("common/json.zig");
     pub const BodySource = bodySource.BodySource;
     pub const SliceReader = bodySource.SliceReader;
     pub const CallbackReader = bodySource.CallbackReader;
 };
+/// Environment and `.env` helpers.
+pub const env = @import("common/env.zig");
+
 pub const mediaType = common.mediaType;
 pub const BodySource = common.BodySource;
 pub const SliceReader = common.SliceReader;
@@ -169,13 +161,9 @@ pub const protocols = struct {
     pub const ftp = struct {
         const clientModule = @import("protocols/ftp/ftpClient.zig");
         pub const Client = clientModule.Client;
-        pub const Options = clientModule.Options;
-        pub const Reply = clientModule.Reply;
         pub const FtpError = clientModule.FtpError;
         const serverModule = @import("protocols/ftp/ftpServer.zig");
         pub const Server = serverModule.Server;
-        pub const Config = serverModule.Config;
-        pub const Callbacks = serverModule.Callbacks;
     };
 };
 
@@ -199,7 +187,6 @@ pub const multipart = struct {
     pub const decoder = struct {
         pub const Parser = parserMod.Decoder;
         pub const Field = parserMod.Field;
-        pub const Limits = parserMod.Limits;
         pub const ParseError = parserMod.ParseError;
         pub const init = Parser.init;
         pub const effectiveFilename = parserMod.effectiveFilename;
@@ -210,9 +197,6 @@ pub const multipart = struct {
     pub const Part = encoderMod.Part;
     pub const File = encoderMod.File;
     pub const FieldValue = encoderMod.FieldValue;
-    pub const FileOptions = encoderMod.FileOptions;
-    pub const Subtype = encoderMod.Subtype;
-    pub const Limits = parserMod.Limits;
 
     // Boundary utilities under a single clean namespace
     pub const Boundary = struct {
@@ -330,7 +314,6 @@ pub const websocket = struct {
 // Native Template Engine
 pub const templates = @import("web/templates/templates.zig");
 pub const TemplateEngine = templates.Engine;
-pub const TemplateConfig = templates.Config;
 pub const assets = @import("web/assets/assetStore.zig");
 pub const static = struct {
     pub const files = @import("web/staticFiles/static.zig");
@@ -342,7 +325,6 @@ pub const static = struct {
     pub const ReloadStrategy = watcher.ReloadStrategy;
     pub const WatchEvent = watcher.WatchEvent;
     pub const WatchEventKind = watcher.WatchEventKind;
-    pub const WatcherConfig = watcher.WatcherConfig;
     pub const BackendMode = watcher.BackendMode;
     pub const BackendKind = watcher.BackendKind;
     pub const BackendCapabilities = watcher.BackendCapabilities;
@@ -367,7 +349,7 @@ pub const fs = @import("utils/fs.zig");
 pub const json = @import("common/json.zig");
 pub const rest = @import("web/rest/api.zig");
 pub const JsonSchema = rest.JsonSchema;
-pub const openapi = @import("web/openApi/openApiSpec.zig");
+pub const openapi = @import("web/openApi/spec.zig");
 pub const docs = @import("web/docs/docs.zig");
 pub const graphql = @import("web/graphql/graphql.zig");
 // Middleware
@@ -380,7 +362,6 @@ pub const middleware = struct {
     pub const csrf = sec.csrfMiddleware;
     pub const RateLimiter = sec.RateLimiter;
     pub const rateLimit = @import("web/middleware/rateLimiter.zig");
-    pub const RateLimitPolicy = rateLimit.RateLimitPolicy;
     pub const RateLimitResult = rateLimit.RateLimitResult;
     pub const RateLimitDimension = rateLimit.RateLimitDimension;
     pub const generateCsrfToken = sec.generateCsrfToken;
@@ -416,7 +397,7 @@ pub const client = struct {
     // Cookie jar: httpx.client.jar, httpx.client.cookie
     pub const jar = cookieMod.Jar;
     pub const cookie = cookieMod.Cookie;
-    pub const sameSite = cookieMod.Cookie.SameSite;
+    pub const sameSite = cookieMod.SameSite;
 
     // HTTP download engine: httpx.client.download
     pub const download = struct {
@@ -428,9 +409,10 @@ pub const client = struct {
         pub const ProgressState = downloadMod.ProgressState;
         pub const ProgressMode = downloadMod.ProgressMode;
         pub const ChecksumAlgorithm = downloadMod.ChecksumAlgorithm;
-        pub const ExistingFilePolicy = downloadMod.ExistingFilePolicy;
         pub const parseChecksumFile = downloadMod.parseChecksumFile;
         pub const verifyFile = downloadMod.verifyFile;
+        pub const makeResult = downloadMod.makeDownloadResult;
+        pub const destinationPath = downloadMod.destinationPath;
     };
 
     // FTP client: `httpx.client.ftp.init(allocator, io, .{})`
@@ -461,7 +443,7 @@ test "client facade keeps configuration and request option types private" {
 pub const parsing = struct {
     const document = @import("parsing/document.zig");
     const extract = @import("parsing/extract.zig");
-    const feed = @import("parsing/feed.zig");
+    pub const feed = @import("parsing/feed.zig");
     const robots = @import("parsing/robots.zig");
     const sitemap = @import("parsing/sitemap.zig");
     const selector = @import("parsing/selector.zig");
@@ -484,8 +466,8 @@ pub const parsing = struct {
     pub const SitemapUrl = sitemap.SitemapUrl;
     pub const ChangeFreq = sitemap.ChangeFreq;
     pub const Selector = selector.Selector;
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, cfg_in: anytype) document.Parser {
-        return document.Parser.init(allocator, io, cfg_in);
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, cfg: document.ParserConfig) document.Parser {
+        return document.Parser.init(allocator, io, cfg);
     }
     pub const detectKind = document.detectKind;
 };
@@ -496,7 +478,6 @@ const server = @import("server/httpServer.zig");
 // Concurrency & Utilities
 const rateLimitMod = @import("web/middleware/rateLimiter.zig");
 pub const RateLimiter = rateLimitMod.RateLimiter;
-pub const RateLimitPolicy = rateLimitMod.RateLimitPolicy;
 pub const RateLimitResult = rateLimitMod.RateLimitResult;
 pub const RateLimitDimension = rateLimitMod.RateLimitDimension;
 pub const Metrics = metrics.Registry;
@@ -524,7 +505,7 @@ test {
     // Module references make `zig build test` discover nested tests.
     _ = common.clock;
     _ = common.sync;
-    _ = common.json;
+    _ = json;
     _ = errors;
     _ = status;
     _ = headers;
@@ -641,13 +622,14 @@ test {
     _ = @import("client/download/downloadManager.zig");
 }
 
-test "tint is wired directly and independently of loaders" {
+test "installed packages stay internal and are not part of the public facade" {
     const testing = std.testing;
-    // `tint` is a direct dependency, used through its namespaced API.
-    try testing.expectEqualStrings("\x1b[31m", tint.color.ansi4.red.fg().slice());
-    try testing.expectEqualStrings("\x1b[32m", tint.color.ansi4.green.fg().slice());
-    try testing.expectEqualStrings("\x1b[0m", tint.ansi.reset.all);
-    try testing.expectEqualStrings("0.0.2", tint.version);
+    try testing.expect(!@hasDecl(@This(), "brotli"));
+    try testing.expect(!@hasDecl(@This(), "zstd"));
+    try testing.expect(!@hasDecl(@This(), "regex"));
+    try testing.expect(!@hasDecl(@This(), "tint"));
+    try testing.expect(!@hasDecl(@This(), "loaders"));
+    try testing.expect(!@hasDecl(@This(), "zigantic"));
 }
 
 test "Full template engine integration: variables, loops, conditionals, and raw HTML" {
@@ -742,7 +724,7 @@ test "public facade exposes non-redundant canonical namespaces and types" {
 
     // Cookie jar operations via canonical client.jar
     const io = std.Io.Threaded.global_single_threaded.io();
-    var jar = client.jar.init(a, io);
+    var jar = client.jar.init(a, io, .{});
     defer jar.deinit();
     jar.setFromHeader("session=token123; Path=/; HttpOnly", "example.com");
     var cbuf: [128]u8 = undefined;

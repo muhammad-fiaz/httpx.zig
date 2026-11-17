@@ -14,6 +14,7 @@
 //!   - RFC 7230 Section 3.2.6 — Token Definition
 
 const std = @import("std");
+const z = @import("zigantic");
 const Allocator = std.mem.Allocator;
 
 /// Canonical wire names for commonly shared HTTP fields. Names remain
@@ -39,10 +40,14 @@ pub const names = struct {
     pub const vary = "Vary";
 };
 
-pub const Header = struct {
-    name: []const u8,
-    value: []const u8,
-};
+/// A single HTTP header name/value pair. One schema for the whole library:
+/// the client, the router, the protocol writers, and the multipart codecs all
+/// exchange the same type.
+pub const HeaderSchema = z.objectOf(.{
+    .name = z.string(.{ .min = 1 }),
+    .value = z.string(.{}),
+}, .{});
+pub const Header = HeaderSchema.Value;
 
 pub const Headers = struct {
     allocator: Allocator,

@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const z = @import("zigantic");
 
 pub const ParseError = error{
     OutOfMemory,
@@ -22,21 +23,19 @@ pub const ParseError = error{
 };
 
 /// A parsed Server-Sent Event.
-pub const Event = struct {
-    /// Event name from `event: ...`. Default is "message".
-    eventType: []const u8 = "message",
-    /// Payload from `data: ...` lines. Multiple data lines are joined by `\n`.
-    data: []const u8 = "",
-    /// Event ID from `id: ...`, or null if not set.
-    id: ?[]const u8 = null,
-    /// Reconnection time in milliseconds from `retry: ...`, or null.
-    retryMs: ?u32 = null,
+const EventSchema = z.objectOf(.{
+    // Event name from `event: ...`. Default is "message".
+    .eventType = z.withDefault(z.string(.{ .min = 1 }), "message"),
+    // Payload from `data: ...` lines. Multiple data lines are joined by `\n`.
+    .data = z.withDefault(z.string(.{}), ""),
+    // Event ID from `id: ...`, or null if not set.
+    .id = z.optional(z.string(.{})),
+    // Reconnection time in milliseconds from `retry: ...`, or null.
+    .retryMs = z.optional(z.integer(u32, .{})),
+}, .{});
+pub const Event = EventSchema.Value;
 
-    pub const Writer = @import("sseWriter.zig").EventWriter;
-    pub const Parser = EventParser;
-};
-
-/// Stateful SSE stream parser adhering to the WHATWG event stream processing model.
+pub const EventWriter = @import("sseWriter.zig").EventWriter;
 pub const EventParser = struct {
     allocator: Allocator,
     dataBuf: std.ArrayList(u8),

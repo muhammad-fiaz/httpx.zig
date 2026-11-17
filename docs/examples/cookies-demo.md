@@ -4,7 +4,7 @@ Cookie flows with per-request headers and the standalone `httpx.client.jar`.
 See `examples/cookieServer.zig`.
 
 ```zig
-var jar = httpx.client.jar.init(allocator, io);
+var jar = httpx.client.jar.init(allocator, io, .{});
 defer jar.deinit();
 
 // Store a Set-Cookie value received from a login response.

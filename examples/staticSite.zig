@@ -19,12 +19,11 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 4,
+        .limits = .{ .maxConnections = 4 },
     });
     defer server.deinit();
 
-    try server.static("/", "examples/static");
+    try server.static(.{ .mount = "/", .root = "examples/static" });
 
     const port = server.localPort();
     std.debug.print("Static site server listening on http://127.0.0.1:{d}\n", .{port});
@@ -36,6 +35,7 @@ pub fn main() !void {
     };
     const t = try std.Thread.spawn(.{}, ServerThread.run, .{&server});
     defer t.join();
+    defer server.requestShutdown();
 
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();

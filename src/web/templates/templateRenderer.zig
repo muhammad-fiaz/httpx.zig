@@ -14,6 +14,7 @@ const Allocator = std.mem.Allocator;
 const contextMod = @import("templateContext.zig");
 const parserMod = @import("templateParser.zig");
 const errMod = @import("templateError.zig");
+const z = @import("zigantic");
 
 pub const Value = contextMod.Value;
 pub const Context = contextMod.Context;
@@ -64,21 +65,22 @@ pub fn writeEscaped(writer: anytype, text: []const u8) !void {
     }
 }
 
-pub const RenderOptions = struct {
-    maxIncludeDepth: usize = 32,
-    maxInheritanceDepth: usize = 16,
-    /// When true, rendering an undefined value is an error instead of empty.
-    strictUndefined: bool = false,
-    /// Default HTML autoescaping for `{{ }}` output (overridable per
-    /// region with `{% autoescape %}`).
-    autoescapeDefault: bool = true,
-    /// Cap on rendered output bytes per render (DoS guard).
-    maxOutputBytes: usize = 64 << 20,
-    /// Cap on nested macro/call depth (recursion guard).
-    maxMacroDepth: usize = 64,
-    /// Cap on `range()` sequence length (memory guard).
-    maxRangeItems: usize = 1 << 20,
-};
+const RenderOptionsSchema = z.objectOf(.{
+    .maxIncludeDepth = z.withDefault(z.positiveInt(usize, .{}), 32),
+    .maxInheritanceDepth = z.withDefault(z.positiveInt(usize, .{}), 16),
+    // When true, rendering an undefined value is an error instead of empty.
+    .strictUndefined = z.withDefault(z.boolean(.{}), false),
+    // Default HTML autoescaping for `{{ }}` output (overridable per
+    // region with `{% autoescape %}`).
+    .autoescapeDefault = z.withDefault(z.boolean(.{}), true),
+    // Cap on rendered output bytes per render (DoS guard).
+    .maxOutputBytes = z.withDefault(z.positiveInt(usize, .{}), 64 << 20),
+    // Cap on nested macro/call depth (recursion guard).
+    .maxMacroDepth = z.withDefault(z.positiveInt(usize, .{}), 64),
+    // Cap on `range()` sequence length (memory guard).
+    .maxRangeItems = z.withDefault(z.positiveInt(usize, .{}), 1 << 20),
+}, .{});
+pub const RenderOptions = RenderOptionsSchema.Value;
 
 /// Writer wrapper enforcing RenderOptions.maxOutputBytes.
 pub const LimitWriter = struct {
@@ -642,12 +644,6 @@ fn boolFilterParam(args: []const Value, kwargs: []const FilterKwarg, ai: usize, 
     if (filterKwarg(kwargs, kname)) |v| return v.isTruthy();
     if (ai < args.len) return args[ai].isTruthy();
     return default;
-}
-
-fn strFilterParam(allocator: Allocator, args: []const Value, kwargs: []const FilterKwarg, ai: usize, kname: []const u8) !?[]u8 {
-    if (filterKwarg(kwargs, kname)) |v| return try filterStringValue(allocator, v);
-    if (ai < args.len) return try filterStringValue(allocator, args[ai]);
-    return null;
 }
 
 /// Dotted attribute lookup used by `attr`, `map`, `selectattr` and friends.

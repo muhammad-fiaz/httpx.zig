@@ -37,19 +37,39 @@ pub const Stream = struct {
     resetError: ?u64 = null,
 
     /// Buffered out-of-order chunks awaiting earlier bytes. Sorted by
-    /// offset ascending; non-overlapping.
+    /// offset ascending; non-overlapping. Consumed chunks are retired at
+    /// `pending_head`, so draining never shifts the array.
     pending: std.ArrayList(Chunk) = .empty,
+    /// Index of the first live chunk in `pending`.
+    pending_head: usize = 0,
 
     // send side
     sendMaxOffset: u64 = 0, // peer-granted limit
     sentOffset: u64 = 0,
     finQueued: bool = false,
 
-    pub const Chunk = struct { offset: u64, data: []u8 };
+    pub const Chunk = struct {
+        /// Stream offset of the first live byte.
+        offset: u64,
+        /// Index of the first live byte inside `data`.
+        start: usize,
+        /// The received bytes; only `data[start..]` is live.
+        data: []u8,
+
+        /// The bytes that have not been delivered yet.
+        fn live(c: Chunk) []const u8 {
+            return c.data[c.start..];
+        }
+    };
 
     /// Next contiguous byte offset delivered to the application.
     pub fn currentRecvOffset(self: *const Stream) u64 {
         return self.recvOffset;
+    }
+
+    /// Number of chunks buffered while waiting for an earlier hole.
+    pub fn pendingCount(self: *const Stream) usize {
+        return self.pending.items.len - self.pending_head;
     }
 
     pub fn init(allocator: Allocator, id: u64, bidi: bool, initiator: bool) Stream {
@@ -57,7 +77,7 @@ pub const Stream = struct {
     }
 
     pub fn deinit(self: *Stream) void {
-        for (self.pending.items) |c| self.allocator.free(c.data);
+        for (self.pending.items[self.pending_head..]) |c| self.allocator.free(c.data);
         self.pending.deinit(self.allocator);
     }
 
@@ -110,13 +130,19 @@ pub const Stream = struct {
         } else if (offset > self.recvOffset) {
             // Out of order: buffer it.
             const copy = try self.allocator.dupe(u8, data);
-            self.pending.append(self.allocator, .{ .offset = offset, .data = copy }) catch |err| {
+            // The list stays sorted, so a binary search replaces a full
+            // re-sort for every buffered chunk.
+            const at = self.insertPosition(offset);
+            self.pending.insert(self.allocator, at, .{
+                .offset = offset,
+                .start = 0,
+                .data = copy,
+            }) catch |err| {
                 self.allocator.free(copy);
                 return err;
             };
-            std.mem.sort(Chunk, self.pending.items, {}, chunkLess);
-            self.rejectOverlaps() catch return Error.OutOfMemory;
-            if (self.pending.items.len > MAX_BUFFERED_GAPS) return Error.OutOfMemory;
+            try self.rejectOverlaps();
+            if (self.pendingCount() > MAX_BUFFERED_GAPS) return Error.OutOfMemory;
         } else {
             // Partial overlap of already-delivered prefix: trim left.
             const skip = self.recvOffset - offset;
@@ -131,52 +157,82 @@ pub const Stream = struct {
         return delivered;
     }
 
-    fn chunkLess(_: void, a: Chunk, b: Chunk) bool {
-        return a.offset < b.offset;
+    /// Position (in the whole list) for a chunk starting at `offset`.
+    /// The live chunks are sorted by offset, so a binary search finds
+    /// the slot without re-sorting the list.
+    fn insertPosition(self: *const Stream, offset: u64) usize {
+        const live = self.pending.items[self.pending_head..];
+        const rel = std.sort.upperBound(Chunk, live, offset, struct {
+            fn compare(ctx: u64, c: Chunk) std.math.Order {
+                return std.math.order(ctx, c.offset);
+            }
+        }.compare);
+        return self.pending_head + rel;
     }
 
+    /// Drops the consumed prefix of the pending list. The shift only
+    /// runs once the dead prefix is at least half the array, so every
+    /// chunk is moved at most once per compaction.
+    fn compactPending(self: *Stream) void {
+        if (self.pending_head == 0) return;
+        if (self.pending_head == self.pending.items.len) {
+            self.pending.clearRetainingCapacity();
+            self.pending_head = 0;
+            return;
+        }
+        if (self.pending_head < 32 and self.pending_head * 2 < self.pending.items.len) return;
+        const remaining = self.pending.items.len - self.pending_head;
+        @memmove(self.pending.items[0..remaining], self.pending.items[self.pending_head..]);
+        self.pending.items.len = remaining;
+        self.pending_head = 0;
+    }
+
+    /// Removes or trims chunks that overlap an earlier chunk. The list
+    /// stays sorted and the chunks stay non-overlapping.
     fn rejectOverlaps(self: *Stream) !void {
-        var i: usize = 1;
+        var i: usize = self.pending_head + 1;
         while (i < self.pending.items.len) {
-            const prevEnd = self.pending.items[i - 1].offset + self.pending.items[i - 1].data.len;
-            const curStart = self.pending.items[i].offset;
-            if (curStart < prevEnd) {
+            const prev = self.pending.items[i - 1];
+            const prevEnd = prev.offset + prev.live().len;
+            const cur = self.pending.items[i];
+            if (cur.offset < prevEnd) {
                 // Fully covered -> drop; partially -> trim front.
-                const cur = self.pending.items[i];
-                if (cur.offset + cur.data.len <= prevEnd) {
+                if (cur.offset + cur.live().len <= prevEnd) {
                     self.allocator.free(cur.data);
                     _ = self.pending.orderedRemove(i);
                     continue;
                 }
+                // Trimming only moves the live window: the buffer itself
+                // stays allocated, so no copy is needed.
                 const trimFront: usize = @intCast(prevEnd - cur.offset);
-                const keep = cur.data[trimFront..];
-                const moved = try self.allocator.dupe(u8, keep);
-                self.allocator.free(cur.data);
-                self.pending.items[i] = .{ .offset = prevEnd, .data = moved };
+                self.pending.items[i].start += trimFront;
+                self.pending.items[i].offset = prevEnd;
             }
             i += 1;
         }
     }
 
     fn drainContiguous(self: *Stream, sink: anytype, delivered: *usize) Error!void {
-        while (self.pending.items.len > 0 and
-            self.pending.items[0].offset <= self.recvOffset)
+        while (self.pendingCount() > 0 and
+            self.pending.items[self.pending_head].offset <= self.recvOffset)
         {
-            const c = self.pending.items[0];
-            if (c.offset + c.data.len <= self.recvOffset) {
+            const c = self.pending.items[self.pending_head];
+            const bytes = c.live();
+            if (c.offset + bytes.len <= self.recvOffset) {
                 // Fully redundant.
                 self.allocator.free(c.data);
-                _ = self.pending.orderedRemove(0);
+                self.pending_head += 1;
                 continue;
             }
             const skip: usize = @intCast(self.recvOffset - c.offset);
-            const tail = c.data[skip..];
+            const tail = bytes[skip..];
             sink.call(tail) catch return Error.OutOfMemory;
             delivered.* += tail.len;
             self.recvOffset += tail.len;
             self.allocator.free(c.data);
-            _ = self.pending.orderedRemove(0);
+            self.pending_head += 1;
         }
+        self.compactPending();
     }
 
     /// Advertises more receive capacity by `delta` (MAX_STREAM_DATA value
@@ -192,8 +248,9 @@ pub const Stream = struct {
 
     pub fn onReset(self: *Stream, code: u64) void {
         self.resetError = code;
-        for (self.pending.items) |c| self.allocator.free(c.data);
+        for (self.pending.items[self.pending_head..]) |c| self.allocator.free(c.data);
         self.pending.clearRetainingCapacity();
+        self.pending_head = 0;
     }
 
     /// Sender side: returns how many bytes may be sent now.
@@ -254,6 +311,47 @@ test "out-of-order chunks buffer then flush" {
     try std.testing.expectEqualStrings("HELLOWORLD", out.items);
 }
 
+test "overlapping buffered chunks are trimmed or dropped" {
+    const a = std.testing.allocator;
+    var st = Stream.init(a, 0, true, true);
+    defer st.deinit();
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(a);
+    var sink = CollectSink{ .list = &out, .gpa = a };
+
+    // "5678" at offset 5 is buffered.
+    _ = try st.receive(5, "5678", false, &sink);
+    // A retransmission overlapping the buffered chunk is trimmed to the
+    // bytes the buffer does not already carry.
+    _ = try st.receive(6, "6789", false, &sink);
+    try std.testing.expectEqual(@as(usize, 2), st.pendingCount());
+
+    // Delivering the head releases the trimmed bytes in order.
+    _ = try st.receive(0, "01234", false, &sink);
+    try std.testing.expectEqualStrings("0123456789", out.items);
+    try std.testing.expectEqual(@as(u64, 10), st.recvOffset);
+    try std.testing.expectEqual(@as(usize, 0), st.pendingCount());
+}
+
+test "a fully covered buffered chunk is dropped" {
+    const a = std.testing.allocator;
+    var st = Stream.init(a, 0, true, true);
+    defer st.deinit();
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(a);
+    var sink = CollectSink{ .list = &out, .gpa = a };
+
+    _ = try st.receive(5, "5678", false, &sink);
+    // Entirely inside the buffered chunk: nothing new to keep.
+    _ = try st.receive(6, "67", false, &sink);
+    try std.testing.expectEqual(@as(usize, 1), st.pendingCount());
+
+    _ = try st.receive(0, "01234", false, &sink);
+    try std.testing.expectEqualStrings("012345678", out.items);
+}
+
 test "gap limit error leaves buffered chunk owned by stream" {
     const a = std.testing.allocator;
     var st = Stream.init(a, 0, true, true);
@@ -272,7 +370,7 @@ test "gap limit error leaves buffered chunk owned by stream" {
     }
     // Deinit must free every still-buffered chunk exactly once, including
     // the chunk whose insertion crossed the configured gap limit.
-    try std.testing.expectEqual(@as(usize, MAX_BUFFERED_GAPS + 1), st.pending.items.len);
+    try std.testing.expectEqual(@as(usize, MAX_BUFFERED_GAPS + 1), st.pendingCount());
 }
 
 test "flow control violation detected" {
@@ -322,7 +420,7 @@ test "reset discards buffered data" {
 
     _ = try st.receive(5, "later", false, &sink); // buffered
     st.onReset(0x08);
-    try std.testing.expectEqual(@as(usize, 0), st.pending.items.len);
+    try std.testing.expectEqual(@as(usize, 0), st.pendingCount());
     try std.testing.expectError(Error.StreamReset, st.receive(5, "x", false, &sink));
 }
 

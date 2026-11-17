@@ -4,9 +4,9 @@
 //! queue capacity. A fresh request arena backs each connection so handlers can
 //! allocate freely and everything is released when the connection completes.
 //!
-//! API documentation routes (OpenAPI + Swagger UI + ReDoc) are mounted by
-//! default; disable with `Config.enableDocs = false` or customize through
-//! `Config.docs`.
+//! API documentation UIs embed several megabytes of browser assets and are
+//! mounted explicitly with `httpx.docs.mount(...)` so ordinary servers do not
+//! include those assets in their executables.
 //!
 //! References:
 //!   - RFC 9112 — HTTP/1.1 (message format, connection management)
@@ -14,7 +14,18 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const configCoerce = @import("../common/configCoerce.zig");
+const z = @import("zigantic");
+
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
+
 const tcp = @import("../sockets/tcp.zig");
 const compression = @import("../compression/codec.zig");
 const parserMod = @import("../protocols/http1/parser.zig");
@@ -26,7 +37,6 @@ const Context = routerMod.Context;
 const Response = routerMod.Response;
 const Method = @import("../common/method.zig").Method;
 const mediaTypeMod = @import("../common/mediaType.zig");
-const docsMod = @import("../web/docs/docs.zig");
 const restMod = @import("../web/rest/api.zig");
 const metaMod = @import("../web/router/routeMetadata.zig");
 const graphqlServerMod = @import("../web/graphql/graphQlServer.zig");
@@ -53,6 +63,7 @@ const http3Conn = @import("../protocols/http3/connection.zig");
 const http3Stream = @import("../protocols/http3/stream.zig");
 const http3Qpack = @import("../protocols/http3/qpack.zig");
 const versionInfo = @import("../common/version.zig");
+const statusMod = @import("../common/status.zig");
 
 pub const maxHeadBytes = 32 * 1024;
 
@@ -163,13 +174,17 @@ const clock = @import("../common/clock.zig");
 /// ```
 ///
 /// To disable all events (the default): `.logging = .{}` (callback = null).
-pub const LoggingOptions = struct {
-    /// Application-supplied callback. When null (the default), no events are
-    /// generated and HTTPX produces no output whatsoever.
-    callback: ?logging.ServerEventCallback = null,
-    /// Minimum severity filter. Events below this level are not delivered.
-    level: logging.Level = .info,
-};
+const LoggingOptionsSchema = z.objectOf(.{
+    .callback = z.withDefault(z.custom(?logging.ServerEventCallback, .{
+        .check = struct {
+            fn accept(_: ?logging.ServerEventCallback) bool {
+                return true;
+            }
+        }.accept,
+    }), null),
+    .level = z.withDefault(z.enumType(logging.Level, .{}), .info),
+}, .{});
+pub const LoggingOptions = LoggingOptionsSchema.Value;
 
 pub const PortStrategy = enum {
     /// If port is in use, automatically try port + 1, port + 2, up to maxPortAttempts.
@@ -180,130 +195,83 @@ pub const PortStrategy = enum {
     exit,
 };
 
-/// ALPN identifiers in server preference order, selected from enabled
-/// protocol handlers when the caller leaves TLS ALPN at its default.
-const alpnH2Http11Http10 = [_]alpnMod.Protocol{ .h2, .@"http/1.1", .@"http/1.0" };
-const alpnH2Http11 = [_]alpnMod.Protocol{ .h2, .@"http/1.1" };
-const alpnH2Http10 = [_]alpnMod.Protocol{ .h2, .@"http/1.0" };
-const alpnH2 = [_]alpnMod.Protocol{.h2};
-const alpnHttp11 = [_]alpnMod.Protocol{.@"http/1.1"};
-const alpnHttp10Http11 = [_]alpnMod.Protocol{ .@"http/1.1", .@"http/1.0" };
-const alpnHttp10 = [_]alpnMod.Protocol{.@"http/1.0"};
+/// Connection and worker limits.
+const ConnectionLimitsSchema = z.objectOf(.{
+    .maxConnections = z.withDefault(z.nonNegativeInt(usize, .{}), 0),
+    .maxConcurrentConnections = z.withDefault(z.positiveInt(usize, .{}), 128),
+    .maxQueuedConnectionTasks = z.withDefault(z.positiveInt(usize, .{}), 128),
+    .workerCount = z.withDefault(z.integer(u16, .{}), 0),
+}, .{});
+pub const ConnectionLimits = ConnectionLimitsSchema.Value;
 
-pub const Config = struct {
-    host: []const u8 = "0.0.0.0",
-    port: u16 = 8080,
-    /// Port resolution strategy when the port is in use. Default is incremental.
-    portStrategy: PortStrategy = .incremental,
-    /// Maximum attempts when portStrategy is incremental.
-    maxPortAttempts: u16 = 50,
-    /// Largest accepted request body.
-    maxBody: usize = 8 * 1024 * 1024,
-    /// Total connections run() serves before returning (0 = unlimited).
-    /// Counts successfully queued connections, not simultaneous connections.
-    /// Tests use small values to join the run thread deterministically.
-    maxConnections: usize = 0,
-    /// Maximum accepted connections being processed or waiting in the bounded
-    /// worker queue. Excess connections are closed immediately.
-    maxConcurrentConnections: usize = 128,
-    /// Maximum connections waiting for a worker. A full queue closes the newly
-    /// accepted socket, keeping memory and pending work bounded.
-    maxQueuedConnectionTasks: usize = 128,
-    /// Fixed worker count. Zero selects up to 16 CPUs, capped by
-    /// maxConcurrentConnections.
-    workerCount: u16 = 0,
-    /// Deadline for the first bytes and protocol sniff after accept; zero disables.
-    initialRequestTimeoutMs: u32 = 5_000,
-    /// Absolute deadline to finish an HTTP request header after its first byte; zero disables.
-    headerReadTimeoutMs: u32 = 10_000,
-    /// Absolute deadline to receive a complete request body; zero disables.
-    requestBodyTimeoutMs: u32 = 30_000,
-    /// Absolute write deadline for interim and final responses; zero disables.
-    writeTimeoutMs: u32 = 30_000,
-    /// Deadline waiting for the next request on an HTTP/1 keep-alive connection; zero disables.
-    keepAliveIdleTimeoutMs: u32 = 30_000,
-    /// Mount /openapi.json, /docs (Swagger UI), /redoc by default.
-    enableDocs: bool = true,
-    /// Overrides for docs routes when enabled.
-    docs: ?docsMod.Config = null,
-    logging: LoggingOptions = .{},
-    /// HTTP/1.1 persistent connections: honor keep-alive, serve multiple
-    /// requests per connection (bounded by maxRequestsPerConn).
-    keepAlive: bool = false,
-    maxRequestsPerConn: usize = 1000,
-    /// Allow bare LF line endings for request parsing (issue #37).
-    allowLfLineEndings: bool = false,
-    /// Whether to trust X-Forwarded-For, X-Forwarded-Proto, and X-Forwarded-Host from reverse proxies.
-    /// When true, Context.remoteAddress(), Context.scheme(), and Context.host() will parse forwarded headers.
-    trustForwardedHeaders: bool = false,
-    /// Optional list of trusted proxy IPs/CIDRs (e.g. "127.0.0.1", "::1").
-    /// If non-empty, headers are only trusted if the connection originates from
-    /// one of these addresses, and matching hops are skipped when resolving
-    /// X-Forwarded-For right-to-left.
-    trustedProxies: []const []const u8 = &.{},
-    /// Preferred default HTTP version for server handling. When set to a
-    /// concrete version it selects exactly that version, overriding the
-    /// individual http10/http11/http2/http3 flags below; `.auto`/null
-    /// leaves the flags in charge.
-    httpVersion: ?HttpVersion = null,
-    /// Enable HTTP/1.0 protocol handling.
-    http10: bool = true,
-    /// Enable HTTP/1.1 protocol handling.
-    http11: bool = true,
-    /// Enable HTTP/2 over TLS ALPN and cleartext prior-knowledge connections.
-    http2: bool = true,
-    /// HTTP/3 server runtime path.
-    http3: bool = false,
-    /// Require a stateless Retry token before accepting QUIC Initials.
-    /// Off by default so 0-RTT clients are not forced into a round trip;
-    /// enable in production to validate the client address early.
-    http3Retry: bool = false,
-    /// Stable key for Retry tokens across connections. When null each
-    /// connection generates an ephemeral key (valid for its own Retry
-    /// round trip only).
-    http3RetryKey: ?[32]u8 = null,
-    /// QUIC idle timeout for HTTP/3 connections (0 disables). The
-    /// effective value is the minimum of this and the peer's advertised
-    /// max_idle_timeout (RFC 9000 Section 10.1).
-    http3MaxIdleTimeoutMs: u64 = 30_000,
-    /// Connection-level QUIC receive window advertised to HTTP/3 clients.
-    http3InitialMaxData: u64 = 1 << 20,
-    /// Per-stream receive windows advertised to HTTP/3 clients.
-    http3InitialMaxStreamDataBidiLocal: u64 = 65_535,
-    http3InitialMaxStreamDataBidiRemote: u64 = 65_535,
-    http3InitialMaxStreamDataUni: u64 = 65_535,
-    /// Concurrent streams a client may open in each direction.
-    http3MaxStreamsBidi: u64 = 128,
-    http3MaxStreamsUni: u64 = 128,
-    /// Advertised max UDP payload size (1200..65527 bytes).
-    http3MaxUdpPayload: usize = 1472,
-    /// Automatically watch directory and broadcast changes / hot reload.
-    watch: bool = false,
-    /// Directory to watch when watch is enabled.
-    watchDir: []const u8 = ".",
-    /// Enable SSE / WebSocket live reload endpoints and auto-inject reload script into HTML.
-    liveReload: bool = false,
-    /// URL path where the live reload SSE endpoint is mounted.
-    liveReloadPath: []const u8 = "/__httpx_liveReload",
-    /// Native template engine configuration. If null, automatically discovers and enables "templates/" if that directory exists.
-    templates: ?templatesMod.Config = null,
-    /// File-based website (pages, assets, templates). Null disables. The
-    /// server builds the route table at init; routes mount in `run()` so
-    /// explicit code routes registered after init always win ties.
-    site: ?siteMod.SiteConfig = null,
-    /// Production-grade TLS / HTTPS configuration.
-    /// When provided with certificate & private key (PEM or file path), enables HTTPS server.
-    tls: ?tlsServerMod.Server.Config = null,
-    /// Response content-coding settings: codec tuning plus the smaller-wins
-    /// fallback that keeps `Content-Encoding` from being sent for a body the
-    /// codec made bigger. Only applies to bodies under `maxCompressionInput`.
-    compression: compression.Config = .{},
-    /// Bodies larger than this are sent uncompressed, bounding the memory one
-    /// request can hold to roughly input plus compressed copy. Raise it to
-    /// compress large document assets (OpenAPI specs, bundled doc UIs), at the
-    /// cost of that extra copy per in-flight request.
-    maxCompressionInput: usize = 128 * 1024,
-};
+/// Request/response deadlines in milliseconds. Zero disables a deadline.
+const TimeoutsSchema = z.objectOf(.{
+    .initialRequest = z.withDefault(z.integer(u32, .{}), 5_000),
+    .headerRead = z.withDefault(z.integer(u32, .{}), 10_000),
+    .requestBody = z.withDefault(z.integer(u32, .{}), 30_000),
+    .write = z.withDefault(z.integer(u32, .{}), 30_000),
+    .keepAliveIdle = z.withDefault(z.integer(u32, .{}), 30_000),
+}, .{});
+pub const Timeouts = TimeoutsSchema.Value;
+
+/// Which HTTP versions the server speaks.
+const ProtocolsSchema = z.objectOf(.{
+    .preferred = z.optional(z.enumType(HttpVersion, .{})),
+    .http10 = z.withDefault(z.boolean(.{}), true),
+    .http11 = z.withDefault(z.boolean(.{}), true),
+    .http2 = z.withDefault(z.boolean(.{}), true),
+    .http3 = z.withDefault(z.boolean(.{}), false),
+}, .{});
+pub const Protocols = ProtocolsSchema.Value;
+
+/// Live reload / hot reload watching.
+const LiveReloadSchema = z.objectOf(.{
+    .watch = z.withDefault(z.boolean(.{}), false),
+    .watchDir = z.withDefault(z.string(.{ .min = 1 }), "."),
+    .enabled = z.withDefault(z.boolean(.{}), false),
+    .path = z.withDefault(z.string(.{ .min = 1, .prefix = "/" }), "/__httpx_liveReload"),
+}, .{});
+pub const LiveReload = LiveReloadSchema.Value;
+
+/// HTTP/3 transport tuning: the QUIC parameters advertised to clients.
+const Http3OptionsSchema = z.objectOf(.{
+    .retry = z.withDefault(z.boolean(.{}), false),
+    .retryKey = z.optional(typedSchema([32]u8)),
+    .maxIdleTimeoutMs = z.withDefault(z.integer(u64, .{}), 30_000),
+    .initialMaxData = z.withDefault(z.integer(u64, .{}), 1 << 20),
+    .initialMaxStreamDataBidiLocal = z.withDefault(z.integer(u64, .{}), 65_535),
+    .initialMaxStreamDataBidiRemote = z.withDefault(z.integer(u64, .{}), 65_535),
+    .initialMaxStreamDataUni = z.withDefault(z.integer(u64, .{}), 65_535),
+    .maxStreamsBidi = z.withDefault(z.integer(u64, .{}), 128),
+    .maxStreamsUni = z.withDefault(z.integer(u64, .{}), 128),
+    .maxUdpPayload = z.withDefault(z.integer(usize, .{ .min = 1200, .max = 65527 }), 1472),
+}, .{});
+pub const Http3Options = Http3OptionsSchema.Value;
+
+const ConfigSchema = z.objectOf(.{
+    .host = z.withDefault(z.string(.{ .min = 1 }), "0.0.0.0"),
+    .port = z.withDefault(z.integer(u16, .{}), 8080),
+    .portStrategy = z.withDefault(z.enumType(PortStrategy, .{}), .incremental),
+    .maxPortAttempts = z.withDefault(z.positiveInt(u16, .{}), 50),
+    .maxBody = z.withDefault(z.positiveInt(usize, .{}), 8 * 1024 * 1024),
+    .limits = z.withDefault(ConnectionLimitsSchema, .{}),
+    .timeouts = z.withDefault(TimeoutsSchema, .{}),
+    .logging = z.withDefault(LoggingOptionsSchema, .{}),
+    .keepAlive = z.withDefault(z.boolean(.{}), false),
+    .maxRequestsPerConn = z.withDefault(z.positiveInt(usize, .{}), 1000),
+    .allowLfLineEndings = z.withDefault(z.boolean(.{}), false),
+    .trustForwardedHeaders = z.withDefault(z.boolean(.{}), false),
+    .trustedProxies = z.withDefault(z.array(z.string(.{ .min = 1 }), .{}), &.{}),
+    .protocols = z.withDefault(ProtocolsSchema, .{}),
+    .http3Options = z.withDefault(Http3OptionsSchema, .{}),
+    .liveReload = z.withDefault(LiveReloadSchema, .{}),
+    .templates = z.optional(templatesMod.ConfigSchema),
+    .site = z.optional(siteMod.SiteConfigSchema),
+    .tls = z.optional(tlsServerMod.Server.ConfigSchema),
+    .compression = z.withDefault(compression.ConfigSchema, .{}),
+    .maxCompressionInput = z.withDefault(z.nonNegativeInt(usize, .{}), 128 * 1024),
+}, .{});
+pub const Config = ConfigSchema.Value;
 
 /// Global pointer to the active server for the Ctrl+C handler.
 var gActiveServer: ?*Server = null;
@@ -539,7 +507,6 @@ pub const Server = struct {
     ownsIo: bool = false,
     ioThreaded: ?*std.Io.Threaded = null,
     paused: std.atomic.Value(bool) = .init(false),
-    docsMounted: bool = false,
     /// True once `graphql()` mounted its routes; `deinit` tears them down.
     graphqlMounted: bool = false,
     graphqlCfg: graphqlServerMod.HandlerConfig = .{},
@@ -580,10 +547,9 @@ pub const Server = struct {
 
     /// Initializes server with explicit allocator, shared IO, and configuration.
     /// Matches `var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });`
-    /// Creates a server from an explicit allocator, shared I/O, and a partial
-    /// or full config literal. Omitted fields keep their declared defaults.
-    pub fn init(allocator: Allocator, io: std.Io, config: anytype) !Server {
-        const cfg = configCoerce.to(Config, config);
+    /// Creates a server from an explicit allocator, shared I/O, and a config
+    /// literal. Omitted fields keep their schema defaults.
+    pub fn init(allocator: Allocator, io: std.Io, cfg: Config) !Server {
         return initInternal(allocator, io, false, null, cfg);
     }
 
@@ -594,8 +560,11 @@ pub const Server = struct {
         ioThreaded: ?*std.Io.Threaded,
         cfg: Config,
     ) !Server {
-        if (cfg.maxConcurrentConnections == 0 or cfg.maxQueuedConnectionTasks == 0) {
-            return error.InvalidConcurrencyLimits;
+        {
+            var scratch: [4096]u8 = undefined;
+            const issue = z.checkFirst(ConfigSchema, cfg, &scratch, .{}) catch
+                return error.InvalidConfig;
+            if (issue != null) return error.InvalidConfig;
         }
         errdefer if (ownsIo) {
             if (ioThreaded) |th| {
@@ -643,32 +612,32 @@ pub const Server = struct {
         errdefer listener.close(io);
 
         var effectiveCfg = cfg;
-        if (cfg.httpVersion) |v| {
+        if (cfg.protocols.preferred) |v| {
             switch (v) {
                 .auto => {},
                 .http10 => {
-                    effectiveCfg.http10 = true;
-                    effectiveCfg.http11 = false;
-                    effectiveCfg.http2 = false;
-                    effectiveCfg.http3 = false;
+                    effectiveCfg.protocols.http10 = true;
+                    effectiveCfg.protocols.http11 = false;
+                    effectiveCfg.protocols.http2 = false;
+                    effectiveCfg.protocols.http3 = false;
                 },
                 .http11 => {
-                    effectiveCfg.http10 = false;
-                    effectiveCfg.http11 = true;
-                    effectiveCfg.http2 = false;
-                    effectiveCfg.http3 = false;
+                    effectiveCfg.protocols.http10 = false;
+                    effectiveCfg.protocols.http11 = true;
+                    effectiveCfg.protocols.http2 = false;
+                    effectiveCfg.protocols.http3 = false;
                 },
                 .http2 => {
-                    effectiveCfg.http10 = false;
-                    effectiveCfg.http11 = false;
-                    effectiveCfg.http2 = true;
-                    effectiveCfg.http3 = false;
+                    effectiveCfg.protocols.http10 = false;
+                    effectiveCfg.protocols.http11 = false;
+                    effectiveCfg.protocols.http2 = true;
+                    effectiveCfg.protocols.http3 = false;
                 },
                 .http3 => {
-                    effectiveCfg.http10 = false;
-                    effectiveCfg.http11 = false;
-                    effectiveCfg.http2 = false;
-                    effectiveCfg.http3 = true;
+                    effectiveCfg.protocols.http10 = false;
+                    effectiveCfg.protocols.http11 = false;
+                    effectiveCfg.protocols.http2 = false;
+                    effectiveCfg.protocols.http3 = true;
                 },
             }
         }
@@ -681,14 +650,14 @@ pub const Server = struct {
         // `self.cfg.tls.?.alpn`.
         if (effectiveCfg.tls) |*tcfg| {
             if (std.mem.eql(alpnMod.Protocol, tcfg.alpn, &alpnMod.DEFAULT_TCP_PREFERENCE)) {
-                tcfg.alpn = if (effectiveCfg.http2) blk: {
-                    if (effectiveCfg.http11) {
-                        break :blk if (effectiveCfg.http10) &alpnH2Http11Http10 else &alpnH2Http11;
+                tcfg.alpn = if (effectiveCfg.protocols.http2) blk: {
+                    if (effectiveCfg.protocols.http11) {
+                        break :blk if (effectiveCfg.protocols.http10) &alpnMod.PREFERENCES.h2_http11_http10 else &alpnMod.PREFERENCES.h2_http11;
                     }
-                    break :blk if (effectiveCfg.http10) &alpnH2Http10 else &alpnH2;
-                } else if (effectiveCfg.http11) blk: {
-                    break :blk if (effectiveCfg.http10) &alpnHttp10Http11 else &alpnHttp11;
-                } else if (effectiveCfg.http10) &alpnHttp10 else &.{};
+                    break :blk if (effectiveCfg.protocols.http10) &alpnMod.PREFERENCES.h2_http10 else &alpnMod.PREFERENCES.h2;
+                } else if (effectiveCfg.protocols.http11) blk: {
+                    break :blk if (effectiveCfg.protocols.http10) &alpnMod.PREFERENCES.http11_http10 else &alpnMod.PREFERENCES.http11;
+                } else if (effectiveCfg.protocols.http10) &alpnMod.PREFERENCES.http10 else &.{};
             }
         }
 
@@ -747,7 +716,7 @@ pub const Server = struct {
 
         var h3Ep_opt: ?quicTransport.Endpoint = null;
         var h3Placeholder_opt: ?*quicConn.Connection = null;
-        if (effectiveCfg.http3 and loadedCertPem != null and loadedKeyPem != null) {
+        if (effectiveCfg.protocols.http3 and loadedCertPem != null and loadedKeyPem != null) {
             const placeholder = try quicConn.Connection.init(allocator, io, .{
                 .role = .server,
             });
@@ -924,22 +893,16 @@ pub const Server = struct {
         try self.router.use(mw);
     }
 
-    /// Mounts a directory of static files under a URL prefix.
-    pub fn static(self: *Server, mountPath: []const u8, dirPath: []const u8) !void {
+    /// Mounts a directory of static files using the initialized server's router.
+    pub fn static(self: *Server, cfg: @import("../web/staticFiles/static.zig").Config) !void {
         const staticMod = @import("../web/staticFiles/static.zig");
-        try staticMod.register(&self.router, .{
-            .mount = mountPath,
-            .root = dirPath,
-        });
+        try staticMod.register(&self.router, cfg);
     }
 
     /// Mounts a Single Page Application (SPA) with index fallback.
-    pub fn spa(self: *Server, mountPath: []const u8, dirPath: []const u8) !void {
+    pub fn spa(self: *Server, cfg: @import("../web/spa/server.zig").Config) !void {
         const spaMod = @import("../web/spa/server.zig");
-        try spaMod.register(&self.router, .{
-            .mount = mountPath,
-            .root = dirPath,
-        });
+        try spaMod.register(&self.router, cfg);
     }
 
     /// Registers a Prometheus metrics exposition endpoint on the specified route.
@@ -1054,7 +1017,6 @@ pub const Server = struct {
             graphqlServerMod.unmount(&self.router, self.graphqlCfg);
             self.graphqlMounted = false;
         }
-        if (self.docsMounted) docsMod.unmountRouter(&self.router);
         self.router.deinit();
         self.listener.close(self.io);
         self.activeConns.deinit(self.allocator);
@@ -1079,41 +1041,19 @@ pub const Server = struct {
         return restMod.Rest.init(self.allocator, self.io, &self.router);
     }
 
-    /// Mounts the documentation UIs and the OpenAPI document on this server.
-    ///
-    /// The server owns the mount and removes it in `deinit`. Calling this
-    /// explicitly suppresses the zero-config mount performed by `run` when
-    /// `Config.enableDocs` is true, so a customized configuration is never
-    /// replaced by the defaults.
-    ///
-    /// ```zig
-    /// try server.docs(.{
-    ///     .title = "Orders API",
-    ///     .version = "1.0.0",
-    ///     .swagger = .{ .route = "/docs" },
-    ///     .redoc = .{ .route = "/redoc" },
-    ///     .scalar = .{ .route = "/scalar" },
-    /// });
-    /// ```
-    pub fn docs(self: *Server, cfg: anytype) !void {
-        if (self.docsMounted) return error.DocsAlreadyMounted;
-        const docsCfg = configCoerce.to(docsMod.Config, cfg);
-        try docsMod.mount(self.allocator, &self.router, docsCfg, .{
-            .title = docsCfg.title,
-            .version = docsCfg.version,
-            .description = docsCfg.description,
-        });
-        self.docsMounted = true;
-    }
-
     /// Mounts GraphQL at `cfg.endpoint` (POST, GET, OPTIONS) and builds the
     /// schema from this server's own allocator and `std.Io`. The schema and
     /// mount options live in one literal, so no separate `Schema.init` is
     /// needed. The mount is removed by `deinit`; mounting twice is an error
     /// instead of silently replacing the first schema.
-    pub fn graphql(self: *Server, cfg_in: anytype) !void {
+    pub fn graphql(self: *Server, cfg: graphqlServerMod.MountConfig) !void {
         if (self.graphqlMounted) return error.GraphqlAlreadyMounted;
-        const cfg = configCoerce.to(graphqlServerMod.MountConfig, cfg_in);
+        {
+            var scratch: [4096]u8 = undefined;
+            const issue = z.checkFirst(graphqlServerMod.MountConfigSchema, cfg, &scratch, .{}) catch
+                return error.InvalidConfig;
+            if (issue != null) return error.InvalidConfig;
+        }
         const schema = graphqlServerMod.Schema.init(self.allocator, self.io, .{
             .query = cfg.query,
             .mutation = cfg.mutation,
@@ -1126,13 +1066,7 @@ pub const Server = struct {
             .maxComplexity = cfg.maxComplexity,
             .introspection = cfg.introspection,
         });
-        const handlerCfg: graphqlServerMod.HandlerConfig = .{
-            .endpoint = cfg.endpoint,
-            .maxBodySize = cfg.maxBodySize,
-            .cors = cfg.cors,
-            .allowGet = cfg.allowGet,
-            .responseContentType = cfg.responseContentType,
-        };
+        const handlerCfg = graphqlServerMod.handlerConfigFrom(cfg);
         try graphqlServerMod.mount(self.allocator, self.io, &self.router, schema, handlerCfg);
         self.graphqlMounted = true;
         self.graphqlCfg = handlerCfg;
@@ -1290,14 +1224,6 @@ pub const Server = struct {
     /// work; stop additionally closes active sockets immediately.
     /// Installs a Ctrl+C handler for graceful shutdown.
     pub fn run(self: *Server) void {
-        // Mount docs here (not in init) because init returns by value,
-        // making any &srv.router pointer taken inside init a dangling pointer.
-        if (self.cfg.enableDocs and !self.docsMounted) {
-            self.docsMounted = true;
-            const dc = self.cfg.docs orelse docsMod.Config{};
-            docsMod.mount(self.allocator, &self.router, dc, null) catch {};
-        }
-
         // Mount the file-based website last so explicit code routes win
         // ties over generated routes. Like the docs mount above.
         if (self.siteHost) |*host| {
@@ -1309,7 +1235,7 @@ pub const Server = struct {
         }
 
         // Out-of-the-box watcher and live-reload integration
-        if ((self.cfg.watch or self.cfg.liveReload) and self.watcher == null) {
+        if ((self.cfg.liveReload.watch or self.cfg.liveReload.enabled) and self.watcher == null) {
             const WatcherCallback = struct {
                 fn onChange(event: watcherMod.WatchEvent, userData: ?*anyopaque) void {
                     const s: *Server = @ptrCast(@alignCast(userData.?));
@@ -1338,7 +1264,7 @@ pub const Server = struct {
             };
 
             const w = watcherMod.Watcher.init(self.allocator, self.io, .{
-                .dirPath = self.cfg.watchDir,
+                .dirPath = self.cfg.liveReload.watchDir,
                 .onChange = WatcherCallback.onChange,
                 .userData = self,
             }) catch null;
@@ -1347,7 +1273,7 @@ pub const Server = struct {
                 initializedW.start() catch {};
             }
 
-            if (self.cfg.liveReload) {
+            if (self.cfg.liveReload.enabled) {
                 const SseHandler = struct {
                     fn handle(ctx: *Context) anyerror!Response {
                         const s: *Server = @ptrCast(@alignCast(ctx.userData.?));
@@ -1368,7 +1294,7 @@ pub const Server = struct {
                         };
                     }
                 };
-                self.router.get(self.cfg.liveReloadPath, SseHandler.handle, .{ .userData = self }) catch {};
+                self.router.get(self.cfg.liveReload.path, SseHandler.handle, .{ .userData = self }) catch {};
             }
         }
 
@@ -1391,15 +1317,15 @@ pub const Server = struct {
                 }
             }
         }
-        var workerCount: usize = self.cfg.workerCount;
+        var workerCount: usize = self.cfg.limits.workerCount;
         if (workerCount == 0) {
             workerCount = std.Thread.getCpuCount() catch 4;
             workerCount = @min(workerCount, 16);
         }
-        workerCount = @max(1, @min(workerCount, self.cfg.maxConcurrentConnections));
+        workerCount = @max(1, @min(workerCount, self.cfg.limits.maxConcurrentConnections));
         var workers = ConnectionPool.init(self.allocator, self.io, .{
             .workers = @intCast(workerCount),
-            .queueCapacity = @intCast(@min(self.cfg.maxQueuedConnectionTasks, std.math.maxInt(u32))),
+            .queueCapacity = @intCast(@min(self.cfg.limits.maxQueuedConnectionTasks, std.math.maxInt(u32))),
             .autoStart = false,
         }) catch return;
         defer workers.deinit();
@@ -1413,7 +1339,7 @@ pub const Server = struct {
 
         var accepted: usize = 0;
         while (!self.stopFlag.load(.acquire)) {
-            if (self.cfg.maxConnections != 0 and accepted >= self.cfg.maxConnections) break;
+            if (self.cfg.limits.maxConnections != 0 and accepted >= self.cfg.limits.maxConnections) break;
             // Yield when paused
             while (self.paused.load(.acquire) and !self.stopFlag.load(.acquire)) {
                 clock.sleepMillis(self.io, 10);
@@ -1424,7 +1350,7 @@ pub const Server = struct {
                 break;
             };
             self.inAccept.store(false, .release);
-            conn.setReadTimeoutMs(self.cfg.initialRequestTimeoutMs);
+            conn.setReadTimeoutMs(self.cfg.timeouts.initialRequest);
             const task = self.allocator.create(ConnectionTask) catch {
                 conn.close();
                 continue;
@@ -1434,7 +1360,7 @@ pub const Server = struct {
             const sock = &task.socket;
             self.connsMu.lock();
             var admitted = false;
-            if (!self.stopFlag.load(.acquire) and self.activeConns.items.len < self.cfg.maxConcurrentConnections) {
+            if (!self.stopFlag.load(.acquire) and self.activeConns.items.len < self.cfg.limits.maxConcurrentConnections) {
                 self.activeConns.append(self.allocator, sock) catch {};
                 admitted = self.activeConns.items.len > 0 and self.activeConns.items[self.activeConns.items.len - 1] == sock;
             }
@@ -1539,7 +1465,7 @@ pub const Server = struct {
             const n = conn.read(peekBuf[nPeek..]) catch return;
             if (n == 0) return;
             nPeek += n;
-            protocol = classifyInitialProtocol(peekBuf[0..nPeek], self.tlsServer != null, self.cfg.http2);
+            protocol = classifyInitialProtocol(peekBuf[0..nPeek], self.tlsServer != null, self.cfg.protocols.http2);
         }
 
         // Check for TLS Handshake record (ContentType = 0x16, TLS legacy version 0x03, 0x01..0x03)
@@ -1553,7 +1479,7 @@ pub const Server = struct {
             defer tlsConn.deinit();
 
             const streamConn = StreamConn{ .tls = &tlsConn };
-            if (self.cfg.http2 and tlsConn.alpn != null and tlsConn.alpn.? == .h2) {
+            if (self.cfg.protocols.http2 and tlsConn.alpn != null and tlsConn.alpn.? == .h2) {
                 try self.serveHttp2Connection(streamConn, true, "");
             } else {
                 try self.serveHttp1Connection(streamConn, true, "");
@@ -1750,8 +1676,8 @@ pub const Server = struct {
         };
         var h2io = H2Io{ .conn = conn };
 
-        conn.setWriteTimeoutMs(self.cfg.writeTimeoutMs);
-        conn.setReadTimeoutMs(self.cfg.keepAliveIdleTimeoutMs);
+        conn.setWriteTimeoutMs(self.cfg.timeouts.write);
+        conn.setReadTimeoutMs(self.cfg.timeouts.keepAliveIdle);
 
         try transportMod.serveStream(self.allocator, .{
             .ctx = &h2io,
@@ -1783,16 +1709,16 @@ pub const Server = struct {
         const oldConn = ep.conn;
         const qconn = try quicConn.Connection.init(self.allocator, self.io, .{
             .role = .server,
-            .retry = self.cfg.http3Retry,
-            .retryKey = self.cfg.http3RetryKey,
-            .maxIdleTimeoutMs = self.cfg.http3MaxIdleTimeoutMs,
-            .initialMaxData = self.cfg.http3InitialMaxData,
-            .initialMaxStreamDataBidiLocal = self.cfg.http3InitialMaxStreamDataBidiLocal,
-            .initialMaxStreamDataBidiRemote = self.cfg.http3InitialMaxStreamDataBidiRemote,
-            .initialMaxStreamDataUni = self.cfg.http3InitialMaxStreamDataUni,
-            .initialMaxStreamsBidi = self.cfg.http3MaxStreamsBidi,
-            .initialMaxStreamsUni = self.cfg.http3MaxStreamsUni,
-            .maxUdpPayload = self.cfg.http3MaxUdpPayload,
+            .retry = self.cfg.http3Options.retry,
+            .retryKey = self.cfg.http3Options.retryKey,
+            .maxIdleTimeoutMs = self.cfg.http3Options.maxIdleTimeoutMs,
+            .initialMaxData = self.cfg.http3Options.initialMaxData,
+            .initialMaxStreamDataBidiLocal = self.cfg.http3Options.initialMaxStreamDataBidiLocal,
+            .initialMaxStreamDataBidiRemote = self.cfg.http3Options.initialMaxStreamDataBidiRemote,
+            .initialMaxStreamDataUni = self.cfg.http3Options.initialMaxStreamDataUni,
+            .initialMaxStreamsBidi = self.cfg.http3Options.maxStreamsBidi,
+            .initialMaxStreamsUni = self.cfg.http3Options.maxStreamsUni,
+            .maxUdpPayload = self.cfg.http3Options.maxUdpPayload,
         });
         defer {
             qconn.deinit();
@@ -2153,9 +2079,9 @@ pub const Server = struct {
         }
         var headerDeadlineStarted = filled != 0;
         if (headerDeadlineStarted) {
-            conn.setReadTimeoutMs(self.cfg.headerReadTimeoutMs);
+            conn.setReadTimeoutMs(self.cfg.timeouts.headerRead);
         } else {
-            conn.setReadTimeoutMs(if (requestIndex == 0) self.cfg.initialRequestTimeoutMs else self.cfg.keepAliveIdleTimeoutMs);
+            conn.setReadTimeoutMs(if (requestIndex == 0) self.cfg.timeouts.initialRequest else self.cfg.timeouts.keepAliveIdle);
         }
         const allowLf = self.cfg.allowLfLineEndings;
         while (filled < headBuf.len) {
@@ -2177,7 +2103,7 @@ pub const Server = struct {
             filled += n;
             if (!headerDeadlineStarted) {
                 headerDeadlineStarted = true;
-                conn.setReadTimeoutMs(self.cfg.headerReadTimeoutMs);
+                conn.setReadTimeoutMs(self.cfg.timeouts.headerRead);
             }
         }
         self.metricsRegistry.recordBytesIn(filled);
@@ -2191,11 +2117,11 @@ pub const Server = struct {
 
         self.metricsRegistry.recordRequestMethod(reqHead.method);
 
-        if (reqHead.minorVersion == 0 and !self.cfg.http10) {
+        if (reqHead.minorVersion == 0 and !self.cfg.protocols.http10) {
             _ = sendSimpleError(conn, 505, "HTTP/1.0 Not Supported") catch 0;
             return false;
         }
-        if (reqHead.minorVersion == 1 and !self.cfg.http11) {
+        if (reqHead.minorVersion == 1 and !self.cfg.protocols.http11) {
             _ = sendSimpleError(conn, 505, "HTTP/1.1 Not Supported") catch 0;
             return false;
         }
@@ -2240,7 +2166,7 @@ pub const Server = struct {
         if (hasExpect and reqHead.minorVersion == 1 and framing.framing != .none) {
             const interim = writerMod.buildInformational(arena, 100, &.{}) catch return false;
             defer arena.free(interim);
-            conn.setWriteTimeoutMs(self.cfg.writeTimeoutMs);
+            conn.setWriteTimeoutMs(self.cfg.timeouts.write);
             conn.writeAll(interim) catch return false;
         }
         {
@@ -2258,7 +2184,7 @@ pub const Server = struct {
                     const take = @min(buffered, fr.length);
                     @memcpy(body[0..take], headBuf[blk.end..][0..take]);
                     var have: usize = take;
-                    if (fr.length > 0) conn.setReadTimeoutMs(self.cfg.requestBodyTimeoutMs);
+                    if (fr.length > 0) conn.setReadTimeoutMs(self.cfg.timeouts.requestBody);
                     while (have < fr.length) {
                         // Bounded window keeps behavior uniform across platforms.
                         const want = @min(4096, fr.length - have);
@@ -2269,13 +2195,13 @@ pub const Server = struct {
                 },
                 .chunked => {
                     // Persistent decoder with bounded retained wire data.
-                    var dec = parserMod.ChunkedDecoder.initWithOptions(.{
+                    var dec = parserMod.ChunkedDecoder.init(.{
                         .allowLfLineEndings = self.cfg.allowLfLineEndings,
                     });
                     var acc: std.ArrayList(u8) = .empty;
                     var raw: std.ArrayList(u8) = .empty;
                     raw.appendSlice(arena, headBuf[blk.end..filled]) catch return false;
-                    conn.setReadTimeoutMs(self.cfg.requestBodyTimeoutMs);
+                    conn.setReadTimeoutMs(self.cfg.timeouts.requestBody);
                     while (true) {
                         _ = dec.decode(raw.items) catch |e| switch (e) {
                             error.Incomplete => 0,
@@ -2358,7 +2284,7 @@ pub const Server = struct {
         };
         const res: Response = self.router.dispatch(&ctx);
 
-        conn.setWriteTimeoutMs(self.cfg.writeTimeoutMs);
+        conn.setWriteTimeoutMs(self.cfg.timeouts.write);
         const bytesOut = writeResponse(conn, arena, reqHead.minorVersion, try self.withLiveReload(arena, res, isHead), isHead, if (clientClose) "close" else "keep-alive", ctx.header("Accept-Encoding"), self.cfg.compression, self.cfg.maxCompressionInput) catch {
             self.metricsRegistry.recordError();
             return false;
@@ -2374,12 +2300,12 @@ pub const Server = struct {
     /// static files do. `inject` is idempotent, so a response that already
     /// carries the script (static files, the site generator) is untouched.
     fn withLiveReload(self: *Server, arena: Allocator, res: Response, isHead: bool) !Response {
-        if (!self.cfg.liveReload or isHead or res.status == 204 or res.status == 304) return res;
+        if (!self.cfg.liveReload.enabled or isHead or res.status == 204 or res.status == 304) return res;
         const ct = res.contentType orelse return res;
         if (!std.mem.startsWith(u8, ct, "text/html")) return res;
         if (reload.isInjected(res.body)) return res;
         var out = res;
-        out.body = try reload.inject(arena, res.body, self.cfg.liveReloadPath);
+        out.body = try reload.inject(arena, res.body, self.cfg.liveReload.path);
         return out;
     }
 
@@ -2456,7 +2382,7 @@ pub const Server = struct {
         const reason: []const u8 = if (writerMod.reasonPhrase(res.status).len > 0)
             writerMod.reasonPhrase(res.status)
         else
-            reasonFor(res.status);
+            statusMod.reasonPhrase(res.status);
         var respHeaders = try arena.alloc(writerMod.Header, lines.items.len);
         for (lines.items, 0..) |line, i| {
             const colon = std.mem.indexOfScalar(u8, line, ':') orelse return 0;
@@ -2481,7 +2407,7 @@ pub const Server = struct {
         var buf: [256]u8 = undefined;
         const out = std.fmt.bufPrint(&buf, "HTTP/1.1 {d} {s}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{
             status,
-            reasonFor(status),
+            statusMod.reasonPhrase(status),
             text.len,
             text,
         }) catch return 0;
@@ -2489,27 +2415,6 @@ pub const Server = struct {
         return out.len;
     }
 };
-
-pub fn reasonFor(status: u16) []const u8 {
-    return switch (status) {
-        200 => "OK",
-        201 => "Created",
-        204 => "No Content",
-        206 => "Partial Content",
-        301 => "Moved Permanently",
-        302 => "Found",
-        304 => "Not Modified",
-        400 => "Bad Request",
-        403 => "Forbidden",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        413 => "Payload Too Large",
-        416 => "Range Not Satisfiable",
-        500 => "Internal Server Error",
-        501 => "Not Implemented",
-        else => "Status",
-    };
-}
 
 // Tests
 
@@ -2527,15 +2432,14 @@ test "initial protocol classification waits for fragmented TLS and HTTP2 prefixe
 
 test "fragmented cleartext HTTP2 preface is sniffed before HTTP1 dispatch" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
     var srv = try Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 1,
-        .initialRequestTimeoutMs = 2_000,
+        .limits = .{ .maxConnections = 1 },
+        .timeouts = .{ .initialRequest = 2_000 },
     });
     defer srv.deinit();
     const Runner = struct {
@@ -2596,10 +2500,10 @@ fn helloHandler(ctx: *Context) anyerror!Response {
 
 test "HTTP/1.1 server rejects request without Host before dispatch" {
     const a = std.testing.allocator;
-    var ioContext = tcp.IoContext.init(a) catch return;
+    var ioContext = try tcp.IoContext.init(a);
     defer ioContext.deinit();
 
-    var srv = Server.init(a, ioContext.io, .{ .port = 0, .enableDocs = false, .maxConnections = 1 }) catch return;
+    var srv = Server.init(a, ioContext.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } }) catch |err| return err;
     defer srv.deinit();
     try srv.router.get("/", helloHandler, .{});
 
@@ -2608,15 +2512,15 @@ test "HTTP/1.1 server rejects request without Host before dispatch" {
             server.run();
         }
     };
-    const thread = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    const thread = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch |err| return err;
     defer thread.join();
 
-    var client = tcp.connect(ioContext.io, "127.0.0.1", srv.localPort()) catch return;
+    var client = tcp.connect(ioContext.io, "127.0.0.1", srv.localPort()) catch |err| return err;
     defer client.close();
     try client.writeAll("GET / HTTP/1.1\r\nConnection: close\r\n\r\n");
 
     var response: [1024]u8 = undefined;
-    const n = client.read(&response) catch return;
+    const n = client.read(&response) catch |err| return err;
     try std.testing.expect(std.mem.startsWith(u8, response[0..n], "HTTP/1.1 400 Bad Request"));
 
     srv.requestShutdown();
@@ -2624,10 +2528,10 @@ test "HTTP/1.1 server rejects request without Host before dispatch" {
 
 test "HTTP/1.1 absolute-form target routes by its path" {
     const a = std.testing.allocator;
-    var ioContext = tcp.IoContext.init(a) catch return;
+    var ioContext = try tcp.IoContext.init(a);
     defer ioContext.deinit();
 
-    var srv = Server.init(a, ioContext.io, .{ .port = 0, .enableDocs = false, .maxConnections = 1 }) catch return;
+    var srv = Server.init(a, ioContext.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } }) catch |err| return err;
     defer srv.deinit();
     try srv.router.get("/hello", helloHandler, .{});
 
@@ -2636,19 +2540,19 @@ test "HTTP/1.1 absolute-form target routes by its path" {
             server.run();
         }
     };
-    const thread = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    const thread = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch |err| return err;
     defer thread.join();
 
     const port = srv.localPort();
     const request = try std.fmt.allocPrint(a, "GET http://127.0.0.1:{d}/hello HTTP/1.1\r\nHost: 127.0.0.1:{d}\r\nConnection: close\r\n\r\n", .{ port, port });
     defer a.free(request);
 
-    var client = tcp.connect(ioContext.io, "127.0.0.1", port) catch return;
+    var client = tcp.connect(ioContext.io, "127.0.0.1", port) catch |err| return err;
     defer client.close();
     try client.writeAll(request);
 
     var response: [1024]u8 = undefined;
-    const n = client.read(&response) catch return;
+    const n = client.read(&response) catch |err| return err;
     try std.testing.expect(std.mem.startsWith(u8, response[0..n], "HTTP/1.1 200 OK"));
     try std.testing.expect(std.mem.indexOf(u8, response[0..n], "hi from httpx") != null);
 
@@ -2659,10 +2563,10 @@ test "template route renders through tree-sitter pipeline end to end" {
     const tmplEngineMod = @import("../web/templates/templateEngine.zig");
     const tmplRendererMod = @import("../web/templates/templateRenderer.zig");
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var eng = tmplEngineMod.Engine.init(a, ctx.io, .{ .enableCache = true }) catch return;
+    var eng = tmplEngineMod.Engine.init(a, ctx.io, .{ .enableCache = true }) catch |err| return err;
     defer eng.deinit();
 
     const H = struct {
@@ -2680,7 +2584,7 @@ test "template route renders through tree-sitter pipeline end to end" {
     };
     H.enginePtr = &eng;
 
-    var srv = Server.init(a, ctx.io, .{ .port = 0, .maxConnections = 2 }) catch return;
+    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConnections = 2 } }) catch |err| return err;
     defer srv.deinit();
     try srv.router.get("/", H.handle, .{});
 
@@ -2689,10 +2593,10 @@ test "template route renders through tree-sitter pipeline end to end" {
             s.run();
         }
     };
-    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch |err| return err;
     defer t.join();
 
-    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch |err| return err;
     defer client.close();
     try client.writeAll("GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
 
@@ -2719,15 +2623,14 @@ test "live reload attaches the browser client to a plain handler's HTML" {
     // returns HTML gets the same client-side script, so hot/warm/cold
     // reloads work for framework responses too.
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 2,
-        .liveReload = true,
-    }) catch return;
+        .limits = .{ .maxConnections = 2 },
+        .liveReload = .{ .enabled = true },
+    }) catch |err| return err;
     defer srv.deinit();
     try srv.router.get("/", pageHandler, .{});
 
@@ -2736,10 +2639,10 @@ test "live reload attaches the browser client to a plain handler's HTML" {
             s.run();
         }
     };
-    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch |err| return err;
     defer t.join();
 
-    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch |err| return err;
     defer client.close();
     try client.writeAll("GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
 
@@ -2752,7 +2655,7 @@ test "live reload attaches the browser client to a plain handler's HTML" {
     }
     const wire = buf[0..total];
     try std.testing.expect(std.mem.startsWith(u8, wire, "HTTP/1.1 200 OK"));
-    try std.testing.expect(std.mem.indexOf(u8, wire, srv.cfg.liveReloadPath) != null);
+    try std.testing.expect(std.mem.indexOf(u8, wire, srv.cfg.liveReload.path) != null);
     // Handles the hot-reload payload, so a CSS edit swaps the stylesheet
     // instead of reloading the document.
     try std.testing.expect(std.mem.indexOf(u8, wire, "hotReload") != null);
@@ -2768,12 +2671,12 @@ test "live reload attaches the browser client to a plain handler's HTML" {
 
 test "live reload is off by default and skips non-HTML responses" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var srv = Server.init(a, ctx.io, .{ .port = 0, .enableDocs = false, .maxConnections = 1 }) catch return;
+    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } }) catch |err| return err;
     defer srv.deinit();
-    try std.testing.expect(!srv.cfg.liveReload);
+    try std.testing.expect(!srv.cfg.liveReload.enabled);
 
     const res: Response = .{ .body = "<html><body>x</body></html>", .contentType = "text/html" };
     const out = try srv.withLiveReload(a, res, false);
@@ -2790,10 +2693,10 @@ test "live reload is off by default and skips non-HTML responses" {
 
 test "server handles POST with content-length body" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var srv = Server.init(a, ctx.io, .{ .port = 0, .enableDocs = false, .maxConnections = 1 }) catch return;
+    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } }) catch |err| return err;
     defer srv.deinit();
     try srv.router.post("/echo", echoRawHandler, .{});
 
@@ -2802,10 +2705,10 @@ test "server handles POST with content-length body" {
             s.run();
         }
     };
-    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch |err| return err;
     defer t.join();
 
-    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch |err| return err;
     defer client.close();
 
     const payload = "{\"raw\":true}";
@@ -2828,10 +2731,10 @@ test "server handles POST with content-length body" {
 
 test "server decodes chunked request body before dispatch" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var srv = Server.init(a, ctx.io, .{ .port = 0, .enableDocs = false, .maxConnections = 1 }) catch return;
+    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } }) catch |err| return err;
     defer srv.deinit();
     try srv.router.post("/echo", echoRawHandler, .{});
 
@@ -2840,10 +2743,10 @@ test "server decodes chunked request body before dispatch" {
             s.run();
         }
     };
-    const thread = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    const thread = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch |err| return err;
     defer thread.join();
 
-    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch |err| return err;
     defer client.close();
     try client.writeAll("POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\nX-Checksum: yes\r\n\r\n");
 
@@ -2889,7 +2792,7 @@ fn testEventCallback(event: logging.ServerEvent) void {
 
 test "access log flows through event callback" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
     // Reset global capture state.
@@ -2899,10 +2802,9 @@ test "access log flows through event callback" {
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 1,
+        .limits = .{ .maxConnections = 1 },
         .logging = .{ .callback = testEventCallback },
-    }) catch return;
+    }) catch |err| return err;
     defer srv.deinit();
     try srv.router.get("/logged", returnOk, .{});
 
@@ -2911,7 +2813,7 @@ test "access log flows through event callback" {
             s.run();
         }
     };
-    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch |err| return err;
 
     var c = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch {
         srv.requestShutdown();
@@ -2939,7 +2841,7 @@ test "access log flows through event callback" {
 
 test "no callback produces zero events" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
     // Reset global capture (should stay zero without callback).
@@ -2949,10 +2851,9 @@ test "no callback produces zero events" {
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 1,
+        .limits = .{ .maxConnections = 1 },
         .logging = .{}, // null callback — silent by default
-    }) catch return;
+    }) catch |err| return err;
     defer srv.deinit();
     try srv.router.get("/logged", returnOk, .{});
 
@@ -2961,9 +2862,9 @@ test "no callback produces zero events" {
             s.run();
         }
     };
-    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch |err| return err;
 
-    var c = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+    var c = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch |err| return err;
     try c.writeAll("GET /logged HTTP/1.1\r\nHost: x\r\n\r\n");
     var rbuf: [512]u8 = undefined;
     var total: usize = 0;
@@ -2986,13 +2887,12 @@ fn returnOk(_: *Context) anyerror!Response {
 
 test "sequential clients are each served and closed cleanly" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .enableDocs = false,
-    }) catch return;
+    }) catch |err| return err;
     defer srv.deinit();
     try srv.router.get("/ok", returnOk, .{});
 
@@ -3001,14 +2901,14 @@ test "sequential clients are each served and closed cleanly" {
             s.run();
         }
     };
-    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch |err| return err;
     defer t.join();
 
     var i: usize = 0;
     while (i < 3) : (i += 1) {
-        var c = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+        var c = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch |err| return err;
         defer c.close();
-        c.writeAll("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") catch return;
+        c.writeAll("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") catch |err| return err;
         var rbuf: [512]u8 = undefined;
         var total: usize = 0;
         while (total < rbuf.len) {
@@ -3024,10 +2924,10 @@ test "sequential clients are each served and closed cleanly" {
 
 test "server serves routed GET end to end" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var srv = Server.init(a, ctx.io, .{ .port = 0, .maxConnections = 1 }) catch return;
+    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } }) catch |err| return err;
     defer srv.deinit();
     try srv.router.get("/hello", helloHandler, .{});
 
@@ -3036,10 +2936,10 @@ test "server serves routed GET end to end" {
             s.run();
         }
     };
-    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch |err| return err;
     defer t.join();
 
-    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch |err| return err;
     defer client.close();
 
     try client.writeAll("GET /hello HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip;q=1, zstd;q=0, br;q=0\r\n\r\n");
@@ -3066,21 +2966,59 @@ test "server serves routed GET end to end" {
     srv.requestShutdown();
 }
 
+test "server does not mount documentation routes unless explicitly requested" {
+    const allocator = std.testing.allocator;
+    var ctx = try tcp.IoContext.init(allocator);
+    defer ctx.deinit();
+
+    var srv = try Server.init(allocator, ctx.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } });
+    defer srv.deinit();
+
+    const Runner = struct {
+        fn run(server: *Server) void {
+            server.run();
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Runner.run, .{&srv});
+    defer {
+        srv.requestShutdown();
+        thread.join();
+    }
+
+    var client = try tcp.connect(ctx.io, "127.0.0.1", srv.localPort());
+    defer client.close();
+    client.setReadTimeoutMs(2_000);
+    try client.writeAll("GET /openapi.json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+
+    var response: [1024]u8 = undefined;
+    var total: usize = 0;
+    while (total < response.len) {
+        const n = try client.read(response[total..]);
+        if (n == 0) break;
+        total += n;
+        if (std.mem.indexOf(u8, response[0..total], "\r\n\r\n") != null) break;
+    }
+    try std.testing.expect(std.mem.startsWith(u8, response[0..total], "HTTP/1.1 404"));
+}
+
 test "idle and incomplete headers cannot block a normal request" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
     var srv = try Server.init(a, ctx.io, .{
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 3,
-        .maxConcurrentConnections = 3,
-        .maxQueuedConnectionTasks = 3,
-        .workerCount = 3,
-        .initialRequestTimeoutMs = 1_000,
-        .headerReadTimeoutMs = 1_000,
-        .writeTimeoutMs = 1_000,
+        .limits = .{
+            .maxConnections = 3,
+            .maxConcurrentConnections = 3,
+            .maxQueuedConnectionTasks = 3,
+            .workerCount = 3,
+        },
+        .timeouts = .{
+            .initialRequest = 1_000,
+            .headerRead = 1_000,
+            .write = 1_000,
+        },
     });
     defer srv.deinit();
     try srv.router.get("/ok", returnOk, .{});
@@ -3120,20 +3058,23 @@ test "idle and incomplete headers cannot block a normal request" {
 
 test "stalled request body is timed out without blocking another client" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
     var srv = try Server.init(a, ctx.io, .{
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 2,
-        .maxConcurrentConnections = 2,
-        .maxQueuedConnectionTasks = 2,
-        .workerCount = 1,
-        .initialRequestTimeoutMs = 1_000,
-        .headerReadTimeoutMs = 1_000,
-        .requestBodyTimeoutMs = 300,
-        .writeTimeoutMs = 1_000,
+        .limits = .{
+            .maxConnections = 2,
+            .maxConcurrentConnections = 2,
+            .maxQueuedConnectionTasks = 2,
+            .workerCount = 1,
+        },
+        .timeouts = .{
+            .initialRequest = 1_000,
+            .headerRead = 1_000,
+            .requestBody = 300,
+            .write = 1_000,
+        },
     });
     defer srv.deinit();
     try srv.router.get("/ok", returnOk, .{});
@@ -3177,24 +3118,27 @@ test "stalled request body is timed out without blocking another client" {
 
 test "connection limit rejects overload then accepts clients after a stalled upload expires" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
     var srv = try Server.init(a, ctx.io, .{
         .port = 0,
-        .enableDocs = false,
-        .maxConcurrentConnections = 1,
-        .maxQueuedConnectionTasks = 1,
-        .workerCount = 1,
-        .initialRequestTimeoutMs = 2_000,
-        .headerReadTimeoutMs = 2_000,
-        // Long enough that the stalled upload still owns the only slot while
-        // the overload connection below is admitted and rejected. A deadline
-        // shorter than the admission handshake made this test racy: on a
-        // loaded runner the upload expired first, the slot was released, and
-        // the overload connection was served instead of rejected.
-        .requestBodyTimeoutMs = 1_500,
-        .writeTimeoutMs = 2_000,
+        .limits = .{
+            .maxConcurrentConnections = 1,
+            .maxQueuedConnectionTasks = 1,
+            .workerCount = 1,
+        },
+        .timeouts = .{
+            .initialRequest = 2_000,
+            .headerRead = 2_000,
+            // Long enough that the stalled upload still owns the only slot while
+            // the overload connection below is admitted and rejected. A deadline
+            // shorter than the admission handshake made this test racy: on a
+            // loaded runner the upload expired first, the slot was released, and
+            // the overload connection was served instead of rejected.
+            .requestBody = 1_500,
+            .write = 2_000,
+        },
     });
     defer srv.deinit();
     try srv.router.get("/ok", returnOk, .{});
@@ -3285,7 +3229,7 @@ test "connection limit rejects overload then accepts clients after a stalled upl
 
 test "server compresses a large body once the input ceiling allows it" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
     // 200 KiB of compressible text: above the default ceiling, so raising it is
@@ -3323,15 +3267,15 @@ test "server compresses a large body once the input ceiling allows it" {
 
     // Default ceiling: the body is served as-is.
     {
-        var srv = Server.init(a, ctx.io, .{ .port = 0, .enableDocs = false, .maxConnections = 1 }) catch return;
+        var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } }) catch |err| return err;
         defer srv.deinit();
         try srv.router.get("/big", BigH.h, .{});
-        const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+        const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch |err| return err;
         defer t.join();
 
-        var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+        var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch |err| return err;
         defer client.close();
-        const wire = fetch.go(client) catch return;
+        const wire = fetch.go(client) catch |err| return err;
         defer a.free(wire);
         try std.testing.expect(std.mem.indexOf(u8, wire, "Content-Encoding") == null);
         try std.testing.expect(std.mem.indexOf(u8, wire, "the server must code a large body") != null);
@@ -3343,18 +3287,17 @@ test "server compresses a large body once the input ceiling allows it" {
     {
         var srv = Server.init(a, ctx.io, .{
             .port = 0,
-            .enableDocs = false,
-            .maxConnections = 1,
+            .limits = .{ .maxConnections = 1 },
             .maxCompressionInput = 1024 * 1024,
-        }) catch return;
+        }) catch |err| return err;
         defer srv.deinit();
         try srv.router.get("/big", BigH.h, .{});
-        const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+        const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch |err| return err;
         defer t.join();
 
-        var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+        var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch |err| return err;
         defer client.close();
-        const wire = fetch.go(client) catch return;
+        const wire = fetch.go(client) catch |err| return err;
         defer a.free(wire);
 
         const headEnd = std.mem.indexOf(u8, wire, "\r\n\r\n") orelse return error.Malformed;
@@ -3371,9 +3314,9 @@ test "server compresses a large body once the input ceiling allows it" {
 
 test "raw socket 200KB content-length body roundtrip" {
     const a = std.testing.allocator;
-    var ctx0 = tcp.IoContext.init(a) catch return;
+    var ctx0 = try tcp.IoContext.init(a);
     defer ctx0.deinit();
-    var srv = Server.init(a, ctx0.io, .{ .port = 0, .enableDocs = false, .maxConnections = 1 }) catch return;
+    var srv = Server.init(a, ctx0.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } }) catch |err| return err;
     defer srv.deinit();
     const LenH = struct {
         fn h(ctx: *Context) anyerror!Response {
@@ -3387,9 +3330,9 @@ test "raw socket 200KB content-length body roundtrip" {
             s.run();
         }
     };
-    const th = std.Thread.spawn(.{}, R.run, .{&srv}) catch return;
+    const th = std.Thread.spawn(.{}, R.run, .{&srv}) catch |err| return err;
     defer th.join();
-    var c = tcp.connect(ctx0.io, "127.0.0.1", srv.localPort()) catch return;
+    var c = tcp.connect(ctx0.io, "127.0.0.1", srv.localPort()) catch |err| return err;
     defer c.drainThenClose();
     const total = 200 * 1024;
     var hb: [128]u8 = undefined;
@@ -3409,20 +3352,19 @@ test "raw socket 200KB content-length body roundtrip" {
     try std.testing.expect(std.mem.indexOf(u8, rb[0..gotn], "204800") != null);
 }
 test "reason phrases cover common statuses" {
-    try std.testing.expectEqualStrings("OK", reasonFor(200));
-    try std.testing.expectEqualStrings("Not Found", reasonFor(404));
+    try std.testing.expectEqualStrings("OK", statusMod.reasonPhrase(200));
+    try std.testing.expectEqualStrings("Not Found", statusMod.reasonPhrase(404));
 }
 
 test "server isTls default is false" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 1,
-    }) catch return;
+        .limits = .{ .maxConnections = 1 },
+    }) catch |err| return err;
     defer srv.deinit();
 
     try std.testing.expect(!srv.isTls());
@@ -3430,14 +3372,13 @@ test "server isTls default is false" {
 
 test "server setTls dynamic reconfiguration and key zeroing" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 1,
-    }) catch return;
+        .limits = .{ .maxConnections = 1 },
+    }) catch |err| return err;
     defer srv.deinit();
 
     try std.testing.expect(!srv.isTls());
@@ -3458,14 +3399,13 @@ test "server setTls dynamic reconfiguration and key zeroing" {
 
 test "strict HTTPS mode rejects plain HTTP with 400 Bad Request" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 1,
-    }) catch return;
+        .limits = .{ .maxConnections = 1 },
+    }) catch |err| return err;
     defer srv.deinit();
 
     const cert = @embedFile("../protocols/tls/testdata/localhostCert.pem");
@@ -3478,10 +3418,10 @@ test "strict HTTPS mode rejects plain HTTP with 400 Bad Request" {
             s.run();
         }
     };
-    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch |err| return err;
     defer t.join();
 
-    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch |err| return err;
     defer client.close();
 
     try client.writeAll("GET /secret HTTP/1.1\r\nHost: localhost\r\n\r\n");
@@ -3502,14 +3442,13 @@ test "strict HTTPS mode rejects plain HTTP with 400 Bad Request" {
 
 test "server default TLS ALPN negotiates HTTP/2 and serves a request" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
     var srv = try Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 1,
+        .limits = .{ .maxConnections = 1 },
         .tls = .{
             .certificatePem = h3TestCertPem,
             .privateKeyPem = h3TestKeyPem,
@@ -3551,13 +3490,12 @@ test "server default TLS ALPN negotiates HTTP/2 and serves a request" {
 
 test "server TLS initialization fails instead of silently serving cleartext" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
     const result = Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
         .tls = .{
             .certificatePem = "-----BEGIN CERTIFICATE-----\ninvalid\n-----END CERTIFICATE-----",
             .privateKeyPem = h3TestKeyPem,
@@ -3583,7 +3521,7 @@ fn testTlsEventCallback(event: logging.ServerEvent) void {
 
 test "malformed TLS handshake emits tlsHandshakeFailed event" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
     gTlsFailedMu.lock();
@@ -3592,10 +3530,9 @@ test "malformed TLS handshake emits tlsHandshakeFailed event" {
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 1,
+        .limits = .{ .maxConnections = 1 },
         .logging = .{ .callback = testTlsEventCallback, .level = .warn },
-    }) catch return;
+    }) catch |err| return err;
     defer srv.deinit();
 
     const cert = @embedFile("../protocols/tls/testdata/localhostCert.pem");
@@ -3607,10 +3544,10 @@ test "malformed TLS handshake emits tlsHandshakeFailed event" {
             s.run();
         }
     };
-    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch |err| return err;
     defer t.join();
 
-    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch |err| return err;
     defer client.close();
 
     // Send a TLS 1.3 ClientHello record header (0x16, 0x03, 0x01) followed by corrupt payload
@@ -3634,14 +3571,13 @@ test "malformed TLS handshake emits tlsHandshakeFailed event" {
 
 test "StreamConn operations" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 1,
-    }) catch return;
+        .limits = .{ .maxConnections = 1 },
+    }) catch |err| return err;
     defer srv.deinit();
     try srv.router.get("/stream", returnOk, .{});
 
@@ -3650,10 +3586,10 @@ test "StreamConn operations" {
             s.run();
         }
     };
-    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch |err| return err;
     defer t.join();
 
-    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch |err| return err;
     defer client.close();
 
     try client.writeAll("GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n");
@@ -3697,14 +3633,13 @@ test "Context isTls and scheme reflect connection security" {
 
 test "server metrics snapshot and live Prometheus endpoint" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 2,
-    }) catch return;
+        .limits = .{ .maxConnections = 2 },
+    }) catch |err| return err;
     defer srv.deinit();
 
     try srv.router.get("/hello", helloHandler, .{});
@@ -3721,12 +3656,12 @@ test "server metrics snapshot and live Prometheus endpoint" {
             s.run();
         }
     };
-    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch |err| return err;
     defer t.join();
 
     // Make a request to /hello to populate metrics
     {
-        var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+        var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch |err| return err;
         defer client.close();
 
         try client.writeAll("GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n");
@@ -3744,7 +3679,7 @@ test "server metrics snapshot and live Prometheus endpoint" {
 
     // Now query /metrics endpoint
     {
-        var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+        var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch |err| return err;
         defer client.close();
 
         try client.writeAll("GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n");
@@ -3780,10 +3715,10 @@ test "server metrics snapshot and live Prometheus endpoint" {
 
 test "port zero allocates ephemeral port; strict rejects occupied port" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var first = Server.init(a, ctx.io, .{ .port = 0, .enableDocs = false }) catch return;
+    var first = Server.init(a, ctx.io, .{ .port = 0 }) catch |err| return err;
     defer first.deinit();
     const bound = first.localPort();
     try std.testing.expect(bound != 0);
@@ -3793,7 +3728,6 @@ test "port zero allocates ephemeral port; strict rejects occupied port" {
         .host = "127.0.0.1",
         .port = bound,
         .portStrategy = .strict,
-        .enableDocs = false,
     })) |s| {
         // Binding the loopback while the wildcard holds it may succeed on
         // some platforms; either outcome must leave a usable listener.
@@ -3807,8 +3741,7 @@ test "port zero allocates ephemeral port; strict rejects occupied port" {
         .port = bound,
         .portStrategy = .incremental,
         .maxPortAttempts = 8,
-        .enableDocs = false,
-    }) catch return;
+    }) catch |err| return err;
     defer second.deinit();
     try std.testing.expect(second.localPort() != 0);
 }
@@ -3845,12 +3778,11 @@ test "Server high-level HTTP/3 initialization and endpoint lifecycle" {
     var srv = try Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .http3 = true,
+        .protocols = .{ .http3 = true },
         .tls = .{
             .certificatePem = h3TestCertPem,
             .privateKeyPem = h3TestKeyPem,
         },
-        .enableDocs = false,
     });
     defer srv.deinit();
 
@@ -3875,12 +3807,11 @@ test "HTTP/3 endpoint reports the port HTTP/1.1 does not share" {
     var srv = try Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .http3 = true,
+        .protocols = .{ .http3 = true },
         .tls = .{
             .certificatePem = h3TestCertPem,
             .privateKeyPem = h3TestKeyPem,
         },
-        .enableDocs = false,
     });
     defer srv.deinit();
 
@@ -3892,67 +3823,85 @@ test "HTTP/3 endpoint reports the port HTTP/1.1 does not share" {
 
 test "Server shares one port number between HTTP/1.1 and HTTP/3 when the port is explicit" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
     // Probe with UDP, not TCP. Windows keeps the dynamic port ranges for TCP
     // and UDP separate, so a TCP-chosen port can land in a range the UDP
     // stack refuses to bind, which is exactly the port HTTP/3 needs.
-    const freePort = blk: {
-        var probe = udpMod.Socket.bind(ctx.io, 0) catch break :blk @as(u16, 0);
-        defer probe.close();
-        break :blk switch (probe.socket.address) {
+    var boundPort: ?u16 = null;
+    for (0..32) |_| {
+        var probe = try udpMod.Socket.bind(ctx.io, 0);
+        const candidate = switch (probe.socket.address) {
             .ip4 => |v| v.port,
             .ip6 => |v| v.port,
         };
-    };
-    if (freePort == 0) return;
+        probe.close();
 
-    var srv = Server.init(a, ctx.io, .{
-        .host = "127.0.0.1",
-        .port = freePort,
-        .portStrategy = .strict,
-        .http3 = true,
-        .tls = .{
-            .certificatePem = h3TestCertPem,
-            .privateKeyPem = h3TestKeyPem,
-        },
-        .enableDocs = false,
-    }) catch return;
-    defer srv.deinit();
-
-    try std.testing.expectEqual(freePort, srv.localPort());
-    try std.testing.expectEqual(freePort, srv.http3.port().?);
+        var srv = Server.init(a, ctx.io, .{
+            .host = "127.0.0.1",
+            .port = candidate,
+            .portStrategy = .strict,
+            .protocols = .{ .http3 = true },
+            .tls = .{
+                .certificatePem = h3TestCertPem,
+                .privateKeyPem = h3TestKeyPem,
+            },
+        }) catch |err| switch (err) {
+            error.AddressInUse => continue,
+            else => return err,
+        };
+        defer srv.deinit();
+        try std.testing.expectEqual(candidate, srv.localPort());
+        try std.testing.expectEqual(candidate, srv.http3.port().?);
+        boundPort = candidate;
+        break;
+    }
+    try std.testing.expect(boundPort != null);
 }
 
 test "explicit HTTP/3 port conflict fails instead of silently rebinding" {
     // An explicit port is a promise: if UDP cannot take it, init must fail
     // (and release the TCP listener), not move HTTP/3 somewhere else.
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var probe = udpMod.Socket.bind(ctx.io, 0) catch return;
-    defer probe.close();
-    const port = switch (probe.socket.address) {
-        .ip4 => |v| v.port,
-        .ip6 => |v| v.port,
-    };
-
+    var port: u16 = 0;
+    var udpProbe: ?udpMod.Socket = null;
+    var tcpProbe: ?tcp.Listener = null;
+    for (0..32) |_| {
+        var candidateUdp = try udpMod.Socket.bind(ctx.io, 0);
+        const candidate = switch (candidateUdp.socket.address) {
+            .ip4 => |v| v.port,
+            .ip6 => |v| v.port,
+        };
+        var addr = addressMod.Address.unspecified4(candidate);
+        const candidateTcp = tcp.Listener.bindAddress(ctx.io, &addr) catch |err| switch (err) {
+            error.AddressInUse => {
+                candidateUdp.close();
+                continue;
+            },
+        };
+        port = candidate;
+        udpProbe = candidateUdp;
+        tcpProbe = candidateTcp;
+        break;
+    }
+    try std.testing.expect(tcpProbe != null and udpProbe != null);
+    defer udpProbe.?.close();
+    tcpProbe.?.close(ctx.io);
     var addr = addressMod.Address.unspecified4(port);
-    var tcpProbe = tcp.Listener.bindAddress(ctx.io, &addr) catch return;
-    tcpProbe.close(ctx.io);
 
     try std.testing.expectError(error.AddressInUse, Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = port,
         .portStrategy = .strict,
-        .http3 = true,
+        .protocols = .{ .http3 = true },
         .tls = .{
             .certificatePem = h3TestCertPem,
             .privateKeyPem = h3TestKeyPem,
         },
-        .enableDocs = false,
     }));
 
     var rebound = tcp.Listener.bindAddress(ctx.io, &addr) catch return error.TcpPortLeaked;
@@ -3961,14 +3910,13 @@ test "explicit HTTP/3 port conflict fails instead of silently rebinding" {
 
 test "Server reports no HTTP/3 port when HTTP/3 is disabled" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
     var srv = Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
-    }) catch return;
+    }) catch |err| return err;
     defer srv.deinit();
 
     try std.testing.expectEqual(@as(?u16, null), srv.http3.port());
@@ -3976,16 +3924,15 @@ test "Server reports no HTTP/3 port when HTTP/3 is disabled" {
 
 test "trusted proxy rules gate forwarded headers" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
     var srv = Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
         .trustForwardedHeaders = true,
         .trustedProxies = &.{ "10.0.0.0/8", "::1" },
-    }) catch return;
+    }) catch |err| return err;
     defer srv.deinit();
 
     try std.testing.expect(srv.trustForwardedFor("10.1.2.3"));
@@ -4003,7 +3950,7 @@ test "trusted proxy rules gate forwarded headers" {
 
 test "direct clients cannot spoof the remote address through forwarded headers" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
     const H = struct {
@@ -4018,11 +3965,10 @@ test "direct clients cannot spoof the remote address through forwarded headers" 
     var srv = Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 2,
+        .limits = .{ .maxConnections = 2 },
         .trustForwardedHeaders = true,
         .trustedProxies = &.{"10.0.0.1"},
-    }) catch return;
+    }) catch |err| return err;
     defer srv.deinit();
     try srv.router.get("/", H.handle, .{});
 
@@ -4031,10 +3977,10 @@ test "direct clients cannot spoof the remote address through forwarded headers" 
             s.run();
         }
     };
-    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch |err| return err;
     defer t.join();
 
-    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch |err| return err;
     defer client.close();
     try client.writeAll("GET / HTTP/1.1\r\nHost: x\r\nX-Forwarded-For: 203.0.113.9\r\nX-Real-IP: 203.0.113.9\r\nConnection: close\r\n\r\n");
 
@@ -4052,7 +3998,7 @@ test "direct clients cannot spoof the remote address through forwarded headers" 
 
 test "trusted proxies resolve the rightmost client address" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
     const H = struct {
@@ -4067,11 +4013,10 @@ test "trusted proxies resolve the rightmost client address" {
     var srv = Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 2,
+        .limits = .{ .maxConnections = 2 },
         .trustForwardedHeaders = true,
         .trustedProxies = &.{"127.0.0.1"},
-    }) catch return;
+    }) catch |err| return err;
     defer srv.deinit();
     try srv.router.get("/", H.handle, .{});
 
@@ -4080,10 +4025,10 @@ test "trusted proxies resolve the rightmost client address" {
             s.run();
         }
     };
-    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch |err| return err;
     defer t.join();
 
-    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch |err| return err;
     defer client.close();
     try client.writeAll("GET / HTTP/1.1\r\nHost: x\r\nX-Forwarded-For: 203.0.113.9, 198.51.100.7\r\nConnection: close\r\n\r\n");
 

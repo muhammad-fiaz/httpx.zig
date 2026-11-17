@@ -39,7 +39,7 @@ when the TCP-chosen ephemeral port is rejected for UDP. Dial
 
 ```zig
 var server = try httpx.Server.init(allocator, io, .{
-    .http3 = true,
+    .protocols = .{ .http3 = true },
     .tls = .{ .certificatePem = certPem, .privateKeyPem = keyPem },
 });
 const port = server.http3.port() orelse return error.Http3Disabled;

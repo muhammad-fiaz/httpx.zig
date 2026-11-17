@@ -24,8 +24,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 1,
+        .limits = .{ .maxConnections = 1 },
     });
     defer server.deinit();
 
@@ -35,7 +34,6 @@ pub fn main() !void {
         .mount = "/static",
         .indexFile = "index.html",
     });
-    defer httpx.static.files.unregister();
 
     // Start server on a background thread
     const port = server.localPort();

@@ -12,7 +12,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const configCoerce = @import("../../common/configCoerce.zig");
+const z = @import("zigantic");
 const frameMod = @import("frame.zig");
 const qpackMod = @import("qpack.zig");
 const varint = @import("../quic/varint.zig");
@@ -224,13 +224,14 @@ pub fn buildQpackDecoderStreamPrefix(allocator: Allocator) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
-pub const PeerSettings = struct {
-    maxFieldSectionSize: u64 = 16384,
-    qpackMaxTableCapacity: u64 = 0,
-    qpackBlockedStreams: u64 = 0,
-    enableConnectProtocol: u64 = 0,
-    h3Datagram: u64 = 0,
-};
+const PeerSettingsSchema = z.objectOf(.{
+    .maxFieldSectionSize = z.withDefault(z.integer(u64, .{}), 16384),
+    .qpackMaxTableCapacity = z.withDefault(z.integer(u64, .{}), 0),
+    .qpackBlockedStreams = z.withDefault(z.integer(u64, .{}), 0),
+    .enableConnectProtocol = z.withDefault(z.integer(u64, .{}), 0),
+    .h3Datagram = z.withDefault(z.integer(u64, .{}), 0),
+}, .{});
+pub const PeerSettings = PeerSettingsSchema.Value;
 
 /// Canonical settings type (re-exported as `httpx.http3.Settings`).
 pub const Settings = PeerSettings;
@@ -319,12 +320,12 @@ pub const Connection = struct {
 
     /// Connection configuration. One inline `.{}`: `.role` selects the
     /// initiating or responding side; `.client` is the default.
-    pub const Config = struct {
-        role: Role = .client,
-    };
+    pub const ConfigSchema = z.objectOf(.{
+        .role = z.withDefault(z.enumType(Role, .{}), .client),
+    }, .{});
+    pub const Config = ConfigSchema.Value;
 
-    pub fn init(allocator: Allocator, cfg_in: anytype) Connection {
-        const cfg = configCoerce.to(Config, cfg_in);
+    pub fn init(allocator: Allocator, cfg: Config) Connection {
         const role = cfg.role;
         const initiatorBit: u64 = if (role == .client) 0 else 1;
         var self = Connection{
@@ -1469,7 +1470,7 @@ test "request stream builds decodable request headers" {
     var qenc = qpackMod.Encoder.init(a);
     defer qenc.deinit();
     var rs = RequestStream{ .id = 0, .allocator = a, .qpack = &qenc };
-    const headers = [_]qpackMod.FieldLine{.{ .name = "user-agent", .value = versionInfo.userAgent }};
+    const headers = [_]qpackMod.FieldLine{.{ .name = "user-agent", .value = "httpx/" ++ versionInfo.defaultInfo.version }};
     const encoded = try rs.buildRequestHeaders("GET", "https", "example.test", "/", &headers);
     defer a.free(encoded);
 

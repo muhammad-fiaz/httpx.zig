@@ -15,7 +15,7 @@ try server.get("/", homeHandler);
 try server.get("/about", aboutHandler);
 
 // Static assets with ETag + conditional GET.
-try server.static("/static", "./public");
+try server.static(.{ .mount = "/static", .root = "./public" });
 ```
 
 MIME types resolve through the shared table (`httpx.mime.fromPath`), and

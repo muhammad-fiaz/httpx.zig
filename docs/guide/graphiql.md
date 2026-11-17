@@ -12,20 +12,19 @@ served beneath the configured route.
 ## Configure GraphiQL
 
 ```zig
-var server = try httpx.Server.init(allocator, io, .{
-    .enableDocs = true,
-    .docs = .{
-        .graphiql = .{
-            .enabled = true,
-            .route = "/explorer",
-            .graphqlEndpoint = "/api/graphql",
-            .title = "Users GraphQL",
-            .defaultQuery = "{ me { id name } }",
-            .editorTheme = "vs-dark",
-            .headers = .{ .authorization = "Bearer token" },
-        },
+var server = try httpx.Server.init(allocator, io, .{});
+try httpx.docs.mount(&server, .{
+    .graphiql = .{
+        .enabled = true,
+        .route = "/explorer",
+        .graphqlEndpoint = "/api/graphql",
+        .title = "Users GraphQL",
+        .defaultQuery = "{ me { id name } }",
+        .editorTheme = "vs-dark",
+        .headers = .{ .authorization = "Bearer token" },
     },
 });
+defer httpx.docs.unmount(&server);
 defer server.deinit();
 ```
 

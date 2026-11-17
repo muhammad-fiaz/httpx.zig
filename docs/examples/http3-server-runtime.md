@@ -1,13 +1,12 @@
 # HTTP/3 Server Runtime Example
 
-HTTP/3 server routes with the high-level server runtime (`.http3 = true`).
+HTTP/3 server routes with the high-level server runtime (`.protocols = .{ .http3 = true }`).
 
 ```zig
 var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 0,
-    .http3 = true,
-    .http2 = false,
+    .protocols = .{ .http3 = true, .http2 = false },
 });
 defer server.deinit();
 

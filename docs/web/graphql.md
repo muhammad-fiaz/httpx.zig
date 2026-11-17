@@ -68,8 +68,7 @@ tag name on the wire (`"ADMIN"`), never an ordinal.
 ## Server schema and execution
 
 Build the schema with the same explicit allocator/`io`, then mount it on the
-server. The server owns the mount and removes it in `deinit`; GraphiQL is
-served by the documentation mount, which points at the same endpoint:
+server. GraphiQL is optional and mounted explicitly after the schema routes:
 
 ```zig
 const std = @import("std");
@@ -83,20 +82,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{
-        .port = 8080,
-        .enableDocs = true,
-        .docs = .{
-            .graphiql = .{
-                .enabled = true,
-                .route = "/graphiql",
-                .graphqlEndpoint = graphqlEndpoint,
-                .title = "GraphiQL IDE",
-                .defaultQuery = "{ me { id name role } }",
-                .editorTheme = "vs-dark",
-            },
-        },
-    });
+    var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
     defer server.deinit();
 
     try server.graphql(.{
@@ -108,6 +94,17 @@ pub fn main() !void {
         .introspection = true,
         .endpoint = graphqlEndpoint,
     });
+
+    try httpx.docs.mount(&server, .{
+        .graphiql = .{
+            .route = "/graphiql",
+            .graphqlEndpoint = graphqlEndpoint,
+            .title = "GraphiQL IDE",
+            .defaultQuery = "{ me { id name role } }",
+            .editorTheme = "vs-dark",
+        },
+    });
+    defer httpx.docs.unmount(&server);
 
     server.run();
 }

@@ -31,31 +31,21 @@ const Response = routerMod.Response;
 const Method = @import("../../common/method.zig").Method;
 const mime = @import("../../common/mime.zig");
 const contentNegotiation = @import("../../common/contentNegotiation.zig");
+const z = @import("zigantic");
 
-pub const Config = struct {
-    /// Filesystem root served under `mount`.
-    root: []const u8 = "public",
-    /// URL prefix, e.g. "/assets" or "/".
-    mount: []const u8 = "/",
-    /// Served when a directory is requested.
-    indexFile: []const u8 = "index.html",
-    /// Hard cap on bytes buffered into memory per response.
-    maxFileSize: usize = 16 * 1024 * 1024,
-    /// Cache-Control on success responses; empty omits the header.
-    cacheControl: []const u8 = "public, max-age=3600",
-    /// Live reload / hot reload: automatically injects SSE live-reload script into HTML files.
-    liveReload: bool = false,
-    /// SSE endpoint path for live-reload broadcast (default: "/__httpx_liveReload").
-    reloadSsePath: []const u8 = "/__httpx_liveReload",
-    /// SPA fallback file (e.g. "index.html") when requested path does not exist on disk.
-    spaFallback: ?[]const u8 = null,
-    /// URL prefixes that must NEVER fall back to the SPA entry file (e.g. &[_][]const u8{"/api", "/auth"}).
-    spaExcludePrefixes: []const []const u8 = &.{},
-    /// Serve from the embedded asset registry only; never touch the
-    /// filesystem. Used for single-executable production deployments where
-    /// the source directory may not exist at runtime.
-    filesystem: bool = true,
-};
+const ConfigSchema = z.objectOf(.{
+    .root = z.withDefault(z.string(.{ .min = 1 }), "public"),
+    .mount = z.withDefault(z.string(.{ .min = 1, .prefix = "/" }), "/"),
+    .indexFile = z.withDefault(z.string(.{ .min = 1 }), "index.html"),
+    .maxFileSize = z.withDefault(z.nonNegativeInt(usize, .{}), 16 * 1024 * 1024),
+    .cacheControl = z.withDefault(z.string(.{}), "public, max-age=3600"),
+    .liveReload = z.withDefault(z.boolean(.{}), false),
+    .reloadSsePath = z.withDefault(z.string(.{ .min = 1, .prefix = "/" }), "/__httpx_liveReload"),
+    .spaFallback = z.optional(z.string(.{ .min = 1 })),
+    .spaExcludePrefixes = z.withDefault(z.array(z.string(.{ .min = 1, .prefix = "/" }), .{}), &.{}),
+    .filesystem = z.withDefault(z.boolean(.{}), true),
+}, .{});
+pub const Config = ConfigSchema.Value;
 
 pub const MountError = error{
     InvalidMount,
@@ -129,8 +119,10 @@ fn normalizeDir(a: Allocator, dir: []const u8) ![]u8 {
 
 /// Registers GET routes for `mount` itself and `mount/*path`.
 pub fn register(router: *routerMod.Router, cfg: Config) MountError!void {
-    if (cfg.root.len == 0 or cfg.mount.len == 0 or cfg.mount[0] != '/')
+    var scratch: [4096]u8 = undefined;
+    const issue = z.checkFirst(ConfigSchema, cfg, &scratch, .{}) catch
         return MountError.InvalidMount;
+    if (issue != null) return MountError.InvalidMount;
 
     const allocator = router.allocator;
     const base = trimSlashes(cfg.mount);
@@ -139,8 +131,11 @@ pub fn register(router: *routerMod.Router, cfg: Config) MountError!void {
     else
         std.fmt.allocPrint(allocator, "/{s}", .{base}) catch return MountError.OutOfMemory;
     defer if (base.len != 0) allocator.free(@constCast(p1));
-    const p2 = std.fmt.allocPrint(allocator, "/{s}/*path", .{base}) catch return MountError.OutOfMemory;
-    defer allocator.free(p2);
+    const p2: []const u8 = if (base.len == 0)
+        "/*path"
+    else
+        std.fmt.allocPrint(allocator, "/{s}/*path", .{base}) catch return MountError.OutOfMemory;
+    defer if (base.len != 0) allocator.free(@constCast(p2));
 
     // Validate first so registration failure is atomic.
     if (router.hasConflict(.GET, p1) or router.hasConflict(.GET, p2))
@@ -166,6 +161,19 @@ pub fn register(router: *routerMod.Router, cfg: Config) MountError!void {
         st.destroy();
         return MountError.OutOfMemory;
     };
+}
+
+test "root static mount registers a catch-all route at one slash" {
+    var router = routerMod.Router.init(std.testing.allocator, .{});
+    defer router.deinit();
+
+    try register(&router, .{ .root = ".", .mount = "/", .filesystem = false });
+    try std.testing.expect(router.hasConflict(.GET, "/"));
+
+    var ctx = Context{ .allocator = std.testing.allocator, .method = .GET };
+    const entry = router.matchEntry(.GET, "/assets/app.css", &ctx);
+    try std.testing.expect(entry != null);
+    try std.testing.expectEqualStrings("assets/app.css", ctx.param("path").?);
 }
 
 // handlers
@@ -379,7 +387,6 @@ fn readOpenedRange(io: std.Io, file: std.Io.File, offset: u64, dest: []u8) !void
     const n = try file.readPositionalAll(io, dest, offset);
     if (n != dest.len) return error.UnexpectedEof;
 }
-
 
 pub fn statPath(path: []const u8) ?FileMeta {
     const st = fsMod.statPath(path) orelse return null;

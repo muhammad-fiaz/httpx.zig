@@ -6,6 +6,7 @@
 //! handled explicitly by the connection layer.
 
 const std = @import("std");
+const z = @import("zigantic");
 const Allocator = std.mem.Allocator;
 const varint = @import("varint.zig");
 
@@ -38,20 +39,21 @@ pub const ParamId = enum(u64) {
 };
 
 /// Numeric parameter set with RFC defaults for absent entries.
-pub const Params = struct {
-    maxIdleTimeoutMs: u64 = 0, // 0 = disabled
-    maxUdpPayloadSize: u64 = 65527,
-    initialMaxData: u64 = 0,
-    initialMaxStreamDataBidiLocal: u64 = 0,
-    initialMaxStreamDataBidiRemote: u64 = 0,
-    initialMaxStreamDataUni: u64 = 0,
-    initialMaxStreamsBidi: u64 = 0,
-    initialMaxStreamsUni: u64 = 0,
-    ackDelayExponent: u64 = 3,
-    maxAckDelayMs: u64 = 25,
-    disableActiveMigration: bool = false,
-    activeConnectionIdLimit: u64 = 2,
-};
+const ParamsSchema = z.objectOf(.{
+    .maxIdleTimeoutMs = z.withDefault(z.integer(u64, .{}), 0), // 0 = disabled
+    .maxUdpPayloadSize = z.withDefault(z.integer(u64, .{ .min = 1200, .max = 65527 }), 65527),
+    .initialMaxData = z.withDefault(z.integer(u64, .{}), 0),
+    .initialMaxStreamDataBidiLocal = z.withDefault(z.integer(u64, .{}), 0),
+    .initialMaxStreamDataBidiRemote = z.withDefault(z.integer(u64, .{}), 0),
+    .initialMaxStreamDataUni = z.withDefault(z.integer(u64, .{}), 0),
+    .initialMaxStreamsBidi = z.withDefault(z.integer(u64, .{}), 0),
+    .initialMaxStreamsUni = z.withDefault(z.integer(u64, .{}), 0),
+    .ackDelayExponent = z.withDefault(z.integer(u64, .{ .max = 20 }), 3),
+    .maxAckDelayMs = z.withDefault(z.integer(u64, .{}), 25),
+    .disableActiveMigration = z.withDefault(z.boolean(.{}), false),
+    .activeConnectionIdLimit = z.withDefault(z.integer(u64, .{ .min = 2 }), 2),
+}, .{});
+pub const Params = ParamsSchema.Value;
 
 fn putParam(out: *std.ArrayList(u8), gpa: Allocator, id: u64, valueBytes: []const u8) !void {
     try putV(out, gpa, id);
@@ -202,12 +204,13 @@ pub fn decode(data: []const u8) Error!Params {
 
 /// Byte-carrying transport parameters (connection IDs and tokens),
 /// borrowed from the block. Absent entries are null.
-pub const CidParams = struct {
-    originalDestinationConnectionId: ?[]const u8 = null,
-    initialSourceConnectionId: ?[]const u8 = null,
-    retrySourceConnectionId: ?[]const u8 = null,
-    statelessResetToken: ?[]const u8 = null,
-};
+const CidParamsSchema = z.objectOf(.{
+    .originalDestinationConnectionId = z.optional(z.string(.{})),
+    .initialSourceConnectionId = z.optional(z.string(.{})),
+    .retrySourceConnectionId = z.optional(z.string(.{})),
+    .statelessResetToken = z.optional(z.string(.{})),
+}, .{});
+pub const CidParams = CidParamsSchema.Value;
 
 /// Extracts the byte-carrying parameters, validating lengths and
 /// duplicates. Unknown IDs are skipped; numeric validation stays in

@@ -10,17 +10,18 @@
 //!   - RFC 9112 Section 9.3 — Expect-Continue
 
 const std = @import("std");
+const z = @import("zigantic");
 
 // Limits (configurable; parser.zig defaults derive from these)
 
-pub const Limits = struct {
-    maxHeaders: usize = 128,
-    maxNameLen: usize = 256,
-    maxValueLen: usize = 8192,
-    /// Total bytes across all header lines (excluding CRLFs).
-    maxHeaderBytes: usize = 32 * 1024,
-    maxBodyBytes: usize = 64 * 1024 * 1024,
-};
+const LimitsSchema = z.objectOf(.{
+    .maxHeaders = z.withDefault(z.positiveInt(usize, .{}), 128),
+    .maxNameLen = z.withDefault(z.positiveInt(usize, .{}), 256),
+    .maxValueLen = z.withDefault(z.positiveInt(usize, .{}), 8192),
+    .maxHeaderBytes = z.withDefault(z.positiveInt(usize, .{}), 32 * 1024),
+    .maxBodyBytes = z.withDefault(z.nonNegativeInt(usize, .{}), 64 * 1024 * 1024),
+}, .{});
+pub const Limits = LimitsSchema.Value;
 
 pub const defaultLimits = Limits{};
 
@@ -146,7 +147,7 @@ pub fn validRequestTargetAndHost(
         if (uri.userinfo.len != 0) return false;
         const hostAuth = parseMod.parseAuthority(hostValue) orelse return false;
         if (!std.ascii.eqlIgnoreCase(hostAuth.host, uri.host)) return false;
-        const uriPort = uri.effectivePort();
+        const uriPort = uriMod.effectivePort(&uri);
         const hostPort = hostAuth.port orelse uriMod.defaultPort(uri.scheme);
         if (uriPort != hostPort) return false;
     }

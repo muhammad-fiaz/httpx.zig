@@ -16,16 +16,15 @@ pub fn main() !void {
 
     var server = try httpx.Server.init(allocator, io, .{
         .port = 8080,
-        .enableDocs = true,
-        .docs = .{
-            .title = "Inventory API",
-            .version = "1.0.0",
-            .description = "Automated OpenAPI generation with HTTPX",
-        },
     });
     defer server.deinit();
-
     try server.get("/api/items", itemsHandler);
+    try httpx.docs.mount(&server, .{
+        .title = "Inventory API",
+        .version = "1.0.0",
+        .description = "Automated OpenAPI generation with HTTPX",
+    });
+    defer httpx.docs.unmount(&server);
 
     server.run();
 }

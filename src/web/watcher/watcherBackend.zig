@@ -12,6 +12,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const clock = @import("../../common/clock.zig");
+const z = @import("zigantic");
 const sync = @import("../../common/sync.zig");
 const fsMod = @import("../../utils/fs.zig");
 const events = @import("watcherEvents.zig");
@@ -61,26 +62,46 @@ pub const WatcherStatus = enum {
 
 pub const StatusCallback = *const fn (status: WatcherStatus, detail: ?[]const u8, userData: ?*anyopaque) void;
 
-pub const Config = struct {
-    dirPath: []const u8 = "",
-    extensions: []const []const u8 = &.{},
-    pollIntervalMs: u64 = 50,
-    debounceMs: i64 = 50,
-    mode: BackendMode = .auto,
-    allowFallback: bool = true,
-    recursive: bool = true,
-    /// Directory names pruned from the walk at any depth (generated trees).
-    /// Empty disables pruning.
-    ignoredDirs: []const []const u8 = &.{ "node_modules", ".git", ".zig-cache", "zig-out", "zig-pkg", ".cache", "dist" },
-    /// Callback triggered when a file modification is detected.
-    onChange: ?*const fn (event: WatchEvent, userData: ?*anyopaque) void = null,
-    /// Callback triggered on status / lifecycle transitions (e.g. backend selection, overflow, fallback).
-    onStatus: ?StatusCallback = null,
-    userData: ?*anyopaque = null,
-    /// Bounds for runaway trees (symlink cycles, huge monorepos).
-    maxFiles: usize = 100_000,
-    maxDepth: usize = 32,
-};
+const ConfigSchema = z.objectOf(.{
+    .dirPath = z.withDefault(z.string(.{}), ""),
+    .extensions = z.withDefault(z.array(z.string(.{}), .{}), &.{}),
+    .pollIntervalMs = z.withDefault(z.positiveInt(u64, .{}), 50),
+    .debounceMs = z.withDefault(z.nonNegativeInt(i64, .{}), 50),
+    .mode = z.withDefault(z.enumType(BackendMode, .{}), .auto),
+    .allowFallback = z.withDefault(z.boolean(.{}), true),
+    .recursive = z.withDefault(z.boolean(.{}), true),
+    .ignoredDirs = z.withDefault(z.array(z.string(.{}), .{}), &.{ "node_modules", ".git", ".zig-cache", "zig-out", "zig-pkg", ".cache", "dist" }),
+    .onChange = z.withDefault(z.custom(?*const fn (event: WatchEvent, userData: ?*anyopaque) void, .{
+        .check = struct {
+            fn accept(_: ?*const fn (event: WatchEvent, userData: ?*anyopaque) void) bool {
+                return true;
+            }
+        }.accept,
+    }), null),
+    .onStatus = z.withDefault(z.custom(?StatusCallback, .{
+        .check = struct {
+            fn accept(_: ?StatusCallback) bool {
+                return true;
+            }
+        }.accept,
+    }), null),
+    .userData = z.withDefault(z.custom(?*anyopaque, .{
+        .check = struct {
+            fn accept(_: ?*anyopaque) bool {
+                return true;
+            }
+        }.accept,
+    }), null),
+    .maxFiles = z.withDefault(z.positiveInt(usize, .{}), 100_000),
+    .maxDepth = z.withDefault(z.positiveInt(usize, .{}), 32),
+}, .{});
+pub const Config = ConfigSchema.Value;
+
+const configSchema = z.object(Config, .{
+    .pollIntervalMs = z.positiveInt(u64, .{}),
+    .maxFiles = z.positiveInt(usize, .{}),
+    .maxDepth = z.positiveInt(usize, .{}),
+}, .{});
 
 const hasNative = builtin.os.tag == .windows or builtin.os.tag == .linux or builtin.os.tag == .macos or
     builtin.os.tag == .freebsd or builtin.os.tag == .openbsd or builtin.os.tag == .netbsd or builtin.os.tag == .dragonfly;
@@ -125,6 +146,10 @@ pub const Watcher = struct {
     externalsCheckedMs: i64 = 0,
 
     pub fn init(allocator: Allocator, io: std.Io, config: Config) !*Watcher {
+        var scratch: [4096]u8 = undefined;
+        const issue = z.checkFirst(ConfigSchema, config, &scratch, .{}) catch
+            return error.InvalidConfig;
+        if (issue != null) return error.InvalidConfig;
         const w = try allocator.create(Watcher);
         w.* = .{
             .allocator = allocator,
@@ -322,16 +347,15 @@ pub const Watcher = struct {
         if (!self.coalescer.shouldEmit(now, path, kind)) return;
         _ = self._change_count.fetchAdd(1, .release);
 
-        const ownedPath = self.allocator.dupe(u8, path) catch return;
-        const ownedOld = if (oldPath) |op| (self.allocator.dupe(u8, op) catch null) else null;
-        const ev = OwnedWatchEvent{
-            .path = ownedPath,
-            .oldPath = ownedOld,
-            .kind = kind,
-            .strategy = ReloadStrategy.forPath(path),
-            .isDirectory = isDir,
-            .timestampMs = clock.millisNow(self.io),
-        };
+        const ev = OwnedWatchEvent.init(
+            self.allocator,
+            path,
+            oldPath,
+            kind,
+            ReloadStrategy.forPath(path),
+            isDir,
+            clock.millisNow(self.io),
+        ) catch return;
 
         if (self.eventQueue.items.len >= 1024) {
             var dropped = self.eventQueue.orderedRemove(0);
@@ -354,18 +378,15 @@ pub const Watcher = struct {
     /// shared.
     fn enqueueCallback(self: *Watcher, ev: OwnedWatchEvent) void {
         if (self.config.onChange == null) return;
-        const path = self.allocator.dupe(u8, ev.path) catch return;
-        errdefer self.allocator.free(path);
-        const oldPath: ?[]u8 = if (ev.oldPath) |op| (self.allocator.dupe(u8, op) catch null) else null;
-
-        const copy = OwnedWatchEvent{
-            .path = path,
-            .oldPath = oldPath,
-            .kind = ev.kind,
-            .strategy = ev.strategy,
-            .isDirectory = ev.isDirectory,
-            .timestampMs = ev.timestampMs,
-        };
+        const copy = OwnedWatchEvent.init(
+            self.allocator,
+            ev.event.path,
+            ev.event.oldPath,
+            ev.event.kind,
+            ev.event.strategy,
+            ev.event.isDirectory,
+            ev.event.timestampMs,
+        ) catch return;
         self.callbackMutex.lock();
         defer self.callbackMutex.unlock();
         if (self.callbackQueue.items.len >= 1024) {
@@ -1042,18 +1063,15 @@ pub const Watcher = struct {
     fn emitRenameLocked(self: *Watcher, oldPath: []const u8, newPath: []const u8) void {
         const now = clock.millisNow(self.io);
         _ = self._change_count.fetchAdd(1, .release);
-        const ownedPath = self.allocator.dupe(u8, newPath) catch return;
-        const ownedOld = self.allocator.dupe(u8, oldPath) catch {
-            self.allocator.free(ownedPath);
-            return;
-        };
-        const ev = OwnedWatchEvent{
-            .path = ownedPath,
-            .oldPath = ownedOld,
-            .kind = .renamed,
-            .strategy = ReloadStrategy.forPath(newPath),
-            .timestampMs = now,
-        };
+        const ev = OwnedWatchEvent.init(
+            self.allocator,
+            newPath,
+            oldPath,
+            .renamed,
+            ReloadStrategy.forPath(newPath),
+            false,
+            now,
+        ) catch return;
         if (self.eventQueue.items.len >= 1024) {
             var dropped = self.eventQueue.orderedRemove(0);
             dropped.deinit(self.allocator);
@@ -1194,10 +1212,10 @@ test "scan prunes ignored directories instead of only filtering their files" {
     defer a.free(droppedPath);
 
     const cwd: std.Io.Dir = .cwd();
-    cwd.createDir(io, ".zig-cache", .default_dir) catch {};
-    cwd.createDir(io, root, .default_dir) catch {};
-    cwd.createDir(io, modulesPath, .default_dir) catch {};
-    cwd.createDir(io, pkgPath, .default_dir) catch {};
+    cwd.createDir(io, ".zig-cache", .default_dir) catch |err| if (err != error.PathAlreadyExists) return err;
+    cwd.createDir(io, root, .default_dir) catch |err| if (err != error.PathAlreadyExists) return err;
+    cwd.createDir(io, modulesPath, .default_dir) catch |err| if (err != error.PathAlreadyExists) return err;
+    cwd.createDir(io, pkgPath, .default_dir) catch |err| if (err != error.PathAlreadyExists) return err;
     defer cleanupTestDir(io, root);
 
     try fsMod.writeFile(keptPath, "keep");
@@ -1235,8 +1253,8 @@ test "the initial scan reports nothing to observers" {
     const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-baseline-{d}", .{clock.millisNow(std.Io.Threaded.global_single_threaded.io())});
     {
         const cwd: std.Io.Dir = .cwd();
-        cwd.createDir(io, ".zig-cache", .default_dir) catch {};
-        cwd.createDir(io, root, .default_dir) catch {};
+        cwd.createDir(io, ".zig-cache", .default_dir) catch |err| if (err != error.PathAlreadyExists) return err;
+        cwd.createDir(io, root, .default_dir) catch |err| if (err != error.PathAlreadyExists) return err;
     }
     defer cleanupTestDir(io, root);
 
@@ -1352,8 +1370,8 @@ test "native backend produces real filesystem events" {
     const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-native-{d}", .{clock.millisNow(std.Io.Threaded.global_single_threaded.io())});
     {
         const cwd: std.Io.Dir = .cwd();
-        cwd.createDir(io, ".zig-cache", .default_dir) catch {};
-        cwd.createDir(io, root, .default_dir) catch {};
+        cwd.createDir(io, ".zig-cache", .default_dir) catch |err| if (err != error.PathAlreadyExists) return err;
+        cwd.createDir(io, root, .default_dir) catch |err| if (err != error.PathAlreadyExists) return err;
     }
     defer cleanupTestDir(io, root);
 
@@ -1390,8 +1408,8 @@ test "rename pairing survives atomic save patterns" {
     const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-rename-{d}", .{clock.millisNow(std.Io.Threaded.global_single_threaded.io())});
     {
         const cwd: std.Io.Dir = .cwd();
-        cwd.createDir(io, ".zig-cache", .default_dir) catch {};
-        cwd.createDir(io, root, .default_dir) catch {};
+        cwd.createDir(io, ".zig-cache", .default_dir) catch |err| if (err != error.PathAlreadyExists) return err;
+        cwd.createDir(io, root, .default_dir) catch |err| if (err != error.PathAlreadyExists) return err;
     }
     defer cleanupTestDir(io, root);
 
@@ -1438,8 +1456,8 @@ test "reconcileDir pairs renames from stat-walk diffs" {
     const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-reconcile-{d}", .{clock.millisNow(std.Io.Threaded.global_single_threaded.io())});
     {
         const cwd: std.Io.Dir = .cwd();
-        cwd.createDir(io, ".zig-cache", .default_dir) catch {};
-        cwd.createDir(io, root, .default_dir) catch {};
+        cwd.createDir(io, ".zig-cache", .default_dir) catch |err| if (err != error.PathAlreadyExists) return err;
+        cwd.createDir(io, root, .default_dir) catch |err| if (err != error.PathAlreadyExists) return err;
     }
     defer cleanupTestDir(io, root);
 
@@ -1566,8 +1584,8 @@ test "stop joins the worker so no callback outlives the watcher" {
     const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-stop-{d}", .{clock.millisNow(std.Io.Threaded.global_single_threaded.io())});
     {
         const cwd: std.Io.Dir = .cwd();
-        cwd.createDir(io, ".zig-cache", .default_dir) catch {};
-        cwd.createDir(io, root, .default_dir) catch {};
+        cwd.createDir(io, ".zig-cache", .default_dir) catch |err| if (err != error.PathAlreadyExists) return err;
+        cwd.createDir(io, root, .default_dir) catch |err| if (err != error.PathAlreadyExists) return err;
     }
     defer cleanupTestDir(io, root);
 
@@ -1640,8 +1658,8 @@ test "polling scan detects directory creation and deletion" {
     const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-dir-{d}", .{clock.millisNow(std.Io.Threaded.global_single_threaded.io())});
     {
         const cwd: std.Io.Dir = .cwd();
-        cwd.createDir(io, ".zig-cache", .default_dir) catch {};
-        cwd.createDir(io, root, .default_dir) catch {};
+        cwd.createDir(io, ".zig-cache", .default_dir) catch |err| if (err != error.PathAlreadyExists) return err;
+        cwd.createDir(io, root, .default_dir) catch |err| if (err != error.PathAlreadyExists) return err;
     }
     defer cleanupTestDir(io, root);
 
@@ -1696,8 +1714,8 @@ test "polling scan pairs renames when file size and mtime match" {
     const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-poll-rename-{d}", .{clock.millisNow(std.Io.Threaded.global_single_threaded.io())});
     {
         const cwd: std.Io.Dir = .cwd();
-        cwd.createDir(io, ".zig-cache", .default_dir) catch {};
-        cwd.createDir(io, root, .default_dir) catch {};
+        cwd.createDir(io, ".zig-cache", .default_dir) catch |err| if (err != error.PathAlreadyExists) return err;
+        cwd.createDir(io, root, .default_dir) catch |err| if (err != error.PathAlreadyExists) return err;
     }
     defer cleanupTestDir(io, root);
 

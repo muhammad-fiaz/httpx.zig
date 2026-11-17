@@ -53,7 +53,6 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
     });
     defer server.deinit();
     try server.router.add(.GET, "/bytes/90", bytesHandler, .{});
@@ -68,13 +67,17 @@ pub fn main() !void {
     var urlBuf: [64]u8 = undefined;
     const sampleUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/bytes/90", .{port});
 
+    // The observer must outlive the download call: `userData` is an
+    // opaque pointer the progress callback casts back to this type.
+    var observer = DownloadObserver{ .taskId = 101 };
+
     _ = client.download(
         sampleUrl,
         .{
             .path = "downloads/observed_download.bin",
             .progress = .custom,
             .onProgress = DownloadObserver.onProgress,
-            .userData = &.{ .taskId = 101 },
+            .userData = &observer,
             .createDirs = true,
         },
     ) catch |err| {

@@ -25,7 +25,7 @@ var server = try httpx.Server.init(allocator, io, .{
     .templates = .{ .enabled = true },
 });
 
-try server.static("/", "examples/static"); // served from memory
+try server.static(.{ .mount = "/", .root = "examples/static", .filesystem = false }); // served from memory
 try server.get("/hello", hello);           // ctx.render("greet.html", ...) from memory
 ```
 
@@ -56,7 +56,7 @@ browser live reload:
 
 ```zig
 var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
-try server.static("/", "examples/static"); // ETag + conditional GET included
+try server.static(.{ .mount = "/", .root = "examples/static" }); // ETag + conditional GET included
 ```
 
 Full runnable demo: `zig build run-static-site`.

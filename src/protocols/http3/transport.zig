@@ -22,6 +22,18 @@
 //! external server `peer` is null and only our socket is pumped.
 
 const std = @import("std");
+const z = @import("zigantic");
+
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
+
 const Allocator = std.mem.Allocator;
 const quicConn = @import("../quic/connection.zig");
 const quicEp = @import("../quic/transport.zig");
@@ -34,6 +46,7 @@ const transportTls = @import("../tls/tlsTransport.zig");
 const tlsSession = @import("../tls/tlsSession.zig");
 const bodySourceMod = @import("../../common/bodySource.zig");
 const semanticsMod = @import("../http1/semantics.zig");
+const headersMod = @import("../../common/headers.zig");
 pub const BodySource = bodySourceMod.BodySource;
 pub const SliceReader = bodySourceMod.SliceReader;
 pub const CallbackReader = bodySourceMod.CallbackReader;
@@ -50,7 +63,7 @@ pub const Error = error{
     OutOfMemory,
 };
 
-pub const Header = struct { name: []const u8, value: []const u8 };
+pub const Header = headersMod.Header;
 
 pub const H3Response = struct {
     status: u16,
@@ -750,17 +763,18 @@ pub const PooledConn = struct {
     id: usize,
     handshakeCount: u32 = 1,
 
-    pub const ConnectOptions = struct {
-        verify: transportTls.VerifyMode = .caBundle,
-        caPem: ?[]const u8 = null,
-        session: ?*const tlsSession.ClientSession = null,
-        earlyData: bool = false,
-        sessionOut: ?*tlsSession.ClientSession = null,
-        timeoutMs: u64 = 30_000,
-        /// QUIC transport parameters. `.{}` uses the protocol defaults
-        /// supplied by `quic.Connection.Config`.
-        quic: quicConn.Config = .{},
-    };
+    const ConnectOptionsSchema = z.objectOf(.{
+        .verify = z.withDefault(z.enumType(transportTls.VerifyMode, .{}), .caBundle),
+        .caPem = z.optional(z.string(.{ .min = 1 })),
+        .session = z.optional(typedSchema(*const tlsSession.ClientSession)),
+        .earlyData = z.withDefault(z.boolean(.{}), false),
+        .sessionOut = z.optional(typedSchema(*tlsSession.ClientSession)),
+        .timeoutMs = z.withDefault(z.integer(u64, .{}), 30_000),
+        // QUIC transport parameters. `.{}` uses the protocol defaults
+        // supplied by `quic.Connection.Config`.
+        .quic = z.withDefault(quicConn.ConfigSchema, .{}),
+    }, .{});
+    pub const ConnectOptions = ConnectOptionsSchema.Value;
 
     pub fn connect(
         allocator: Allocator,

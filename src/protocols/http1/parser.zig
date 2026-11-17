@@ -26,6 +26,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const headerName = @import("../../common/headers.zig").names;
+const z = @import("zigantic");
 
 pub const ParseError = error{
     Incomplete,
@@ -51,9 +52,10 @@ pub const MAX_METHOD_LEN: usize = 16;
 pub const MAX_TARGET_LEN: usize = 8192;
 
 /// Parser options for lenient line ending handling (issue #37).
-pub const Options = struct {
-    allowLfLineEndings: bool = false,
-};
+const OptionsSchema = z.objectOf(.{
+    .allowLfLineEndings = z.withDefault(z.boolean(.{}), false),
+}, .{});
+pub const Options = OptionsSchema.Value;
 
 const parseMod = @import("../../common/parse.zig");
 const isCtl = parseMod.isCtl;
@@ -89,16 +91,17 @@ fn findEolWithOptions(buf: []const u8, pos: usize, opts: Options) ParseError!usi
     return ParseError.Incomplete;
 }
 
-pub const HeadResult = struct {
-    method: []const u8 = "",
-    path: []const u8 = "",
-    statusCode: u16 = 0,
-    reason: []const u8 = "",
-    minorVersion: u8 = 1,
-    majorVersion: u8 = 1,
-    /// Offset one past the request/status line's LF.
-    headEnd: usize = 0,
-};
+const HeadResultSchema = z.objectOf(.{
+    .method = z.withDefault(z.string(.{}), ""),
+    .path = z.withDefault(z.string(.{}), ""),
+    .statusCode = z.withDefault(z.integer(u16, .{}), 0),
+    .reason = z.withDefault(z.string(.{}), ""),
+    .minorVersion = z.withDefault(z.integer(u8, .{ .max = 1 }), 1),
+    .majorVersion = z.withDefault(z.integer(u8, .{ .max = 1 }), 1),
+    // Offset one past the request/status line's LF.
+    .headEnd = z.withDefault(z.integer(usize, .{}), 0),
+}, .{});
+pub const HeadResult = HeadResultSchema.Value;
 
 /// Parses a request line: METHOD SP TARGET SP HTTP/1.x CRLF.
 /// Tolerates multiple SPs between tokens like picohttpparser.
@@ -331,10 +334,11 @@ pub fn parseHeaderBlock(buf: []const u8, start: usize, fields: []Field, opts: Op
 
 pub const Framing = enum { none, contentLength, chunked, tunnel };
 
-pub const FramingDecision = struct {
-    framing: Framing,
-    length: usize = 0,
-};
+const FramingDecisionSchema = z.objectOf(.{
+    .framing = z.enumType(Framing, .{}),
+    .length = z.withDefault(z.integer(usize, .{}), 0),
+}, .{});
+pub const FramingDecision = FramingDecisionSchema.Value;
 
 /// Determine body framing per RFC 9112 §6.3 with smuggling defenses.
 /// Requests without CL/TE have no body. Responses may be close-delimited
@@ -353,19 +357,20 @@ pub fn decideFraming(
     });
 }
 
-pub const FramingContext = struct {
-    isResponse: bool = false,
-    status: u16 = 0,
-    /// Request method associated with a response. Only HEAD changes response
-    /// body framing; method length is insufficient because POST is also 4 bytes.
-    requestMethod: []const u8 = "",
-    /// Treat 2xx responses to CONNECT as tunnels.
-    connectOk: bool = false,
-    /// True for HTTP/1.0 where Transfer-Encoding chunked is forbidden (RFC 9112 smuggling).
-    isHttp10: bool = false,
-    /// Upper bound applied to any declared content length.
-    maxBody: usize = DEFAULT_MAX_BODY_BYTES,
-};
+const FramingContextSchema = z.objectOf(.{
+    .isResponse = z.withDefault(z.boolean(.{}), false),
+    .status = z.withDefault(z.integer(u16, .{}), 0),
+    // Request method associated with a response. Only HEAD changes response
+    // body framing; method length is insufficient because POST is also 4 bytes.
+    .requestMethod = z.withDefault(z.string(.{}), ""),
+    // Treat 2xx responses to CONNECT as tunnels.
+    .connectOk = z.withDefault(z.boolean(.{}), false),
+    // True for HTTP/1.0 where Transfer-Encoding chunked is forbidden (RFC 9112 smuggling).
+    .isHttp10 = z.withDefault(z.boolean(.{}), false),
+    // Upper bound applied to any declared content length.
+    .maxBody = z.withDefault(z.integer(usize, .{}), DEFAULT_MAX_BODY_BYTES),
+}, .{});
+pub const FramingContext = FramingContextSchema.Value;
 
 pub fn framingFull(fields: []const Field, ctx: FramingContext) ParseError!FramingDecision {
     // Responses terminated by head end ignore any framing headers
@@ -470,11 +475,8 @@ pub const ChunkedDecoder = struct {
     /// must copy these out before dropping the consumed prefix.
     decodedLen: usize = 0,
 
-    pub fn init() ChunkedDecoder {
-        return .{};
-    }
-
-    pub fn initWithOptions(options: ChunkedDecoderOptions) ChunkedDecoder {
+    /// Creates a decoder. `.{}` keeps the default line-ending policy.
+    pub fn init(options: ChunkedDecoderOptions) ChunkedDecoder {
         return .{ .allowLfLineEndings = options.allowLfLineEndings };
     }
 
@@ -662,9 +664,10 @@ pub const ChunkedDecoder = struct {
     }
 };
 
-pub const ChunkedDecoderOptions = struct {
-    allowLfLineEndings: bool = false,
-};
+const ChunkedDecoderOptionsSchema = z.objectOf(.{
+    .allowLfLineEndings = z.withDefault(z.boolean(.{}), false),
+}, .{});
+pub const ChunkedDecoderOptions = ChunkedDecoderOptionsSchema.Value;
 
 // Tests
 
@@ -832,7 +835,7 @@ test "framing decisions incl smuggling defenses" {
 test "chunked decoder basic and incremental feeding" {
     const input = "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
 
-    var dec = ChunkedDecoder.init();
+    var dec = ChunkedDecoder.init(.{});
     var buf: [64]u8 = undefined;
     @memcpy(buf[0..input.len], input);
     const tail = try dec.decode(buf[0..input.len]);
@@ -843,7 +846,7 @@ test "chunked decoder basic and incremental feeding" {
     // Byte-at-a-time feeding using the streaming contract: each call
     // gets only unconsumed bytes; produced payload (buf[0..decodedLen])
     // is collected; the consumed prefix is dropped.
-    dec = ChunkedDecoder.init();
+    dec = ChunkedDecoder.init(.{});
     var keep: [64]u8 = undefined;
     var klen: usize = 0;
     var out: [64]u8 = undefined;
@@ -876,7 +879,7 @@ test "chunked decoder with extensions and trailers" {
     defer trailerList.deinit(std.testing.allocator);
 
     const input = "4;ext=1;x\r\nWiki\r\n0\r\nX-T: tv\r\nX-U: uv\r\n\r\nTAIL";
-    var dec = ChunkedDecoder.init();
+    var dec = ChunkedDecoder.init(.{});
     dec.trailers = &trailerList;
     dec.trailerAllocator = std.testing.allocator;
     var buf: [96]u8 = undefined;
@@ -898,14 +901,14 @@ test "chunked decoder rejects garbage after the size instead of treating it as a
     };
     // The first two are invalid; the third uses a legal `;ext` and must decode.
     for (malformed[0..2]) |wire| {
-        var decoder = ChunkedDecoder.init();
+        var decoder = ChunkedDecoder.init(.{});
         var buffer: [64]u8 = undefined;
         @memcpy(buffer[0..wire.len], wire);
         try std.testing.expectError(ParseError.InvalidChunkSize, decoder.decode(buffer[0..wire.len]));
     }
 
     const valid = "5 ;ok\r\nhello\r\n0\r\n\r\n";
-    var decoder = ChunkedDecoder.init();
+    var decoder = ChunkedDecoder.init(.{});
     var buffer: [64]u8 = undefined;
     @memcpy(buffer[0..valid.len], valid);
     const tail = try decoder.decode(buffer[0..valid.len]);
@@ -924,7 +927,7 @@ test "chunked decoder rejects framing-sensitive trailer fields" {
     for (invalid) |field| {
         const wire = try std.fmt.allocPrint(std.testing.allocator, "0\r\n{s}\r\n\r\n", .{field});
         defer std.testing.allocator.free(wire);
-        var decoder = ChunkedDecoder.init();
+        var decoder = ChunkedDecoder.init(.{});
         var buffer: [128]u8 = undefined;
         @memcpy(buffer[0..wire.len], wire);
         try std.testing.expectError(ParseError.InvalidTrailer, decoder.decode(buffer[0..wire.len]));
@@ -937,7 +940,7 @@ test "chunked decoder bounds incomplete trailer blocks" {
     defer wire.deinit(a);
     try wire.appendSlice(a, "0\r\nX: ");
     try wire.appendNTimes(a, 'x', DEFAULT_MAX_HEADER_BYTES);
-    var decoder = ChunkedDecoder.init();
+    var decoder = ChunkedDecoder.init(.{});
     try std.testing.expectError(ParseError.HeaderTooLarge, decoder.decode(wire.items));
 }
 
@@ -945,31 +948,31 @@ test "chunked decoder rejects malformed sizes and terminators" {
     const huge = "FFFFFFFFFFFFFFFF01\r\n";
     var b1: [32]u8 = undefined;
     @memcpy(b1[0..huge.len], huge);
-    var d1 = ChunkedDecoder.init();
+    var d1 = ChunkedDecoder.init(.{});
     try std.testing.expectError(ParseError.InvalidChunkSize, d1.decode(b1[0..huge.len]));
 
     const bad = "Z\r\nabc\r\n";
     var b2: [16]u8 = undefined;
     @memcpy(b2[0..bad.len], bad);
-    var d2 = ChunkedDecoder.init();
+    var d2 = ChunkedDecoder.init(.{});
     try std.testing.expectError(ParseError.InvalidChunkSize, d2.decode(b2[0..bad.len]));
 
     const noterm = "3\r\nabcX";
     var b3: [16]u8 = undefined;
     @memcpy(b3[0..noterm.len], noterm);
-    var d3 = ChunkedDecoder.init();
+    var d3 = ChunkedDecoder.init(.{});
     try std.testing.expectError(ParseError.InvalidChunkSize, d3.decode(b3[0..noterm.len]));
 
     // Empty size line (no digits).
     const nodigit = "\r\nabc";
     var b4: [16]u8 = undefined;
     @memcpy(b4[0..nodigit.len], nodigit);
-    var d4 = ChunkedDecoder.init();
+    var d4 = ChunkedDecoder.init(.{});
     try std.testing.expectError(ParseError.InvalidChunkSize, d4.decode(b4[0..nodigit.len]));
 }
 
 test "chunked decoder saturates overlong chunk-size digit count" {
-    var dec = ChunkedDecoder.init();
+    var dec = ChunkedDecoder.init(.{});
     dec.sizeDigits = std.math.maxInt(usize);
     dec.sizeAcc = std.math.maxInt(u64);
     const input = "1\r\n";
@@ -983,7 +986,7 @@ test "chunked decoder enforces cumulative decoded body limit" {
     const input = "2\r\nab\r\n2\r\ncd\r\n0\r\n\r\n";
     var buf: [64]u8 = undefined;
     @memcpy(buf[0..input.len], input);
-    var dec = ChunkedDecoder.init();
+    var dec = ChunkedDecoder.init(.{});
     dec.maxChunkSize = 3;
     try std.testing.expectError(ParseError.InvalidChunkSize, dec.decode(buf[0..input.len]));
 }
@@ -992,19 +995,19 @@ test "chunked decoder rejects bare LF unless explicitly enabled" {
     const bareSizeLf = "5\nhello\r\n0\r\n\r\n";
     var strictSizeBuf: [32]u8 = undefined;
     @memcpy(strictSizeBuf[0..bareSizeLf.len], bareSizeLf);
-    var strictSize = ChunkedDecoder.init();
+    var strictSize = ChunkedDecoder.init(.{});
     try std.testing.expectError(ParseError.InvalidChunkSize, strictSize.decode(strictSizeBuf[0..bareSizeLf.len]));
 
     const bareDataLf = "1\r\na\n0\r\n\r\n";
     var strictDataBuf: [32]u8 = undefined;
     @memcpy(strictDataBuf[0..bareDataLf.len], bareDataLf);
-    var strictData = ChunkedDecoder.init();
+    var strictData = ChunkedDecoder.init(.{});
     try std.testing.expectError(ParseError.InvalidChunkSize, strictData.decode(strictDataBuf[0..bareDataLf.len]));
 
     const lenientInput = "1\na\n0\nX-Ok: yes\n\n";
     var lenientBuf: [32]u8 = undefined;
     @memcpy(lenientBuf[0..lenientInput.len], lenientInput);
-    var lenient = ChunkedDecoder.initWithOptions(.{ .allowLfLineEndings = true });
+    var lenient = ChunkedDecoder.init(.{ .allowLfLineEndings = true });
     const tail = try lenient.decode(lenientBuf[0..lenientInput.len]);
     try std.testing.expect(lenient.isDone());
     try std.testing.expectEqualStrings("a", lenientBuf[0..lenient.decodedLen]);
@@ -1029,7 +1032,7 @@ test "strict mode rejects bare LF in headers while lenient mode accepts it" {
 
 test "chunked decoder handles BWS whitespace after chunk size" {
     const input = "5 \r\nhello\r\n0\r\n\r\n";
-    var dec = ChunkedDecoder.init();
+    var dec = ChunkedDecoder.init(.{});
     var buf: [32]u8 = undefined;
     @memcpy(buf[0..input.len], input);
     _ = try dec.decode(buf[0..input.len]);
@@ -1038,7 +1041,7 @@ test "chunked decoder handles BWS whitespace after chunk size" {
 }
 
 test "chunked decoder rejects excessive chunk overhead amplification" {
-    var dec = ChunkedDecoder.init();
+    var dec = ChunkedDecoder.init(.{});
     dec.totalOverhead = 101 * 1024;
     dec.totalRead = 102 * 1024; // overhead is > 75%
     const input = "1\r\na\r\n";
@@ -1052,11 +1055,11 @@ test "chunked decoder rejects cumulative counter overflow" {
     var buf: [16]u8 = undefined;
     @memcpy(buf[0..input.len], input);
 
-    var readOverflow = ChunkedDecoder.init();
+    var readOverflow = ChunkedDecoder.init(.{});
     readOverflow.totalRead = std.math.maxInt(u64) - 2;
     try std.testing.expectError(ParseError.InvalidChunkSize, readOverflow.decode(buf[0..input.len]));
 
-    var overheadOverflow = ChunkedDecoder.init();
+    var overheadOverflow = ChunkedDecoder.init(.{});
     overheadOverflow.totalOverhead = std.math.maxInt(u64) - 2;
     try std.testing.expectError(ParseError.InvalidChunkSize, overheadOverflow.decode(buf[0..input.len]));
 }
@@ -1091,10 +1094,10 @@ test "regression: truncation sweep over valid messages" {
             if (s.len >= 5) _ = parseResponseHead(s[0..cut], .{}) catch {};
         }
         @memcpy(chunkBuf[0..s.len], s);
-        var dec = ChunkedDecoder.init();
+        var dec = ChunkedDecoder.init(.{});
         _ = dec.decode(chunkBuf[0..s.len]) catch {};
         for (1..s.len) |cut| {
-            var d = ChunkedDecoder.init();
+            var d = ChunkedDecoder.init(.{});
             _ = d.decode(chunkBuf[0..cut]) catch {};
         }
     }
@@ -1132,7 +1135,7 @@ test "regression: seeded mutation never panics" {
 
             _ = parseRequestHead(buf[0..len], .{}) catch {};
             _ = parseResponseHead(buf[0..len], .{}) catch {};
-            var dec = ChunkedDecoder.init();
+            var dec = ChunkedDecoder.init(.{});
             _ = dec.decode(buf[0..len]) catch {};
 
             const evil = [_]writer.Header{

@@ -22,6 +22,7 @@
 //!   - RFC 9204 Section 3.2.6 — Decoder Instructions
 
 const std = @import("std");
+const z = @import("zigantic");
 const Allocator = std.mem.Allocator;
 const varint = @import("../quic/varint.zig");
 const huff = @import("../common/huffman.zig");
@@ -50,6 +51,9 @@ pub const ENTRY_OVERHEAD: usize = 32;
 pub const MAX_NAME_LEN: usize = 256;
 pub const MAX_VALUE_LEN: usize = 65536;
 
+/// Stack scratch used to Huffman-decode short header strings.
+const huffman_stack_size = 512;
+
 fn take(data: []const u8, offset: *usize, length: u64) Error![]const u8 {
     const n = std.math.cast(usize, length) orelse return Error.InvalidInstruction;
     if (offset.* > data.len or n > data.len - offset.*) return Error.Truncated;
@@ -70,8 +74,15 @@ fn readString(allocator: Allocator, data: []const u8, offset: *usize, maxLen: us
 /// Decodes already-framed string bytes (length known, header parsed).
 fn decodeStringBytes(allocator: Allocator, encoded: []const u8, huffman: bool, maxLen: usize) Error![]u8 {
     if (!huffman) return allocator.dupe(u8, encoded) catch return Error.OutOfMemory;
-    const doubled = std.math.mul(usize, encoded.len, 2) catch return Error.OutOfMemory;
-    const capacity = std.math.add(usize, doubled, 1) catch return Error.OutOfMemory;
+    const capacity = huff.maxDecodedLen(encoded.len);
+    // Short strings decode on the stack and are copied out at their exact
+    // size, so the result can be freed with a plain free().
+    if (capacity <= huffman_stack_size) {
+        var stack: [huffman_stack_size]u8 = undefined;
+        const n = huff.decode(stack[0..capacity], encoded) catch return Error.InvalidInstruction;
+        if (n > maxLen) return Error.InvalidInstruction;
+        return allocator.dupe(u8, stack[0..n]) catch return Error.OutOfMemory;
+    }
     const decoded = allocator.alloc(u8, capacity) catch return Error.OutOfMemory;
     errdefer allocator.free(decoded);
     const n = huff.decode(decoded, encoded) catch return Error.InvalidInstruction;
@@ -482,26 +493,32 @@ pub const Encoder = struct {
         return try self.pending.toOwnedSlice(self.allocator);
     }
 
+    /// Appends the Huffman encoding of `data` to `out`. `hlen` is the
+    /// exact encoded length (`huff.encodedLen`), so the payload is
+    /// written straight into the output buffer: no scratch allocation
+    /// and no over-sized temporary.
+    fn appendHuffman(self: *Encoder, out: *std.ArrayList(u8), data: []const u8, hlen: usize) !void {
+        try out.ensureUnusedCapacity(self.allocator, hlen);
+        const base = out.items.len;
+        const cap = out.unusedCapacitySlice();
+        const n = huff.encode(cap[0..hlen], data) catch return Error.InvalidInstruction;
+        out.items.len = base + n;
+    }
+
     fn emitString(self: *Encoder, out: *std.ArrayList(u8), str: []const u8, n: u3) !void {
-        if (str.len == 0) {
+        const hlen = huff.encodedLen(str);
+        if (hlen < str.len) {
             var tmp: [10]u8 = undefined;
-            const nn = try encodeInt(&tmp, n, 0);
-            try out.appendSlice(self.allocator, tmp[0..nn]);
+            const nn = try encodeInt(&tmp, n, hlen);
+            tmp[0] |= 0x80;
+            try out.ensureUnusedCapacity(self.allocator, nn + hlen);
+            const base = out.items.len;
+            const cap = out.unusedCapacitySlice();
+            @memcpy(cap[0..nn], tmp[0..nn]);
+            const written = huff.encode(cap[nn..][0..hlen], str) catch return Error.InvalidInstruction;
+            out.items.len = base + nn + written;
             return;
         }
-        const max = huff.maxEncodedLen(str.len);
-        const buf = try self.allocator.alloc(u8, max);
-        defer self.allocator.free(buf);
-        if (huff.encode(buf, str)) |hlen| {
-            if (hlen < str.len) {
-                var tmp: [10]u8 = undefined;
-                const nn = try encodeInt(&tmp, n, hlen);
-                tmp[0] |= 0x80;
-                try out.appendSlice(self.allocator, tmp[0..nn]);
-                try out.appendSlice(self.allocator, buf[0..hlen]);
-                return;
-            }
-        } else |_| {}
         var tmp: [10]u8 = undefined;
         const nn = try encodeInt(&tmp, n, str.len);
         try out.appendSlice(self.allocator, tmp[0..nn]);
@@ -588,19 +605,16 @@ pub const Encoder = struct {
 
     /// Emits a literal without name reference: 001 | N | H | len(3+).
     fn encodeLiteral(self: *Encoder, out: *std.ArrayList(u8), name: []const u8, value: []const u8) !void {
-        const max = huff.maxEncodedLen(name.len);
-        const buf = try self.allocator.alloc(u8, max);
-        defer self.allocator.free(buf);
-        const hlen = huff.encode(buf, name) catch null;
-        const useHuff = if (hlen) |hl| hl < name.len else false;
-        const nlen = if (useHuff) hlen.? else name.len;
+        const hlen = huff.encodedLen(name);
+        const useHuff = hlen < name.len;
+        const nlen = if (useHuff) hlen else name.len;
         var ib: [10]u8 = undefined;
         const n = try encodeInt(&ib, 3, nlen);
         ib[0] |= 0x20 | (neverIndexBit(name) << 4);
         if (useHuff) ib[0] |= 0x08;
         try out.appendSlice(self.allocator, ib[0..n]);
         if (useHuff) {
-            try out.appendSlice(self.allocator, buf[0..hlen.?]);
+            try self.appendHuffman(out, name, hlen);
         } else {
             try out.appendSlice(self.allocator, name);
         }
@@ -624,19 +638,16 @@ pub const Encoder = struct {
         // failure cannot leave the dynamic table ahead of the peer.
         var ins = std.ArrayList(u8).empty;
         defer ins.deinit(self.allocator);
-        const max = huff.maxEncodedLen(name.len);
-        const buf = try self.allocator.alloc(u8, max);
-        defer self.allocator.free(buf);
-        const hlen = huff.encode(buf, name) catch null;
-        const useHuff = if (hlen) |hl| hl < name.len else false;
-        const nlen = if (useHuff) hlen.? else name.len;
+        const hlen = huff.encodedLen(name);
+        const useHuff = hlen < name.len;
+        const nlen = if (useHuff) hlen else name.len;
         var ib: [16]u8 = undefined;
         const n = try encodeInt(&ib, 5, nlen);
         ib[0] |= 0x40;
         if (useHuff) ib[0] |= 0x20;
         try ins.appendSlice(self.allocator, ib[0..n]);
         if (useHuff) {
-            try ins.appendSlice(self.allocator, buf[0..hlen.?]);
+            try self.appendHuffman(&ins, name, hlen);
         } else {
             try ins.appendSlice(self.allocator, name);
         }
@@ -800,7 +811,8 @@ pub const Encoder = struct {
             self.decOff = 0;
             return;
         }
-        std.mem.copyForwards(u8, self.decBuf.items[0..], self.decBuf.items[self.decOff..]);
+        const rest = self.decBuf.items[self.decOff..];
+        @memmove(self.decBuf.items[0..rest.len], rest);
         self.decBuf.items.len -= self.decOff;
         self.decOff = 0;
     }
@@ -808,11 +820,12 @@ pub const Encoder = struct {
 
 // Decoder
 
-pub const FieldLine = struct {
-    name: []const u8,
-    value: []const u8,
-    allocated: bool = false,
-};
+const FieldLineSchema = z.objectOf(.{
+    .name = z.string(.{ .min = 1 }),
+    .value = z.string(.{}),
+    .allocated = z.withDefault(z.boolean(.{}), false),
+}, .{});
+pub const FieldLine = FieldLineSchema.Value;
 
 pub const Decoder = struct {
     allocator: Allocator,
@@ -906,7 +919,8 @@ pub const Decoder = struct {
             self.encOff = 0;
             return;
         }
-        std.mem.copyForwards(u8, self.encBuf.items[0..], self.encBuf.items[self.encOff..]);
+        const rest = self.encBuf.items[self.encOff..];
+        @memmove(self.encBuf.items[0..rest.len], rest);
         self.encBuf.items.len -= self.encOff;
         self.encOff = 0;
     }

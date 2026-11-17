@@ -12,20 +12,19 @@ under the configured route.
 ## Configure Scalar
 
 ```zig
-var server = try httpx.Server.init(allocator, io, .{
-    .enableDocs = true,
-    .docs = .{
-        .scalar = .{
-            .enabled = true,
-            .route = "/reference",
-            .title = "Users API",
-            .theme = "default",
-            .darkMode = false,
-            .hideDownloadButton = true,
-            .showSidebar = true,
-        },
+var server = try httpx.Server.init(allocator, io, .{});
+try httpx.docs.mount(&server, .{
+    .scalar = .{
+        .enabled = true,
+        .route = "/reference",
+        .title = "Users API",
+        .theme = "default",
+        .darkMode = false,
+        .hideDownloadButton = true,
+        .showSidebar = true,
     },
 });
+defer httpx.docs.unmount(&server);
 defer server.deinit();
 ```
 

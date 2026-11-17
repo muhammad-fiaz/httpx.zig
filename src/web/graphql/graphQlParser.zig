@@ -13,12 +13,14 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ast = @import("ast.zig");
+const z = @import("zigantic");
 
-pub const ParseLimits = struct {
-    maxDepth: usize = 64,
-    maxTokens: usize = 10000,
-    maxLength: usize = 1024 * 1024,
-};
+const ParseLimitsSchema = z.objectOf(.{
+    .maxDepth = z.withDefault(z.positiveInt(usize, .{}), 64),
+    .maxTokens = z.withDefault(z.positiveInt(usize, .{}), 10000),
+    .maxLength = z.withDefault(z.positiveInt(usize, .{}), 1024 * 1024),
+}, .{});
+pub const ParseLimits = ParseLimitsSchema.Value;
 
 pub const ParseError = error{
     OutOfMemory,

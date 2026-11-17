@@ -13,6 +13,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const sync = @import("../../common/sync.zig");
 const clock = @import("../../common/clock.zig");
+const z = @import("zigantic");
 
 pub const LookupError = error{
     DnsFailed,
@@ -27,13 +28,12 @@ pub const LookupFn = *const fn (
     a: Allocator,
 ) LookupError![]const []const u8;
 
-pub const Config = struct {
-    /// Positive-answer lifetime.
-    ttlMs: i64 = 60_000,
-    /// Failed-resolution lifetime (short so transient failures retry soon).
-    negativeTtlMs: i64 = 5_000,
-    maxEntries: u32 = 1024,
-};
+pub const ConfigSchema = z.objectOf(.{
+    .ttlMs = z.withDefault(z.nonNegativeInt(i64, .{}), 60_000),
+    .negativeTtlMs = z.withDefault(z.nonNegativeInt(i64, .{}), 5_000),
+    .maxEntries = z.withDefault(z.positiveInt(u32, .{}), 1024),
+}, .{});
+pub const Config = ConfigSchema.Value;
 
 const Entry = struct {
     addrs: []const []const u8,
@@ -399,23 +399,24 @@ test "concurrent resolvers coalesce into one lookup" {
     defer c.deinit();
 
     const Worker = struct {
-        fn run(cache: *Cache, done: *std.atomic.Value(u32)) void {
+        fn run(cache: *Cache, done: *std.atomic.Value(u32), failed: *std.atomic.Value(bool)) void {
             defer _ = done.fetchAdd(1, .monotonic);
-            const r = cache.resolve("coalesce.test") catch return;
+            const r = cache.resolve("coalesce.test") catch {
+                failed.store(true, .release);
+                return;
+            };
             for (r) |a| cache.allocator.free(a);
             cache.allocator.free(r);
         }
     };
 
     var done = std.atomic.Value(u32).init(0);
+    var failed = std.atomic.Value(bool).init(false);
     var threads: [4]std.Thread = undefined;
-    var spawned: usize = 0;
-    for (&threads) |*t| {
-        t.* = std.Thread.spawn(.{}, Worker.run, .{ &c, &done }) catch continue;
-        spawned += 1;
-    }
-    for (threads[0..spawned]) |*t| t.join();
-    try std.testing.expectEqual(@as(u32, @intCast(spawned)), done.load(.monotonic));
+    for (&threads) |*t| t.* = try std.Thread.spawn(.{}, Worker.run, .{ &c, &done, &failed });
+    for (&threads) |*t| t.join();
+    try std.testing.expect(!failed.load(.acquire));
+    try std.testing.expectEqual(@as(u32, threads.len), done.load(.monotonic));
 
     const s = c.statsSnapshot();
     // At least one lookup was started; coalescing depends on timing but the

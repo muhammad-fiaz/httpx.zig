@@ -16,18 +16,21 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{
-        .port = 8080,
-        .enableDocs = true,
-        .docs = .{
-            .title = "Users API",
-            .version = "1.0.0",
-            .description = "Production API built with HTTPX",
-        },
-    });
+    var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
     defer server.deinit();
+    try server.get("/users", usersHandler);
+    try httpx.docs.mount(&server, .{
+        .title = "Users API",
+        .version = "1.0.0",
+        .description = "Production API built with HTTPX",
+    });
+    defer httpx.docs.unmount(&server);
 
     server.run();
+}
+
+fn usersHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
+    return ctx.json(.{ .users = &.{} });
 }
 ```
 

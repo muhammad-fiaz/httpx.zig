@@ -8,6 +8,18 @@ const Allocator = std.mem.Allocator;
 const mimeMod = @import("../../common/mime.zig");
 const bodySourceMod = @import("../../common/bodySource.zig");
 const common = @import("multipartCommon.zig");
+const z = @import("zigantic");
+const headersMod = @import("../../common/headers.zig");
+
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
 
 // Subtypes
 
@@ -40,61 +52,62 @@ pub const Subtype = union(enum) {
 
 // Part
 
-pub const Part = struct {
-    name: []const u8,
-    filename: ?[]const u8 = null,
-    filenameStar: ?FilenameStar = null,
-    dispositionType: []const u8 = "form-data",
-    contentType: []const u8 = mimeMod.octetStream,
-    contentTransferEncoding: ?[]const u8 = null,
-    data: []const u8,
-    headers: ?[]const Header = null,
-};
+pub const HeaderSchema = headersMod.HeaderSchema;
+pub const Header = headersMod.Header;
 
-pub const FilenameStar = struct {
-    charset: []const u8 = "UTF-8",
-    language: []const u8 = "",
-    value: []const u8,
-    /// Set to true when `value` is already RFC 8187 percent-encoded.
-    encoded: bool = false,
-};
+pub const FilenameStarSchema = z.objectOf(.{
+    .charset = z.withDefault(z.string(.{}), "UTF-8"),
+    .language = z.withDefault(z.string(.{}), ""),
+    .value = z.string(.{}),
+    .encoded = z.withDefault(z.boolean(.{}), false),
+}, .{});
+pub const FilenameStar = FilenameStarSchema.Value;
 
-pub const Header = struct {
-    name: []const u8,
-    value: []const u8,
-};
+pub const PartSchema = z.objectOf(.{
+    .name = z.string(.{}),
+    .filename = z.optional(z.string(.{})),
+    .filenameStar = z.optional(FilenameStarSchema),
+    .dispositionType = z.withDefault(z.string(.{ .min = 1 }), "form-data"),
+    .contentType = z.withDefault(z.string(.{ .min = 1 }), mimeMod.octetStream),
+    .contentTransferEncoding = z.optional(z.string(.{})),
+    .data = z.string(.{}),
+    .headers = z.optional(z.array(HeaderSchema, .{})),
+}, .{});
+pub const Part = PartSchema.Value;
 
-pub const FileOptions = struct {
-    filename: ?[]const u8 = null,
-    filenameStar: ?FilenameStar = null,
-    dispositionType: ?[]const u8 = null,
-    contentType: ?[]const u8 = null,
-    contentTransferEncoding: ?[]const u8 = null,
-    headers: ?[]const Header = null,
-};
+pub const FileOptionsSchema = z.objectOf(.{
+    .filename = z.optional(z.string(.{})),
+    .filenameStar = z.optional(FilenameStarSchema),
+    .dispositionType = z.optional(z.string(.{ .min = 1 })),
+    .contentType = z.optional(z.string(.{ .min = 1 })),
+    .contentTransferEncoding = z.optional(z.string(.{})),
+    .headers = z.optional(z.array(HeaderSchema, .{})),
+}, .{});
+pub const FileOptions = FileOptionsSchema.Value;
 
-pub const FieldValue = struct {
-    name: []const u8,
-    value: []const u8,
-};
+pub const FieldValueSchema = z.objectOf(.{
+    .name = z.string(.{}),
+    .value = z.string(.{}),
+}, .{});
+pub const FieldValue = FieldValueSchema.Value;
 
-pub const File = struct {
-    name: []const u8,
-    data: []const u8,
-    filename: ?[]const u8 = null,
-    contentType: []const u8 = mimeMod.octetStream,
-    headers: ?[]const Header = null,
-};
+pub const FileSchema = z.objectOf(.{
+    .name = z.string(.{}),
+    .data = z.string(.{}),
+    .filename = z.optional(z.string(.{})),
+    .contentType = z.withDefault(z.string(.{ .min = 1 }), mimeMod.octetStream),
+    .headers = z.optional(z.array(HeaderSchema, .{})),
+}, .{});
+pub const File = FileSchema.Value;
 
-pub const EncoderOptions = struct {
-    subtype: Subtype = .formData,
-    boundary: ?[]const u8 = null,
-    /// Generic parts with full control. Either form works at the client:
-    /// `.parts = .{ .{ .name = "meta", .data = json } }` (tuple) or a slice.
-    parts: []const Part = &.{},
-    fields: []const FieldValue = &.{},
-    files: []const File = &.{},
-};
+pub const EncoderOptionsSchema = z.objectOf(.{
+    .subtype = z.withDefault(typedSchema(Subtype), .formData),
+    .boundary = z.optional(z.string(.{ .min = 1 })),
+    .parts = z.withDefault(z.array(PartSchema, .{}), &.{}),
+    .fields = z.withDefault(z.array(FieldValueSchema, .{}), &.{}),
+    .files = z.withDefault(z.array(FileSchema, .{}), &.{}),
+}, .{});
+pub const EncoderOptions = EncoderOptionsSchema.Value;
 
 fn toSubtype(value: anytype) Subtype {
     if (@TypeOf(value) == Subtype) return value;
@@ -632,10 +645,11 @@ const StreamEncoder = struct {
     }
 };
 
-pub const StreamOptions = struct {
-    subtype: Subtype = .formData,
-    boundary: []const u8,
-};
+pub const StreamOptionsSchema = z.objectOf(.{
+    .subtype = z.withDefault(typedSchema(Subtype), .formData),
+    .boundary = z.string(.{ .min = 1 }),
+}, .{});
+pub const StreamOptions = StreamOptionsSchema.Value;
 
 /// Creates a bounded-memory writer for incremental multipart output.
 /// The writer owns I/O; the returned encoder borrows it until `finish`.

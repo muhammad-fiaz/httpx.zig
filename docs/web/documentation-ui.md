@@ -15,49 +15,51 @@ GraphiQL uses the configured GraphQL endpoint.
 
 ## Shared configuration
 
-Documentation routes are enabled by `Server.Config.enableDocs` and configured
-with `Server.Config.docs`. Each interface has `enabled`, `route`, and `title`
-fields plus explicit, typed vendor options. Every option is a typed field with
-a declared default; there is no string-based passthrough.
+Documentation routes are an explicit opt-in mounted on a router with
+`httpx.docs.mount`. The server does not import or mount these interfaces by
+default, which keeps their embedded UI assets out of applications that do not
+use them. Each interface has `enabled`, `route`, and `title` fields plus
+explicit, typed vendor options. Every option is a typed field with a declared
+default; there is no string-based passthrough.
 
 ## Options
 
 ```zig
-var server = try httpx.Server.init(allocator, io, .{
-    .enableDocs = true,
-    .docs = .{
-        .swagger = .{
-            .route = "/docs",
-            .docExpansion = .full,
-            .deepLinking = true,
-            .displayRequestDuration = true,
-            .filter = true,
-            .persistAuthorization = true,
-            .tryItOutEnabled = true,
-            .defaultModelsExpandDepth = 2,
-        },
-        .redoc = .{
-            .route = "/redoc",
-            .hideDownloadButton = true,
-            .requiredPropsFirst = true,
-            .expandResponses = "200,201",
-        },
-        .scalar = .{
-            .route = "/reference",
-            .theme = "default",
-            .darkMode = false,
-            .hideDownloadButton = true,
-            .showSidebar = true,
-        },
-        .graphiql = .{
-            .route = "/graphiql",
-            .graphqlEndpoint = "/graphql",
-            .defaultQuery = "{ __typename }",
-            .editorTheme = "vs-dark",
-            .headers = .{ .authorization = "Bearer token" },
-        },
+var server = try httpx.Server.init(allocator, io, .{});
+try httpx.docs.mount(&server, .{
+    .title = "My API",
+    .swagger = .{
+        .route = "/docs",
+        .docExpansion = .full,
+        .deepLinking = true,
+        .displayRequestDuration = true,
+        .filter = true,
+        .persistAuthorization = true,
+        .tryItOutEnabled = true,
+        .defaultModelsExpandDepth = 2,
+    },
+    .redoc = .{
+        .route = "/redoc",
+        .hideDownloadButton = true,
+        .requiredPropsFirst = true,
+        .expandResponses = "200,201",
+    },
+    .scalar = .{
+        .route = "/reference",
+        .theme = "default",
+        .darkMode = false,
+        .hideDownloadButton = true,
+        .showSidebar = true,
+    },
+    .graphiql = .{
+        .route = "/graphiql",
+        .graphqlEndpoint = "/graphql",
+        .defaultQuery = "{ __typename }",
+        .editorTheme = "vs-dark",
+        .headers = .{ .authorization = "Bearer token" },
     },
 });
+defer httpx.docs.unmount(&server);
 defer server.deinit();
 ```
 

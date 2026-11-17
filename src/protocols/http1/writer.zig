@@ -19,6 +19,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const semantics = @import("semantics.zig");
 const headerName = @import("../../common/headers.zig").names;
+const z = @import("zigantic");
+const headersMod = @import("../../common/headers.zig");
 
 pub const Error = error{
     OutOfMemory,
@@ -27,6 +29,7 @@ pub const Error = error{
     InvalidTarget,
     InvalidStatus,
     InvalidReason,
+    InvalidOptions,
     UnsupportedForVersion, // e.g. chunked for HTTP/1.0
 };
 
@@ -108,22 +111,20 @@ fn appendHeader(out: *std.ArrayList(u8), gpa: Allocator, name: []const u8, value
     out.appendSlice(gpa, "\r\n") catch return Error.OutOfMemory;
 }
 
-pub const Header = struct { name: []const u8, value: []const u8 };
+pub const HeaderSchema = headersMod.HeaderSchema;
+pub const Header = headersMod.Header;
 
 // Requests
 
-pub const RequestOptions = struct {
-    minorVersion: u8 = 1, // 0 => HTTP/1.0
-    host: []const u8 = "",
-    headers: []const Header = &.{},
-    /// "close" | "keep-alive" | "" (default per version)
-    connection: []const u8 = "",
-    /// Emit Transfer-Encoding: chunked instead of Content-Length.
-    chunked: bool = false,
-    /// When true, allows a Content-Length header without an in-memory body slice
-    /// (e.g. for streaming request uploads).
-    streamingBody: bool = false,
-};
+const RequestOptionsSchema = z.objectOf(.{
+    .minorVersion = z.withDefault(z.integer(u8, .{ .max = 1 }), 1),
+    .host = z.withDefault(z.string(.{}), ""),
+    .headers = z.withDefault(z.array(HeaderSchema, .{}), &.{}),
+    .connection = z.withDefault(z.string(.{}), ""),
+    .chunked = z.withDefault(z.boolean(.{}), false),
+    .streamingBody = z.withDefault(z.boolean(.{}), false),
+}, .{});
+pub const RequestOptions = RequestOptionsSchema.Value;
 
 /// Serializes a complete request with a fully buffered body.
 pub fn buildRequest(
@@ -134,7 +135,12 @@ pub fn buildRequest(
     opts: RequestOptions,
 ) Error![]u8 {
     if (!validToken(method)) return Error.InvalidMethod;
-    if (opts.minorVersion > 1) return Error.UnsupportedForVersion;
+    {
+        var scratch: [1024]u8 = undefined;
+        const issue = z.checkFirst(RequestOptionsSchema, opts, &scratch, .{}) catch
+            return Error.InvalidOptions;
+        if (issue != null) return Error.InvalidOptions;
+    }
 
     const bodyLen = if (body) |bytes| bytes.len else 0;
     try validateFramingHeaders(opts.headers, opts.chunked, bodyLen, opts.streamingBody);
@@ -248,15 +254,14 @@ pub fn reasonPhrase(code: u16) []const u8 {
     };
 }
 
-pub const ResponseOptions = struct {
-    minorVersion: u8 = 1,
-    headers: []const Header = &.{},
-    connection: []const u8 = "",
-    chunked: bool = false,
-    /// True when serializing the head of an UPGRADEd/tunneled exchange so
-    /// no body framing is emitted.
-    upgrade: bool = false,
-};
+const ResponseOptionsSchema = z.objectOf(.{
+    .minorVersion = z.withDefault(z.integer(u8, .{ .max = 1 }), 1),
+    .headers = z.withDefault(z.array(HeaderSchema, .{}), &.{}),
+    .connection = z.withDefault(z.string(.{}), ""),
+    .chunked = z.withDefault(z.boolean(.{}), false),
+    .upgrade = z.withDefault(z.boolean(.{}), false),
+}, .{});
+pub const ResponseOptions = ResponseOptionsSchema.Value;
 
 fn writeHead(
     out: *std.ArrayList(u8),
@@ -289,7 +294,12 @@ pub fn buildResponse(
     opts: ResponseOptions,
     methodHead: bool,
 ) Error![]u8 {
-    if (opts.minorVersion > 1) return Error.UnsupportedForVersion;
+    {
+        var scratch: [1024]u8 = undefined;
+        const issue = z.checkFirst(ResponseOptionsSchema, opts, &scratch, .{}) catch
+            return Error.InvalidOptions;
+        if (issue != null) return Error.InvalidOptions;
+    }
     const bodyLen = if (body) |bytes| bytes.len else 0;
     const metadataOnly = methodHead or semantics.bodylessStatus(statusCode);
     if (opts.chunked and metadataOnly) return Error.InvalidHeader;
@@ -600,7 +610,7 @@ test "chunked emission with trailers and prohibited filtering" {
 
     // Round-trip through the parser's chunked decoder.
     const p = @import("parser.zig");
-    var dec = p.ChunkedDecoder.init();
+    var dec = p.ChunkedDecoder.init(.{});
     var buf: [128]u8 = undefined;
     @memcpy(buf[0..out.items.len], out.items);
     const tail = try dec.decode(buf[0..out.items.len]);

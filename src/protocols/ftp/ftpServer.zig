@@ -9,47 +9,50 @@ const Allocator = std.mem.Allocator;
 const tcp = @import("../../sockets/tcp.zig");
 const addressMod = @import("../../net/address.zig");
 const tlsServerMod = @import("../tls/tlsServer.zig");
+const z = @import("zigantic");
+
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
 
 pub const Error = error{ AcceptFailed, ReadFailed, WriteFailed, ProtocolError, OutOfMemory, TlsHandshakeFailed };
 
-pub const Callbacks = struct {
-    context: ?*anyopaque = null,
-    authenticate: ?*const fn (?*anyopaque, []const u8, []const u8) bool = null,
-    list: ?*const fn (?*anyopaque, []const u8) []const u8 = null,
-    retrieve: ?*const fn (?*anyopaque, []const u8) []const u8 = null,
-    store: ?*const fn (?*anyopaque, []const u8, []const u8) bool = null,
-    directory: ?*const fn (?*anyopaque, []const u8, bool) bool = null,
-    remove: ?*const fn (?*anyopaque, []const u8) bool = null,
-    size: ?*const fn (?*anyopaque, []const u8) ?u64 = null,
-};
+const CallbacksSchema = z.objectOf(.{
+    .context = z.withDefault(typedSchema(?*anyopaque), null),
+    .authenticate = z.withDefault(typedSchema(?*const fn (?*anyopaque, []const u8, []const u8) bool), null),
+    .list = z.withDefault(typedSchema(?*const fn (?*anyopaque, []const u8) []const u8), null),
+    .retrieve = z.withDefault(typedSchema(?*const fn (?*anyopaque, []const u8) []const u8), null),
+    .store = z.withDefault(typedSchema(?*const fn (?*anyopaque, []const u8, []const u8) bool), null),
+    .directory = z.withDefault(typedSchema(?*const fn (?*anyopaque, []const u8, bool) bool), null),
+    .remove = z.withDefault(typedSchema(?*const fn (?*anyopaque, []const u8) bool), null),
+    .size = z.withDefault(typedSchema(?*const fn (?*anyopaque, []const u8) ?u64), null),
+}, .{});
+pub const Callbacks = CallbacksSchema.Value;
 
-pub const Config = struct {
-    /// Literal bind address. Supports `0.0.0.0`, `::`, or any IPv4/IPv6
-    /// literal such as `127.0.0.1`. Hostnames are rejected with
-    /// `error.InvalidHost`; resolve them before constructing the server.
-    host: []const u8 = "0.0.0.0",
-    port: u16 = 2121,
-    user: []const u8 = "anonymous",
-    password: []const u8 = "anonymous@",
-    timeoutMs: u31 = 30_000,
-    callbacks: Callbacks = .{},
-    /// Maximum bytes accepted by one STOR transfer.
-    maxUploadSize: usize = 16 * 1024 * 1024,
-    /// Active mode can make the server connect to a client-selected address.
-    /// Disabled by default because the control peer address is not exposed by
-    /// the current cross-platform socket wrapper for destination binding.
-    allowActiveMode: bool = false,
-    /// Server certificate chain (PEM) enabling explicit FTPS (`AUTH
-    /// TLS`). Both must be set; otherwise `AUTH TLS` is refused.
-    certChainPem: ?[]const u8 = null,
-    /// Server private key (PEM, P-256 ECDSA) for `certChainPem`.
-    privateKeyPem: ?[]const u8 = null,
+const ConfigSchema = z.objectOf(.{
+    .host = z.withDefault(z.string(.{ .min = 1 }), "0.0.0.0"),
+    .port = z.withDefault(z.integer(u16, .{}), 2121),
+    .user = z.withDefault(z.string(.{}), "anonymous"),
+    .password = z.withDefault(z.string(.{}), "anonymous@"),
+    .timeoutMs = z.withDefault(z.integer(u31, .{}), 30_000),
+    .callbacks = z.withDefault(CallbacksSchema, .{}),
+    .maxUploadSize = z.withDefault(z.nonNegativeInt(usize, .{}), 16 * 1024 * 1024),
+    .allowActiveMode = z.withDefault(z.boolean(.{}), false),
+    .certChainPem = z.optional(z.string(.{ .min = 1 })),
+    .privateKeyPem = z.optional(z.string(.{ .min = 1 })),
+}, .{});
+pub const Config = ConfigSchema.Value;
 
-    /// True when the server can upgrade control connections with AUTH TLS.
-    pub fn secureAvailable(self: Config) bool {
-        return self.certChainPem != null and self.privateKeyPem != null;
-    }
-};
+/// True when the server can upgrade control connections with AUTH TLS.
+pub fn secureAvailable(config: Config) bool {
+    return config.certChainPem != null and config.privateKeyPem != null;
+}
 
 pub const Server = struct {
     allocator: Allocator,
@@ -78,7 +81,7 @@ pub const Server = struct {
             .cfg = cfg,
         };
         errdefer self.deinit();
-        if (cfg.secureAvailable()) {
+        if (secureAvailable(cfg)) {
             self.tlsServer = try tlsServerMod.Server.init(allocator, io, .{
                 .certificatePem = cfg.certChainPem.?,
                 .privateKeyPem = cfg.privateKeyPem.?,
@@ -216,7 +219,7 @@ const Session = struct {
             return true;
         }
         if (std.mem.eql(u8, name, "FEAT")) {
-            if (self.cfg.secureAvailable()) {
+            if (secureAvailable(self.cfg)) {
                 try self.reply("211-Features\r\n AUTH TLS\r\n PBSZ\r\n PROT\r\n EPSV\r\n PASV\r\n211 End");
             } else {
                 try self.reply("211-Features\r\n EPSV\r\n PASV\r\n211 End");
@@ -327,7 +330,7 @@ const Session = struct {
             try self.reply("534 Already secure");
             return true;
         }
-        if (!self.cfg.secureAvailable()) {
+        if (!secureAvailable(self.cfg)) {
             try self.reply("502 AUTH TLS unavailable");
             return true;
         }

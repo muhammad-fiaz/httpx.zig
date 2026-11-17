@@ -64,12 +64,12 @@ pub fn main(init: std.process.Init) !void {
     for (rawArgs[1..]) |a| {
         if (std.mem.eql(u8, a, "--fs")) useFs = true;
     }
+    defer if (!useFs) httpx.assets.deinitGlobalStore();
 
     var server = if (useFs)
         try httpx.Server.init(allocator, io, .{
             .host = "127.0.0.1",
             .port = 0,
-            .enableDocs = false,
             .site = .{
                 .filesystem = "examples/website/dist",
             },
@@ -78,7 +78,6 @@ pub fn main(init: std.process.Init) !void {
         try httpx.Server.init(allocator, io, .{
             .host = "127.0.0.1",
             .port = 0,
-            .enableDocs = false,
             .site = .{
                 .embedded = &embedded,
                 .watch = false,
@@ -99,6 +98,7 @@ pub fn main(init: std.process.Init) !void {
     };
     const t = try std.Thread.spawn(.{}, ServerThread.run, .{&server});
     defer t.join();
+    defer server.requestShutdown();
 
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
@@ -129,6 +129,4 @@ pub fn main(init: std.process.Init) !void {
     }
 
     server.requestShutdown();
-
-    if (!useFs) httpx.assets.globalStore(allocator).deinit();
 }

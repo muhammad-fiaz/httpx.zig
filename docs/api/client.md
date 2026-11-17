@@ -60,7 +60,8 @@ defer custom_client.deinit();
 var response = try custom_client.get("https://api.example.com/users", .{});
 defer response.deinit();
 
-var post_res = try custom_client.post("https://api.example.com/users", .{ .json = .{ .name = "Alice", .role = "developer" },
+var post_res = try custom_client.post("https://api.example.com/users", .{
+    .json = .{ .name = "Alice", .role = "developer" },
 });
 defer post_res.deinit();
 ```
@@ -170,7 +171,7 @@ const CreateUser = struct { name: []const u8, email: []const u8 };
 const User = struct { id: u64, name: []const u8, email: []const u8 };
 
 var res2 = try client.post("https://api.example.com/users", .{
-    .headers = .{ .Authorization = "Bearer secret_token" },
+    .headers = &.{.{ .name = "Authorization", .value = "Bearer secret_token" }},
     .json = .{ .name = "Example User", .email = "user@example.com" },
 });
 defer res2.deinit();
@@ -239,7 +240,7 @@ The standalone `httpx.client.jar` keeps cookies across requests
 
 | Method | Description |
 |--------|-------------|
-| `jar.init(allocator, io)` / `deinit()` | Lifecycle |
+| `jar.init(allocator, io, .{})` / `deinit()` | Lifecycle |
 | `setFromHeader(setCookie, host)` | Store a `Set-Cookie` value |
 | `cookieHeader(host, path, secure, buf)` | Render the `Cookie` header (`secure` gates `Secure` cookies) |
 | `purgeExpired()` | Drop expired cookies |
@@ -321,11 +322,12 @@ optional fields fall back to client-level defaults.
 | `method` | `?Method` | `null` | Explicit method for generic `request` (verb helpers supply their own). |
 | `headers` | `[]const Header` | `&.{}` | Additional headers (`{ .name, .value }` pairs). |
 | `query` | `[]const Header` | `&.{}` | Percent-encoded query params appended to the URL. |
-| `body` | `?[]const u8` | `null` | Raw request body. |
-| `json` | `?[]const u8` | `null` | JSON string body (sets Content-Type). |
+| `body` | `[]const u8` or `httpx.BodySource` | `null` | Raw request body, or a streaming body source. |
+| `json` | any serializable value | `null` | JSON body (sets Content-Type); field names are the exact Zig names. |
 | `form` | `?[]const u8` | `null` | Pre-encoded `application/x-www-form-urlencoded` body. |
 | `text` | `?[]const u8` | `null` | Plain-text body. |
 | `contentType` | `?[]const u8` | `null` | Explicit Content-Type override. |
+| `multipart` | inline `.{}` | `null` | `multipart/form-data` body (`.fields`/`.files`/`.file`/`.parts`). |
 | `basicAuth` | `?[]const u8` | `null` | `"user:pass"` encoded as `Authorization: Basic ...`. |
 | `bearerAuth` | `?[]const u8` | `null` | Sets `Authorization: Bearer <token>`. |
 | `cookie` | `?[]const u8` | `null` | Cookie header value for this request. |
@@ -333,24 +335,31 @@ optional fields fall back to client-level defaults.
 | `maxResponseSize` | `?usize` | `null` | Request-specific max response body size. |
 | `followRedirects` | `?bool` | `null` | Override client redirect setting. |
 | `maxRedirects` | `?u8` | `null` | Override client max-redirect limit. |
-| `allowLfLineEndings` | `bool` | `false` | Accept bare LF line endings in the response. |
+| `allowLfLineEndings` | `?bool` | `null` | Accept bare LF line endings in the response. |
 | `httpVersion` | `?HttpVersion` | `null` | Force a request over a specific protocol runtime. |
 | `http10` / `http11` / `http2` / `http3` | `?bool` | `null` | Per-request protocol toggles. |
 | `tls` | `?TlsOptions` | `null` | Per-request TLS overrides; null inherits the client default or system trust. |
 | `proxy` | `?[]const u8` | `null` | Per-request proxy URL override. |
+| `earlyData` | inline `.{}` | `{}` | Per-request 0-RTT early-data settings (`.enabled`, `.allowUnsafeMethods`). |
+| `cancel` | `*const std.atomic.Value(bool)` | `null` | Cooperative cancellation flag. |
 
 Pass request fields directly to the operation:
 
 ```zig
 var res = try client.get("/users", .{
-    .headers = .{ .Accept = "application/json" },
-    .query = .{ .page = "1" },
+    .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+    .query = &.{.{ .name = "page", .value = "1" }},
     .timeoutMs = 10_000,
     .httpVersion = .http2,
     .followRedirects = true,
 });
 defer res.deinit();
 ```
+
+`headers` and `query` take `Header` pairs (`{ .name, .value }`). As a
+convenience, a struct literal of named fields is also accepted and its
+field names are used verbatim as the header/query names
+(`.headers = .{ .acceptEncoding = "gzip" }`).
 
 ### Multipart File Uploads
 

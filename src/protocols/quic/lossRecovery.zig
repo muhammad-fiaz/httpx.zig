@@ -5,6 +5,7 @@
 //! duration (srtt + max(4*rttvar, granularity) + maxAckDelay) * 3.
 
 const std = @import("std");
+const z = @import("zigantic");
 
 pub const GranularityMs: u64 = 1;
 pub const PacketThreshold: u64 = 3;
@@ -75,10 +76,11 @@ pub const SentPacket = struct {
     ackEliciting: bool,
 };
 
-pub const RecoveryConfig = struct {
-    maxAckDelayMs: u64 = 25,
-    includeAckDelayInPto: bool = true,
-};
+const RecoveryConfigSchema = z.objectOf(.{
+    .maxAckDelayMs = z.withDefault(z.integer(u64, .{}), 25),
+    .includeAckDelayInPto = z.withDefault(z.boolean(.{}), true),
+}, .{});
+pub const RecoveryConfig = RecoveryConfigSchema.Value;
 
 pub const Recovery = struct {
     rtt: RttStats = .{},

@@ -111,7 +111,7 @@ Enable HTTP/2 in the inline options passed to `httpx.Server.init`:
 var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 8080,
-    .http2 = true,
+    .protocols = .{ .http2 = true },
 });
 defer server.deinit();
 

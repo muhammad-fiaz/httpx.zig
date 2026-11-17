@@ -14,8 +14,8 @@ m.recordResponseFull(500, 4_500_000, 64);
 
 const snap = m.snapshot();
 std.debug.print("Total Requests: {d}\n", .{snap.requestsTotal});
-std.debug.print("Error Rate:     {d:.1}%\n", .{snap.errorRate() * 100.0});
-std.debug.print("Avg Latency:    {d:.3}ms\n", .{snap.averageLatencyMs()});
+std.debug.print("Error Rate:     {d:.1}%\n", .{httpx.metrics.serverErrorRate(snap) * 100.0});
+std.debug.print("Avg Latency:    {d:.3}ms\n", .{httpx.metrics.averageLatencyMs(snap)});
 ```
 
 Servers record automatically; mount `try server.metrics("/metrics");` for

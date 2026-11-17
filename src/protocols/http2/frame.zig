@@ -14,6 +14,7 @@
 //!   - RFC 9113 Section 6.9 — WINDOW_UPDATE (flow control window)
 
 const std = @import("std");
+const z = @import("zigantic");
 const Allocator = std.mem.Allocator;
 
 pub const Error = error{
@@ -186,17 +187,18 @@ pub const Data = struct {
     endStream: bool,
 };
 
-pub const Headers = struct {
-    block: []const u8,
-    endStream: bool,
-    endHeaders: bool,
-    exclusive: bool = false,
-    streamDep: u31 = 0,
-    weight: u8 = 255,
-    /// The HEADERS frame declared itself as its own priority dependency.
-    /// The block still has to reach HPACK before the stream is reset.
-    selfDependency: bool = false,
-};
+const HeadersSchema = z.objectOf(.{
+    .block = z.string(.{}),
+    .endStream = z.boolean(.{}),
+    .endHeaders = z.boolean(.{}),
+    .exclusive = z.withDefault(z.boolean(.{}), false),
+    .streamDep = z.withDefault(z.integer(u31, .{}), 0),
+    .weight = z.withDefault(z.integer(u8, .{}), 255),
+    // The HEADERS frame declared itself as its own priority dependency.
+    // The block still has to reach HPACK before the stream is reset.
+    .selfDependency = z.withDefault(z.boolean(.{}), false),
+}, .{});
+pub const Headers = HeadersSchema.Value;
 
 pub const Priority = struct {
     exclusive: bool,

@@ -15,16 +15,16 @@ Server-Sent Events writers and parsers live in `src/web/sse/`.
 
 ## Writer
 
-`httpx.sse.Event.Writer` serializes event blocks for a `text/event-stream`
+`httpx.sse.Writer` serializes event blocks for a `text/event-stream`
 response:
 
 ```zig
-var out = std.ArrayList(u8).empty;
-var writer = httpx.sse.Event.Writer.init(ctx.allocator);
-try writer.writeEvent(&out, &.{"payload"}, "message", 1, null);
+var writer = httpx.sse.Writer.init(ctx.allocator, ctx.io, .{});
+defer writer.deinit();
+try writer.writeEvent(&.{"payload"}, .{ .event = "message", .id = 1 });
 return .{
     .status = 200,
-    .body = out.items,
+    .body = writer.buffered(),
     .contentType = "text/event-stream; charset=utf-8",
 };
 ```
@@ -35,10 +35,10 @@ keep-alives.
 
 ## Parser
 
-`httpx.sse.Event.Parser` is a stateful WHATWG stream parser:
+`httpx.sse.Parser` is a stateful WHATWG stream parser:
 
 ```zig
-var parser = httpx.sse.Event.Parser.init(allocator);
+var parser = httpx.sse.Parser.init(allocator);
 defer parser.deinit();
 
 if (try parser.processLine("data: hello\n")) |event| {

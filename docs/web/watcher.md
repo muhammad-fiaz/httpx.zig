@@ -28,7 +28,7 @@ The watcher decouples event production (delegated to native OS mechanisms or a p
 
 ## Backend Selection & Capabilities
 
-Backend mode is configurable via `WatcherConfig.mode`:
+Backend mode is configured inline (`httpx.static.watcher.Watcher.init(allocator, io, .{ .mode = .auto })`):
 
 ```zig
 pub const BackendMode = enum {

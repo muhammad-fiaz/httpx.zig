@@ -76,9 +76,11 @@ var server = try httpx.Server.init(allocator, io, .{
 
 ### `RateLimiter`
 
-Token-bucket style per-key rate limiting (see
-`src/web/middleware/rateLimiter.zig` for `RateLimitPolicy`,
-`RateLimitResult`, and `RateLimitDimension`).
+Token-bucket style per-key rate limiting. Configure it with an inline
+literal: `httpx.RateLimiter.init(allocator, io, .{ .policy = .{ .limit = 100,
+.windowMs = 60_000 }, .maxEntries = 10_000 })` (see
+`src/web/middleware/rateLimiter.zig` for the policy fields and
+`RateLimitResult`/`RateLimitDimension`).
 
 ### `csrf`
 

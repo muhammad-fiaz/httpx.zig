@@ -171,7 +171,7 @@ var server = try httpx.Server.init(allocator, io, .{
         .certificatePem = @embedFile("cert.pem"),
         .privateKeyPem = @embedFile("key.pem"),
     },
-    .http2 = true,
+    .protocols = .{ .http2 = true },
 });
 ```
 

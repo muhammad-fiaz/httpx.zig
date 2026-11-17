@@ -10,6 +10,7 @@ pub const errors = @import("templateError.zig");
 
 pub const Engine = engine.Engine;
 pub const Config = engine.Config;
+pub const ConfigSchema = engine.ConfigSchema;
 pub const Value = context.Value;
 pub const Context = context.Context;
 pub const Scope = context.Scope;

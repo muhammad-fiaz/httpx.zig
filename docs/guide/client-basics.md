@@ -125,8 +125,8 @@ var response = try client.head("https://api.example.com/users/1", .{});
 defer response.deinit();
 ```
 
-`options`, `trace`, and `connect` are also available. For a method selected
-at runtime, use `request`:
+`options` is also available. For any other method (including `TRACE` and
+`CONNECT`) select it at runtime and use `request`:
 
 ```zig
 var response = try client.request("https://api.example.com/users", .{

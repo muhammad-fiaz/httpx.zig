@@ -50,13 +50,17 @@ pub fn main() !void {
     const sampleUrl = "https://httpbun.com/bytes/90";
     std.debug.print("==> Downloading {s} with custom progress callback observer...\n", .{sampleUrl});
 
+    // The observer must outlive the download call: `userData` is an
+    // opaque pointer the progress callback casts back to this type.
+    var observer = DownloadObserver{ .taskId = 101 };
+
     _ = client.download(
         sampleUrl,
         .{
             .path = "downloads/observed_download.bin",
             .progress = .custom,
             .onProgress = DownloadObserver.onProgress,
-            .userData = &.{ .taskId = 101 },
+            .userData = &observer,
             .createDirs = true,
         },
     ) catch |err| {

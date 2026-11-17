@@ -7,6 +7,7 @@
 //! Version negotiation packets are handled separately by conn.zig.
 
 const std = @import("std");
+const z = @import("zigantic");
 const varint = @import("varint.zig");
 
 pub const Version = enum(u32) {
@@ -51,30 +52,36 @@ pub const LongType = enum(u2) {
 pub const HeaderError = error{ Truncated, UnsupportedVersion, InvalidPacket, BufferTooSmall, TooLarge };
 
 /// Parsed long header fields. Slices reference the input buffer.
-pub const LongHeader = struct {
-    type: LongType,
-    version: u32,
-    dcid: []const u8,
-    scid: []const u8,
-    token: []const u8 = "",
-    /// Offset of the packet number within the buffer.
-    pnOffset: usize = 0,
-    /// Value of the Length varint: PN bytes + protected payload + tag.
-    length: u64 = 0,
-};
+const LongHeaderSchema = z.objectOf(.{
+    .type = z.enumType(LongType, .{}),
+    .version = z.integer(u32, .{}),
+    .dcid = z.string(.{}),
+    .scid = z.string(.{}),
+    .token = z.withDefault(z.string(.{}), ""),
+    // Offset of the packet number within the buffer.
+    .pnOffset = z.withDefault(z.nonNegativeInt(usize, .{}), 0),
+    // Value of the Length varint: PN bytes + protected payload + tag.
+    .length = z.withDefault(z.nonNegativeInt(u64, .{}), 0),
+}, .{});
+pub const LongHeader = LongHeaderSchema.Value;
 
-pub const ShortHeader = struct {
-    dcid: []const u8 = "",
-    keyPhase: bool = false,
-    pnOffset: usize = 0,
-    pnLen: usize = 0,
-};
+const ShortHeaderSchema = z.objectOf(.{
+    .dcid = z.withDefault(z.string(.{}), ""),
+    .keyPhase = z.withDefault(z.boolean(.{}), false),
+    .pnOffset = z.withDefault(z.nonNegativeInt(usize, .{}), 0),
+    .pnLen = z.withDefault(z.nonNegativeInt(usize, .{}), 0),
+}, .{});
+pub const ShortHeader = ShortHeaderSchema.Value;
 
 pub fn isLongHeader(firstByte: u8) bool {
     return (firstByte & 0x80) != 0;
 }
 
-pub const ParseResult = struct { header: LongHeader, payloadOffset: usize };
+const ParseResultSchema = z.objectOf(.{
+    .header = LongHeaderSchema,
+    .payloadOffset = z.nonNegativeInt(usize, .{}),
+}, .{});
+pub const ParseResult = ParseResultSchema.Value;
 
 pub const VersionNegotiation = struct {
     dcid: []const u8,
@@ -107,11 +114,12 @@ pub fn parseVersionNegotiation(data: []const u8) HeaderError!VersionNegotiation 
     return .{ .dcid = dcid, .scid = scid, .versions = versions };
 }
 
-pub const LongHeaderCids = struct {
-    version: u32,
-    dcid: []const u8,
-    scid: []const u8,
-};
+const LongHeaderCidsSchema = z.objectOf(.{
+    .version = z.integer(u32, .{}),
+    .dcid = z.string(.{}),
+    .scid = z.string(.{}),
+}, .{});
+pub const LongHeaderCids = LongHeaderCidsSchema.Value;
 
 /// Parses just the version and connection IDs from a long header,
 /// including versions this build does not support. Used by servers to
@@ -232,16 +240,17 @@ pub fn parseShortHeader(data: []const u8, dcidLen: usize) HeaderError!ShortHeade
 
 // Serialization
 
-pub const BuildInfo = struct {
-    type: LongType,
-    version: u32,
-    dcid: []const u8,
-    scid: []const u8,
-    token: []const u8 = "",
-    pnLen: usize,
-    /// Payload bytes INCLUDING the AEAD tag (Length field value minus pn).
-    protectedPayloadLen: usize,
-};
+const BuildInfoSchema = z.objectOf(.{
+    .type = z.enumType(LongType, .{}),
+    .version = z.integer(u32, .{}),
+    .dcid = z.string(.{}),
+    .scid = z.string(.{}),
+    .token = z.withDefault(z.string(.{}), ""),
+    .pnLen = z.nonNegativeInt(usize, .{}),
+    // Payload bytes INCLUDING the AEAD tag (Length field value minus pn).
+    .protectedPayloadLen = z.nonNegativeInt(usize, .{}),
+}, .{});
+pub const BuildInfo = BuildInfoSchema.Value;
 
 /// Writes the long header up to (not including) the packet number.
 /// Returns the number of header bytes written; the caller appends
@@ -300,11 +309,12 @@ pub fn varintLen(value: usize) usize {
     return varintWidth(value);
 }
 
-pub const ShortBuildInfo = struct {
-    keyPhase: bool = false,
-    dcid: []const u8,
-    pnLen: usize,
-};
+const ShortBuildInfoSchema = z.objectOf(.{
+    .keyPhase = z.withDefault(z.boolean(.{}), false),
+    .dcid = z.string(.{}),
+    .pnLen = z.nonNegativeInt(usize, .{}),
+}, .{});
+pub const ShortBuildInfo = ShortBuildInfoSchema.Value;
 
 /// Writes the short header up to the packet number. Returns bytes written.
 pub fn writeShortHeader(buf: []u8, info: ShortBuildInfo) HeaderError!usize {

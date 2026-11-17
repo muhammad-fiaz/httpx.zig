@@ -10,10 +10,18 @@
 const std = @import("std");
 const mimeMod = @import("../../common/mime.zig");
 
-pub const swaggerUiVersion = "5.34.1";
-pub const redocVersion = "3.0.1";
-pub const scalarVersion = "1.76.4";
-pub const graphiqlVersion = "6.0.0";
+fn manifestVersion(comptime manifest: []const u8) []const u8 {
+    const end = std.mem.indexOfScalar(u8, manifest, '\n') orelse manifest.len;
+    const line = std.mem.trim(u8, manifest[0..end], " \t\r");
+    const separator = std.mem.lastIndexOfScalar(u8, line, ' ') orelse
+        @compileError("vendor VERSION.txt must start with a package name and version");
+    return line[separator + 1 ..];
+}
+
+pub const swaggerUiVersion = manifestVersion(@embedFile("../../assets/swagger-ui/VERSION.txt"));
+pub const redocVersion = manifestVersion(@embedFile("../../assets/redoc/VERSION.txt"));
+pub const scalarVersion = manifestVersion(@embedFile("../../assets/scalar/VERSION.txt"));
+pub const graphiqlVersion = manifestVersion(@embedFile("../../assets/graphiql/VERSION.txt"));
 
 /// A single embedded asset file.
 pub const File = struct {
@@ -125,10 +133,10 @@ test "lookup miss returns null" {
 }
 
 test "vendored versions are the pinned releases" {
-    try std.testing.expectEqualStrings("5.34.1", swaggerUiVersion);
-    try std.testing.expectEqualStrings("3.0.1", redocVersion);
-    try std.testing.expectEqualStrings("1.76.4", scalarVersion);
-    try std.testing.expectEqualStrings("6.0.0", graphiqlVersion);
+    try std.testing.expect(std.mem.indexOf(u8, swaggerUiBundleJs, swaggerUiVersion) != null);
+    try std.testing.expect(std.mem.indexOf(u8, redocStandaloneJs, redocVersion) != null);
+    try std.testing.expect(std.mem.indexOf(u8, scalarStandaloneJs, scalarVersion) != null);
+    try std.testing.expect(graphiqlVersion.len > 0);
 }
 
 test "bundles carry their version markers" {

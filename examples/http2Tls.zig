@@ -1,6 +1,8 @@
 //! HTTP/2 over TLS end to end over loopback: the server negotiates `h2`
 //! via ALPN behind the native TLS engine, and the client verifies the
 //! chain + hostname before exchanging an H2 request/response.
+//!
+//! Run with: `zig build run-http2-tls`
 
 const std = @import("std");
 const httpx = @import("httpx");
@@ -27,30 +29,8 @@ const keyPem =
     \\-----END PRIVATE KEY-----
 ;
 
-fn handle(
-    _: ?*anyopaque,
-    method: []const u8,
-    path: []const u8,
-    _: []const httpx.http2.transport.Header,
-    _: []const u8,
-) anyerror!httpx.http2.transport.HandlerResponse {
-    if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/secure")) {
-        return .{ .status = 200, .body = "secure-h2" };
-    }
-    return .{ .status = 404, .body = "nope" };
-}
-
-fn runServer(lst: *httpx.socket.tcp.Listener, io: std.Io) void {
-    var conn = lst.accept(io) catch return;
-    defer conn.close();
-    var srv = httpx.tls.Server.init(std.heap.page_allocator, io, .{
-        .certificatePem = certPem,
-        .privateKeyPem = keyPem,
-    }) catch return;
-    defer srv.deinit();
-    var tlsConn = srv.accept(&conn) catch return;
-    defer tlsConn.deinit();
-    httpx.http2.transport.serveTlsConnection(std.heap.page_allocator, &tlsConn, handle, null) catch return;
+fn secureHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
+    return .{ .status = 200, .body = "secure-h2" };
 }
 
 pub fn main() !void {
@@ -59,30 +39,42 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var ctx = try httpx.socket.tcp.IoContext.init(allocator);
-    defer ctx.deinit();
-    var listener = try httpx.socket.tcp.init(allocator, ctx.io, .{});
-    defer listener.close(ctx.io);
-    const port = listener.localPort();
+    var server = try httpx.Server.init(allocator, io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .protocols = .{ .http2 = true },
+        .tls = .{
+            .certificatePem = certPem,
+            .privateKeyPem = keyPem,
+        },
+    });
+    defer server.deinit();
 
-    const th = try std.Thread.spawn(.{}, runServer, .{ &listener, ctx.io });
-    defer th.join();
+    try server.router.add(.GET, "/secure", secureHandler, .{});
 
-    // Two ways to speak H2 over TLS: the high-level client API...
-    {
-        var client = httpx.Client.init(allocator, io, .{});
-        defer client.deinit();
-        var urlBuf: [64]u8 = undefined;
-        const url = try std.fmt.bufPrint(&urlBuf, "https://127.0.0.1:{d}/secure", .{port});
-        var res = try client.get(url, .{
-            .httpVersion = .http2,
-            .tls = .{ .verify = .caBundle, .caPem = certPem },
-            .timeoutMs = 15_000,
-        });
-        defer res.deinit();
-        std.debug.print("client.get: status={d} body={s} version={s}\n", .{ res.status, res.body, res.version.wireNameResolved() });
-        if (res.status != 200) return error.UnexpectedStatus;
-    }
+    const port = server.localPort();
+    std.debug.print("TLS server on 127.0.0.1:{d} (h2 over ALPN)\n", .{port});
+
+    const thread = try server.start();
+
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
+
+    var urlBuf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&urlBuf, "https://127.0.0.1:{d}/secure", .{port});
+    var res = try client.get(url, .{
+        .httpVersion = .http2,
+        .tls = .{ .verify = .caBundle, .caPem = certPem },
+        .timeoutMs = 15_000,
+    });
+    defer res.deinit();
+
+    std.debug.print("client.get: status={d} body={s} version={s}\n", .{ res.status, res.body, res.version.wireNameResolved() });
+    if (res.status != 200) return error.UnexpectedStatus;
+    if (!std.mem.eql(u8, res.body, "secure-h2")) return error.UnexpectedBody;
+
+    server.requestShutdown();
+    thread.join();
 
     std.debug.print("H2-TLS DEMO VERIFICATION PASSED\n", .{});
 }

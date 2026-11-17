@@ -5,7 +5,7 @@
 //! Demonstrates building a router with documented routes and producing
 //! the OpenAPI JSON spec to stdout. The same data drives the built-in
 //! /openapi.json, /docs (Swagger UI), and /redoc endpoints when
-//! `enableDocs` is left on.
+//! Docs are mounted explicitly with `httpx.docs.mount`.
 
 const std = @import("std");
 const httpx = @import("httpx");

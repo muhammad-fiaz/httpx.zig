@@ -23,7 +23,7 @@ pub fn main() !void {
     try server.get("/api/status", statusHandler);
 
     // SPA fallback: serves existing files from ./dist, or falls back to index.html
-    try server.spa("/", "./dist");
+    try server.spa(.{ .mount = "/", .root = "./dist" });
 
     server.run();
 }

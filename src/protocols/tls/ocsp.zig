@@ -10,6 +10,7 @@
 //!   - RFC 6066 Section 8: Certificate Status Request (OCSP Stapling)
 
 const std = @import("std");
+const z = @import("zigantic");
 const Allocator = std.mem.Allocator;
 
 pub const OcspResponseStatus = enum(u8) {
@@ -28,13 +29,14 @@ pub const CertStatusKind = enum {
     unknown,
 };
 
-pub const SingleResponse = struct {
-    status: CertStatusKind,
-    thisUpdate: i64,
-    nextUpdate: ?i64 = null,
-    revocationTime: ?i64 = null,
-    serialNumber: []const u8,
-};
+const SingleResponseSchema = z.objectOf(.{
+    .status = z.enumType(CertStatusKind, .{}),
+    .thisUpdate = z.integer(i64, .{}),
+    .nextUpdate = z.optional(z.integer(i64, .{})),
+    .revocationTime = z.optional(z.integer(i64, .{})),
+    .serialNumber = z.string(.{}),
+}, .{});
+pub const SingleResponse = SingleResponseSchema.Value;
 
 pub const ParsedOcspResponse = struct {
     status: OcspResponseStatus,

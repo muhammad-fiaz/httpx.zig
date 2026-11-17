@@ -14,9 +14,19 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const configCoerce = @import("../../common/configCoerce.zig");
 const ast = @import("ast.zig");
 const parserMod = @import("graphQlParser.zig");
+const z = @import("zigantic");
+
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
 
 pub const TypeKind = enum {
     scalar,
@@ -55,67 +65,81 @@ pub const Context = struct {
 /// One declared field argument. Arguments are part of the type system, not an
 /// afterthought: introspection reports them so every UI can show the argument
 /// list and its input types.
-pub const ArgDef = struct {
-    name: []const u8,
-    description: ?[]const u8 = null,
-    typeName: []const u8,
-    isList: bool = false,
-    isNonNull: bool = false,
-    /// GraphQL literal, e.g. `"10"` or `"ADMIN"`; null means no default.
-    defaultValue: ?[]const u8 = null,
-};
+const ArgDefSchema = z.objectOf(.{
+    .name = z.string(.{ .min = 1 }),
+    .description = z.optional(z.string(.{})),
+    .typeName = z.string(.{ .min = 1 }),
+    .isList = z.withDefault(z.boolean(.{}), false),
+    .isNonNull = z.withDefault(z.boolean(.{}), false),
+    // GraphQL literal, e.g. `"10"` or `"ADMIN"`; null means no default.
+    .defaultValue = z.optional(z.string(.{})),
+}, .{});
+pub const ArgDef = ArgDefSchema.Value;
 
 /// Field of an input object type (no resolver: inputs only carry values).
-pub const InputFieldDef = struct {
-    name: []const u8,
-    description: ?[]const u8 = null,
-    typeName: []const u8,
-    isList: bool = false,
-    isNonNull: bool = false,
-    defaultValue: ?[]const u8 = null,
-};
+const InputFieldDefSchema = z.objectOf(.{
+    .name = z.string(.{ .min = 1 }),
+    .description = z.optional(z.string(.{})),
+    .typeName = z.string(.{ .min = 1 }),
+    .isList = z.withDefault(z.boolean(.{}), false),
+    .isNonNull = z.withDefault(z.boolean(.{}), false),
+    .defaultValue = z.optional(z.string(.{})),
+}, .{});
+pub const InputFieldDef = InputFieldDefSchema.Value;
 
-pub const FieldDef = struct {
-    name: []const u8,
-    description: ?[]const u8 = null,
-    typeName: []const u8,
-    isList: bool = false,
-    isNonNull: bool = false,
-    resolver: ?FieldResolver = null,
-    args: []const ArgDef = &.{},
-};
+const FieldDefSchema = z.objectOf(.{
+    .name = z.string(.{ .min = 1 }),
+    .description = z.optional(z.string(.{})),
+    .typeName = z.string(.{ .min = 1 }),
+    .isList = z.withDefault(z.boolean(.{}), false),
+    .isNonNull = z.withDefault(z.boolean(.{}), false),
+    .resolver = z.optional(z.custom(FieldResolver, .{
+        .check = struct {
+            fn accept(_: FieldResolver) bool {
+                return true;
+            }
+        }.accept,
+    })),
+    .args = z.withDefault(z.array(ArgDefSchema, .{}), &.{}),
+}, .{});
+pub const FieldDef = FieldDefSchema.Value;
 
-pub const ObjectTypeDef = struct {
-    name: []const u8,
-    description: ?[]const u8 = null,
-    fields: []const FieldDef,
-    /// Interface names this object implements, used by introspection.
-    interfaces: []const []const u8 = &.{},
-};
+const ObjectTypeDefSchema = z.objectOf(.{
+    .name = z.string(.{ .min = 1 }),
+    .description = z.optional(z.string(.{})),
+    .fields = z.array(FieldDefSchema, .{}),
+    // Interface names this object implements, used by introspection.
+    .interfaces = z.withDefault(z.array(z.string(.{ .min = 1 }), .{}), &.{}),
+}, .{});
+pub const ObjectTypeDef = ObjectTypeDefSchema.Value;
 
-pub const EnumTypeDef = struct {
-    name: []const u8,
-    description: ?[]const u8 = null,
-    values: []const []const u8,
-};
+const EnumTypeDefSchema = z.objectOf(.{
+    .name = z.string(.{ .min = 1 }),
+    .description = z.optional(z.string(.{})),
+    .values = z.array(z.string(.{ .min = 1 }), .{}),
+}, .{});
+pub const EnumTypeDef = EnumTypeDefSchema.Value;
 
-pub const InputTypeDef = struct {
-    name: []const u8,
-    description: ?[]const u8 = null,
-    fields: []const InputFieldDef,
-};
+const InputTypeDefSchema = z.objectOf(.{
+    .name = z.string(.{ .min = 1 }),
+    .description = z.optional(z.string(.{})),
+    .fields = z.array(InputFieldDefSchema, .{}),
+}, .{});
+pub const InputTypeDef = InputTypeDefSchema.Value;
 
-pub const InterfaceTypeDef = struct {
-    name: []const u8,
-    description: ?[]const u8 = null,
-    fields: []const FieldDef,
-};
+const InterfaceTypeDefSchema = z.objectOf(.{
+    .name = z.string(.{ .min = 1 }),
+    .description = z.optional(z.string(.{})),
+    .fields = z.array(FieldDefSchema, .{}),
+}, .{});
+pub const InterfaceTypeDef = InterfaceTypeDefSchema.Value;
 
-pub const UnionTypeDef = struct {
-    name: []const u8,
-    description: ?[]const u8 = null,
-    members: []const []const u8,
-};
+const UnionTypeDefSchema = z.objectOf(.{
+    .name = z.string(.{ .min = 1 }),
+    .description = z.optional(z.string(.{})),
+    .members = z.array(z.string(.{ .min = 1 }), .{}),
+}, .{});
+pub const UnionTypeDef = UnionTypeDefSchema.Value;
 
 /// The built-in GraphQL scalars, reported by introspection as `SCALAR`.
 const builtinScalars = [_][]const u8{ "Int", "Float", "String", "Boolean", "ID" };
@@ -487,29 +511,28 @@ pub fn implements(comptime def: ObjectTypeDef, comptime ifaces: []const Interfac
     return out;
 }
 
-pub const SchemaConfig = struct {
-    query: ObjectTypeDef,
-    mutation: ?ObjectTypeDef = null,
-    /// Object types (including types that implement interfaces).
-    types: []const ObjectTypeDef = &.{},
-    enums: []const EnumTypeDef = &.{},
-    inputs: []const InputTypeDef = &.{},
-    interfaces: []const InterfaceTypeDef = &.{},
-    unions: []const UnionTypeDef = &.{},
-    maxDepth: usize = 32,
-    maxComplexity: usize = 500,
-    introspection: bool = true,
-};
+const SchemaConfigSchema = z.objectOf(.{
+    .query = typedSchema(ObjectTypeDef),
+    .mutation = z.optional(typedSchema(ObjectTypeDef)),
+    .types = z.withDefault(typedSchema([]const ObjectTypeDef), &.{}),
+    .enums = z.withDefault(typedSchema([]const EnumTypeDef), &.{}),
+    .inputs = z.withDefault(typedSchema([]const InputTypeDef), &.{}),
+    .interfaces = z.withDefault(typedSchema([]const InterfaceTypeDef), &.{}),
+    .unions = z.withDefault(typedSchema([]const UnionTypeDef), &.{}),
+    .maxDepth = z.withDefault(z.positiveInt(usize, .{}), 32),
+    .maxComplexity = z.withDefault(z.integer(usize, .{}), 500),
+    .introspection = z.withDefault(z.boolean(.{}), true),
+}, .{});
+pub const SchemaConfig = SchemaConfigSchema.Value;
 
 pub const Schema = struct {
     allocator: Allocator,
     io: std.Io,
     config: SchemaConfig,
 
-    /// Creates a schema from an explicit allocator, shared I/O, and a partial
-    /// or full config literal. Omitted fields keep their declared defaults.
-    pub fn init(allocator: Allocator, io: std.Io, config_in: anytype) Schema {
-        const config = configCoerce.to(SchemaConfig, config_in);
+    /// Creates a schema from an explicit allocator, shared I/O, and a config
+    /// literal. Omitted fields keep their schema defaults.
+    pub fn init(allocator: Allocator, io: std.Io, config: SchemaConfig) Schema {
         return Schema{
             .allocator = allocator,
             .io = io,
@@ -1127,10 +1150,10 @@ const Fixtures = struct {
     const ItemArgs = struct { prefix: []const u8 };
 
     pub fn getItems(ctx: *Context, args: ItemArgs) ![]const Item {
-        return &.{
-            .{ .id = 1, .label = try std.fmt.allocPrint(ctx.allocator, "{s}-1", .{args.prefix}) },
-            .{ .id = 2, .label = try std.fmt.allocPrint(ctx.allocator, "{s}-2", .{args.prefix}) },
-        };
+        const items = try ctx.allocator.alloc(Item, 2);
+        items[0] = .{ .id = 1, .label = try std.fmt.allocPrint(ctx.allocator, "{s}-1", .{args.prefix}) };
+        items[1] = .{ .id = 2, .label = try std.fmt.allocPrint(ctx.allocator, "{s}-2", .{args.prefix}) };
+        return items;
     }
 
     // Roots are namespace-level declarations too: a definition built inside

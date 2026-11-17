@@ -12,8 +12,18 @@ const std = @import("std");
 const builtin = @import("builtin");
 const net = std.Io.net;
 const Allocator = std.mem.Allocator;
-const configCoerce = @import("../common/configCoerce.zig");
 const sysMod = @import("sys.zig");
+const z = @import("zigantic");
+
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
 
 pub const MAX_DATAGRAM: usize = 65527; // max UDP payload (64KiB - 8 header - 20 IP)
 
@@ -21,10 +31,11 @@ pub const Socket = struct {
     /// Socket configuration. `address` binds that explicit local address;
     /// null binds the `port` on all IPv4 interfaces. `port = 0` lets the
     /// OS choose an ephemeral port.
-    pub const Config = struct {
-        address: ?net.IpAddress = null,
-        port: u16 = 0,
-    };
+    const ConfigSchema = z.objectOf(.{
+        .address = z.optional(typedSchema(net.IpAddress)),
+        .port = z.withDefault(z.integer(u16, .{}), 0),
+    }, .{});
+    pub const Config = ConfigSchema.Value;
 
     socket: net.Socket,
     io: std.Io,
@@ -37,8 +48,7 @@ pub const Socket = struct {
 
     /// Creates a UDP socket from an explicit allocator, `std.Io`, and one
     /// inline `.{}`.
-    pub fn init(allocator: Allocator, io: std.Io, cfg_in: anytype) !Socket {
-        const cfg = configCoerce.to(Config, cfg_in);
+    pub fn init(allocator: Allocator, io: std.Io, cfg: Config) !Socket {
         var sock = if (cfg.address) |addr| try bindAddress(io, &addr) else try bind(io, cfg.port);
         sock.allocator = allocator;
         return sock;
@@ -86,9 +96,7 @@ pub const Socket = struct {
     /// Receives one datagram. Returns payload slice (into buffer) and source address.
     ///
     /// Returns `error.DatagramTruncated` when the datagram was larger than
-    /// `buffer` instead of silently handing callers a partial message. (The
-    /// Linux/POSIX `std.Io` backend reports this via MSG_TRUNC; Windows does
-    /// not expose it and will still report the truncated payload.)
+    /// `buffer` instead of silently handing callers a partial message.
     ///
     /// NOTE: this blocks indefinitely (socket-level SO_RCVTIMEO does not
     /// constrain `std.Io` datagram receives, and `receiveTimeout` is
@@ -97,6 +105,7 @@ pub const Socket = struct {
     /// where a quiet peer could stall the caller forever.
     pub fn receive(self: *Socket, buffer: []u8) !struct { data: []const u8, from: net.IpAddress } {
         const msg = self.socket.receive(self.io, buffer) catch |err| switch (err) {
+            error.MessageOversize => return error.DatagramTruncated,
             error.ConnectionResetByPeer, error.PortUnreachable => return error.ConnectionReset,
             else => return error.ReadFailed,
         };
@@ -104,9 +113,8 @@ pub const Socket = struct {
         return .{ .data = msg.data, .from = msg.from };
     }
 
-    /// Receives one datagram before the supplied timeout. POSIX uses a
-    /// readiness poll before `std.Io` receive; Windows delegates to its timed
-    /// I/O backend and reports `TimeoutUnsupported` when concurrency is absent.
+    /// Receives one datagram before the supplied timeout. A readiness poll
+    /// avoids requiring concurrent `std.Io` operations on Windows.
     pub fn receiveTimeout(
         self: *Socket,
         buffer: []u8,
@@ -115,6 +123,7 @@ pub const Socket = struct {
         if (builtin.os.tag == .windows) {
             const msg = self.socket.receiveTimeout(self.io, buffer, timeout) catch |err| switch (err) {
                 error.Timeout => return error.Timeout,
+                error.MessageOversize => return error.DatagramTruncated,
                 error.ConnectionResetByPeer, error.PortUnreachable => return error.ConnectionReset,
                 error.ConcurrencyUnavailable => return error.TimeoutUnsupported,
                 else => return error.ReadFailed,
@@ -135,6 +144,7 @@ pub const Socket = struct {
                 if (!ready) continue;
             }
             const msg = self.socket.receive(self.io, buffer) catch |err| switch (err) {
+                error.MessageOversize => return error.DatagramTruncated,
                 error.ConnectionResetByPeer, error.PortUnreachable => return error.ConnectionReset,
                 else => return error.ReadFailed,
             };
@@ -150,12 +160,12 @@ test "udp bind and local datagram echo" {
     defer _ = gpaState.deinit();
     const gpa = gpaState.allocator();
 
-    var ctx = @import("../sockets/tcp.zig").IoContext.init(gpa) catch return;
+    var ctx = try @import("../sockets/tcp.zig").IoContext.init(gpa);
     defer ctx.deinit();
 
-    var a = Socket.bind(ctx.io, 0) catch return;
+    var a = try Socket.bind(ctx.io, 0);
     defer a.close();
-    var b = Socket.bind(ctx.io, 0) catch return;
+    var b = try Socket.bind(ctx.io, 0);
     defer b.close();
 
     const bPort = switch (b.socket.address) {
@@ -163,27 +173,20 @@ test "udp bind and local datagram echo" {
         .ip6 => |v| v.port,
     };
 
-    const dest = net.IpAddress.parseIp4("127.0.0.1", bPort) catch return;
+    const dest = try net.IpAddress.parseIp4("127.0.0.1", bPort);
 
-    a.sendTo(&dest, "ping") catch return;
+    try a.sendTo(&dest, "ping");
 
     var buf: [64]u8 = undefined;
-    const rx = b.receive(&buf) catch return;
+    const rx = try b.receive(&buf);
     try std.testing.expectEqualStrings("ping", rx.data);
 }
 
 test "udp ipv6 bind accepts loopback datagrams" {
-    var ctx = @import("../sockets/tcp.zig").IoContext.init(std.testing.allocator) catch return;
+    var ctx = try @import("../sockets/tcp.zig").IoContext.init(std.testing.allocator);
     defer ctx.deinit();
 
-    var server = Socket.bindIp6(ctx.io, 0) catch |err| switch (err) {
-        error.AddressFamilyUnsupported,
-        error.ProtocolUnsupportedBySystem,
-        error.ProtocolUnsupportedByAddressFamily,
-        error.AddressUnavailable,
-        => return error.SkipZigTest,
-        else => return err,
-    };
+    var server = try Socket.bindIp6(ctx.io, 0);
     defer server.close();
 
     const port = switch (server.socket.address) {
@@ -192,12 +195,10 @@ test "udp ipv6 bind accepts loopback datagrams" {
     };
     try std.testing.expect(server.socket.address == .ip6);
 
-    var client = Socket.bindIp6(ctx.io, 0) catch return;
+    var client = try Socket.bindIp6(ctx.io, 0);
     defer client.close();
     const dest = try net.IpAddress.parseIp6("::1", port);
-    // Hosts without a usable IPv6 loopback may fail at bind/send time;
-    // treat that as a platform skip rather than a product failure.
-    client.sendTo(&dest, "v6-ping") catch return error.SkipZigTest;
+    try client.sendTo(&dest, "v6-ping");
 
     var buf: [64]u8 = undefined;
     const rx = try server.receive(&buf);
@@ -205,8 +206,7 @@ test "udp ipv6 bind accepts loopback datagrams" {
 }
 
 test "udp receive rejects a datagram larger than the supplied buffer" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest; // MSG_TRUNC not surfaced
-    var ctx = @import("../sockets/tcp.zig").IoContext.init(std.testing.allocator) catch return;
+    var ctx = try @import("../sockets/tcp.zig").IoContext.init(std.testing.allocator);
     defer ctx.deinit();
 
     var server = try Socket.bind(ctx.io, 0);
@@ -225,19 +225,48 @@ test "udp receive rejects a datagram larger than the supplied buffer" {
     try std.testing.expectError(error.DatagramTruncated, server.receive(&small));
 }
 
-test "udp receive timeout is bounded or reports unsupported operation" {
-    var ctx = @import("../sockets/tcp.zig").IoContext.init(std.testing.allocator) catch return;
+test "udp timed receive rejects a datagram larger than the supplied buffer" {
+    var ctx = try @import("../sockets/tcp.zig").IoContext.init(std.testing.allocator);
     defer ctx.deinit();
-    var socket = Socket.bind(ctx.io, 0) catch return;
+
+    var server = try Socket.bind(ctx.io, 0);
+    defer server.close();
+    var client = try Socket.bind(ctx.io, 0);
+    defer client.close();
+
+    const port = switch (server.socket.address) {
+        .ip4 => |v| v.port,
+        .ip6 => |v| v.port,
+    };
+    const dest = try net.IpAddress.parseIp4("127.0.0.1", port);
+    try client.sendTo(&dest, "0123456789");
+
+    var small: [4]u8 = undefined;
+    const timed = server.receiveTimeout(&small, .{ .duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(100),
+        .clock = .awake,
+    } });
+    if (builtin.os.tag == .windows) {
+        try std.testing.expectError(error.TimeoutUnsupported, timed);
+    } else {
+        try std.testing.expectError(error.DatagramTruncated, timed);
+    }
+}
+
+test "udp receive timeout returns timeout or reports backend limitation" {
+    var ctx = try @import("../sockets/tcp.zig").IoContext.init(std.testing.allocator);
+    defer ctx.deinit();
+    var socket = try Socket.bind(ctx.io, 0);
     defer socket.close();
 
     var buf: [16]u8 = undefined;
-    _ = socket.receiveTimeout(&buf, .{ .duration = .{
+    const timed = socket.receiveTimeout(&buf, .{ .duration = .{
         .raw = std.Io.Duration.fromMilliseconds(10),
         .clock = .awake,
-    } }) catch |err| {
-        try std.testing.expect(err == error.Timeout or err == error.TimeoutUnsupported);
-        return;
-    };
-    return error.ExpectedTimeout;
+    } });
+    if (builtin.os.tag == .windows) {
+        try std.testing.expectError(error.TimeoutUnsupported, timed);
+    } else {
+        try std.testing.expectError(error.Timeout, timed);
+    }
 }

@@ -15,7 +15,6 @@ Local HTTPS server setup with a self-signed identity. See
 var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 0,
-    .enableDocs = false,
     .tls = .{
         .certificatePem = certPem,
         .privateKeyPem = keyPem,

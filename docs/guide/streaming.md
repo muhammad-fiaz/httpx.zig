@@ -45,17 +45,17 @@ For streaming uploads, set `.body` in the operation options to a
 
 ## Server-Sent Events (SSE)
 
-`httpx.sse.Event.Writer` serializes SSE event blocks. Return the encoded body
+`httpx.sse.Writer` serializes SSE event blocks. Return the encoded body
 with the `text/event-stream` content type:
 
 ```zig
 fn eventsHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    var out = std.ArrayList(u8).empty;
-    var writer = httpx.sse.Event.Writer.init(ctx.allocator);
-    try writer.writeEvent(&out, &.{"Server started"}, "status", 1, null);
+    var writer = httpx.sse.Writer.init(ctx.allocator, ctx.io, .{});
+    defer writer.deinit();
+    try writer.writeEvent(&.{"Server started"}, .{ .event = "status", .id = 1 });
     return .{
         .status = 200,
-        .body = out.items,
+        .body = writer.buffered(),
         .contentType = "text/event-stream; charset=utf-8",
         .headers = &.{.{ .name = "Cache-Control", .value = "no-cache" }},
     };

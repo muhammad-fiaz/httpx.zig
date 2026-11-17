@@ -30,6 +30,9 @@ pub const DEFAULT_TABLE_SIZE: usize = 4096;
 /// Per-entry size overhead (RFC 7541 Section 4.1).
 pub const ENTRY_OVERHEAD: usize = 32;
 
+/// Stack scratch size used to Huffman-decode short header strings.
+const huffman_stack_size = 512;
+
 // Static table (RFC 7541 Appendix A) — indices are 1-based on the wire.
 
 pub const StaticEntry = struct { name: []const u8, value: []const u8 };
@@ -100,6 +103,35 @@ pub const staticTable = [_]StaticEntry{
 
 pub const STATIC_TABLE_SIZE = staticTable.len;
 
+/// The static entries that share one header name.
+///
+/// The static table lists the entries of a name consecutively, so a name
+/// resolves to a contiguous run of entries: the first one is used for a
+/// name-only reference, and the run is scanned for a name+value match.
+const StaticNameGroup = struct {
+    /// 1-based wire index of the first entry carrying the name.
+    first: u32,
+    /// Number of consecutive entries carrying the name.
+    count: u32,
+};
+
+/// Compile-time index from a header name to its static-table entries.
+/// Replaces a linear scan over the 61-entry table on every lookup.
+const staticNameMap = std.StaticStringMap(StaticNameGroup).initComptime(blk: {
+    var list: [STATIC_TABLE_SIZE]struct { []const u8, StaticNameGroup } = undefined;
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < staticTable.len) {
+        const name = staticTable[i].name;
+        var j = i + 1;
+        while (j < staticTable.len and std.mem.eql(u8, staticTable[j].name, name)) j += 1;
+        list[n] = .{ name, .{ .first = @intCast(i + 1), .count = @intCast(j - i) } };
+        n += 1;
+        i = j;
+    }
+    break :blk list[0..n];
+});
+
 fn checkedEntrySize(nameLen: usize, valueLen: usize) ?usize {
     const withOverhead = std.math.add(usize, ENTRY_OVERHEAD, nameLen) catch return null;
     return std.math.add(usize, withOverhead, valueLen) catch return null;
@@ -119,9 +151,20 @@ const DynTable = struct {
     size: usize = 0,
     maxSize: usize = DEFAULT_TABLE_SIZE,
 
+    /// Name and value live back-to-back in a single allocation, so an
+    /// insert costs one allocator round-trip instead of two.
     const Entry = struct {
-        name: []u8,
-        value: []u8,
+        buf: []u8,
+        /// Byte length of the name inside `buf`.
+        name_len: usize,
+
+        pub fn nameOf(e: Entry) []const u8 {
+            return e.buf[0..e.name_len];
+        }
+
+        pub fn valueOf(e: Entry) []const u8 {
+            return e.buf[e.name_len..];
+        }
     };
 
     fn init(allocator: Allocator) DynTable {
@@ -130,8 +173,7 @@ const DynTable = struct {
 
     fn deinit(self: *DynTable) void {
         for (self.entries.items) |e| {
-            self.allocator.free(e.name);
-            self.allocator.free(e.value);
+            self.allocator.free(e.buf);
         }
         self.entries.deinit(self.allocator);
     }
@@ -139,9 +181,8 @@ const DynTable = struct {
     fn evictFor(self: *DynTable, incoming: ?usize) void {
         while ((incoming == null or self.size > self.maxSize or incoming.? > self.maxSize - self.size) and self.entries.items.len > 0) {
             const old = self.entries.pop() orelse break;
-            self.size -= entrySize(old.name, old.value) orelse unreachable;
-            self.allocator.free(old.name);
-            self.allocator.free(old.value);
+            self.size -= entrySize(old.nameOf(), old.valueOf()) orelse unreachable;
+            self.allocator.free(old.buf);
         }
     }
 
@@ -152,11 +193,11 @@ const DynTable = struct {
         self.evictFor(size);
         const entry_bytes = size orelse return;
         if (entry_bytes > self.maxSize) return; // emptied, not stored
-        const ownedName = try self.allocator.dupe(u8, name);
-        errdefer self.allocator.free(ownedName);
-        const ownedValue = try self.allocator.dupe(u8, value);
-        errdefer self.allocator.free(ownedValue);
-        try self.entries.insert(self.allocator, 0, .{ .name = ownedName, .value = ownedValue });
+        const buf = try self.allocator.alloc(u8, name.len + value.len);
+        errdefer self.allocator.free(buf);
+        @memcpy(buf[0..name.len], name);
+        @memcpy(buf[name.len..], value);
+        try self.entries.insert(self.allocator, 0, .{ .buf = buf, .name_len = name.len });
         self.size += entry_bytes;
     }
 
@@ -167,7 +208,8 @@ const DynTable = struct {
 
     fn get(self: *const DynTable, rel: usize) ?StaticEntry {
         if (rel >= self.entries.items.len) return null;
-        return .{ .name = self.entries.items[rel].name, .value = self.entries.items[rel].value };
+        const e = self.entries.items[rel];
+        return .{ .name = e.nameOf(), .value = e.valueOf() };
     }
 };
 
@@ -222,6 +264,11 @@ pub const Decoder = struct {
 
     const StringResult = struct { data: []u8, owned: bool };
 
+    /// Decoded name and value of a literal header field. Each part is
+    /// either owned (Huffman-decoded) or borrowed from the block or the
+    /// header tables.
+    const Literal = struct { name: StringResult, value: StringResult };
+
     fn readString(self: *Decoder, data: []const u8, offset: *usize) Error!StringResult {
         if (offset.* >= data.len) return Error.Truncated;
         const huffmanBit = data[offset.*] & 0x80 != 0;
@@ -234,6 +281,17 @@ pub const Decoder = struct {
             return .{ .data = @constCast(raw), .owned = false };
         }
         const cap = huff.maxDecodedLen(rawLen);
+        // Short strings decode on the stack and are copied out at their
+        // exact size, so the result can be freed with a plain free().
+        if (cap <= huffman_stack_size) {
+            var stack: [huffman_stack_size]u8 = undefined;
+            const n = huff.decode(stack[0..cap], raw) catch |e| return switch (e) {
+                error.InvalidHuffmanCode => Error.InvalidHuffmanCode,
+                error.BufferTooSmall => Error.HeaderTooLarge,
+            };
+            const exact = self.allocator.dupe(u8, stack[0..n]) catch return Error.OutOfMemory;
+            return .{ .data = exact, .owned = true };
+        }
         const buf = try self.allocator.alloc(u8, cap);
         const n = huff.decode(buf, raw) catch |e| {
             self.allocator.free(buf);
@@ -292,12 +350,13 @@ pub const Decoder = struct {
                 // 1xxxxxxx: indexed header field.
                 const idx = try pint.decode(block, &offset, 7);
                 const f = try self.lookup(idx);
-                total = addSize(total, f) catch blk: {
+                total = addSize(total, f.name, f.value) catch blk: {
                     tooLarge = true;
                     break :blk std.math.maxInt(usize);
                 };
                 if (!tooLarge and total <= self.maxHeaderList) {
-                    try appendOwned(&list, self.allocator, f);
+                    // The table entry stays owned by the table: copy it.
+                    try appendCopy(&list, self.allocator, f);
                 } else {
                     tooLarge = true;
                 }
@@ -305,18 +364,19 @@ pub const Decoder = struct {
             } else if (b & 0xC0 == 0x40) {
                 // 01xxxxxx: literal WITH incremental indexing.
                 const idx = try pint.decode(block, &offset, 6);
-                const f = try self.readLiteral(block, &offset, idx);
+                var lit = try self.readLiteral(block, &offset, idx);
                 defer {
-                    self.allocator.free(f.name);
-                    self.allocator.free(f.value);
+                    self.freeString(lit.name);
+                    self.freeString(lit.value);
                 }
-                self.dyn.insert(f.name, f.value) catch return Error.OutOfMemory;
-                total = addSize(total, f) catch blk: {
+                // The dynamic table keeps its own copy (RFC 7541 Section 2.3.2).
+                self.dyn.insert(lit.name.data, lit.value.data) catch return Error.OutOfMemory;
+                total = addSize(total, lit.name.data, lit.value.data) catch blk: {
                     tooLarge = true;
                     break :blk std.math.maxInt(usize);
                 };
                 if (!tooLarge and total <= self.maxHeaderList) {
-                    try appendDup(&list, self.allocator, f);
+                    try self.appendLiteral(&list, &lit);
                 } else {
                     tooLarge = true;
                 }
@@ -335,17 +395,17 @@ pub const Decoder = struct {
             } else {
                 // 0000xxxx / 0001xxxx: literal without indexing / never indexed.
                 const idx = try pint.decode(block, &offset, 4);
-                const f = try self.readLiteral(block, &offset, idx);
+                var lit = try self.readLiteral(block, &offset, idx);
                 defer {
-                    self.allocator.free(f.name);
-                    self.allocator.free(f.value);
+                    self.freeString(lit.name);
+                    self.freeString(lit.value);
                 }
-                total = addSize(total, f) catch blk: {
+                total = addSize(total, lit.name.data, lit.value.data) catch blk: {
                     tooLarge = true;
                     break :blk std.math.maxInt(usize);
                 };
                 if (!tooLarge and total <= self.maxHeaderList) {
-                    try appendDup(&list, self.allocator, f);
+                    try self.appendLiteral(&list, &lit);
                 } else {
                     tooLarge = true;
                 }
@@ -362,39 +422,65 @@ pub const Decoder = struct {
         };
     }
 
-    fn addSize(total: usize, f: HeaderField) !usize {
-        return std.math.add(usize, total, ENTRY_OVERHEAD + f.name.len + f.value.len);
+    /// Appends a literal field, taking ownership of the decoded strings.
+    /// Borrowed strings (static/dynamic table entries) are copied;
+    /// Huffman-decoded ones are adopted as they are.
+    fn appendLiteral(self: *Decoder, list: *std.ArrayList(HeaderField), lit: *Literal) Error!void {
+        const name_owned = !lit.name.owned;
+        const value_owned = !lit.value.owned;
+        const name = if (name_owned)
+            self.allocator.dupe(u8, lit.name.data) catch return Error.OutOfMemory
+        else
+            lit.name.data;
+        const value = if (value_owned)
+            self.allocator.dupe(u8, lit.value.data) catch {
+                if (name_owned) self.allocator.free(name);
+                return Error.OutOfMemory;
+            }
+        else
+            lit.value.data;
+        list.append(self.allocator, .{ .name = name, .value = value }) catch {
+            if (name_owned) self.allocator.free(name);
+            if (value_owned) self.allocator.free(value);
+            return Error.OutOfMemory;
+        };
+        // Ownership moved into the list: the caller must not free them.
+        lit.name.owned = false;
+        lit.value.owned = false;
     }
 
-    fn readLiteral(self: *Decoder, block: []const u8, offset: *usize, nameIndex: u64) Error!HeaderField {
-        const nameRes = if (nameIndex == 0)
+    fn addSize(total: usize, name: []const u8, value: []const u8) !usize {
+        return std.math.add(usize, total, ENTRY_OVERHEAD + name.len + value.len);
+    }
+
+    /// Reads a literal header field. The name may be borrowed from the
+    /// header tables; the value is borrowed from the block unless it was
+    /// Huffman-decoded. The caller owns the returned parts.
+    fn readLiteral(self: *Decoder, block: []const u8, offset: *usize, nameIndex: u64) Error!Literal {
+        const name = if (nameIndex == 0)
             try self.readString(block, offset)
         else blk: {
             const nf = try self.lookup(nameIndex);
             break :blk StringResult{ .data = @constCast(nf.name), .owned = false };
         };
-        defer if (nameIndex == 0) self.freeString(nameRes);
-
-        const valRes = try self.readString(block, offset);
-        defer self.freeString(valRes);
-
-        const ownedName = try self.allocator.dupe(u8, nameRes.data);
-        errdefer self.allocator.free(ownedName);
-        const ownedValue = try self.allocator.dupe(u8, valRes.data);
-        return .{ .name = ownedName, .value = ownedValue };
+        errdefer self.freeString(name);
+        const value = try self.readString(block, offset);
+        return .{ .name = name, .value = value };
     }
 };
 
-fn appendDup(list: *std.ArrayList(HeaderField), gpa: Allocator, f: HeaderField) Error!void {
+/// Appends a copy of `f` to the list; both strings are freshly owned.
+fn appendCopy(list: *std.ArrayList(HeaderField), gpa: Allocator, f: HeaderField) Error!void {
     const name = gpa.dupe(u8, f.name) catch return Error.OutOfMemory;
-    errdefer gpa.free(name);
-    const value = gpa.dupe(u8, f.value) catch return Error.OutOfMemory;
-    errdefer gpa.free(value);
-    list.append(gpa, .{ .name = name, .value = value }) catch return Error.OutOfMemory;
-}
-
-fn appendOwned(list: *std.ArrayList(HeaderField), gpa: Allocator, f: HeaderField) Error!void {
-    try appendDup(list, gpa, f);
+    const value = gpa.dupe(u8, f.value) catch {
+        gpa.free(name);
+        return Error.OutOfMemory;
+    };
+    list.append(gpa, .{ .name = name, .value = value }) catch {
+        gpa.free(name);
+        gpa.free(value);
+        return Error.OutOfMemory;
+    };
 }
 
 // Encoder
@@ -443,51 +529,66 @@ pub const Encoder = struct {
     }
 
     fn findNameIndex(self: *const Encoder, name: []const u8) struct { idx: u64, inDyn: bool } {
-        for (staticTable, 0..) |e, i| {
-            if (std.mem.eql(u8, e.name, name)) return .{ .idx = i + 1, .inDyn = false };
+        // Static table: constant-time lookup through the compile-time map.
+        if (staticNameMap.get(name)) |group| {
+            return .{ .idx = group.first, .inDyn = false };
         }
         // Dynamic indices are relative to the newest entry and start
         // AFTER the whole static table.
         for (self.dyn.entries.items, 0..) |e, i| {
-            if (std.mem.eql(u8, e.name, name))
+            if (std.mem.eql(u8, e.nameOf(), name))
                 return .{ .idx = STATIC_TABLE_SIZE + 1 + i, .inDyn = true };
         }
         return .{ .idx = 0, .inDyn = false };
     }
 
     fn findFullIndex(self: *const Encoder, name: []const u8, value: []const u8) ?u64 {
-        for (staticTable, 0..) |e, i| {
-            if (std.mem.eql(u8, e.name, name) and std.mem.eql(u8, e.value, value)) return i + 1;
+        // Only the static entries sharing this name can match, and they
+        // are consecutive, so the scan stays tiny.
+        if (staticNameMap.get(name)) |group| {
+            var i: usize = group.first - 1;
+            const end = i + group.count;
+            while (i < end) : (i += 1) {
+                const e = staticTable[i];
+                if (std.mem.eql(u8, e.value, value)) return i + 1;
+            }
         }
         for (self.dyn.entries.items, 0..) |e, i| {
-            if (std.mem.eql(u8, e.name, name) and std.mem.eql(u8, e.value, value))
+            if (std.mem.eql(u8, e.nameOf(), name) and std.mem.eql(u8, e.valueOf(), value))
                 return STATIC_TABLE_SIZE + 1 + i;
         }
         return null;
     }
 
+    /// `name` is already lowercased, so the comparison is exact.
     fn shouldIndex(name: []const u8) bool {
         for (noIndexNames) |n| {
-            if (std.ascii.eqlIgnoreCase(n, name)) return false;
+            if (std.mem.eql(u8, n, name)) return false;
         }
         return true;
     }
 
+    /// Emits a string literal (RFC 7541 Section 5.2).
+    ///
+    /// The Huffman-encoded length is known up front, so the payload is
+    /// written straight into the output buffer: no scratch allocation
+    /// and no 5x over-sized temporary.
     fn emitString(out: *std.ArrayList(u8), gpa: Allocator, data: []const u8) !void {
-        if (data.len > 0) {
-            const compressed = try gpa.alloc(u8, huff.maxEncodedLen(data.len));
-            defer gpa.free(compressed);
-            if (huff.encode(compressed, data)) |n| {
-                if (n < data.len) {
-                    // Huffman flag bit set + length of encoded form.
-                    var tmp: [10]u8 = undefined;
-                    const nn = try pint.encode(tmp[0..], 7, 0x80, n);
-                    try out.appendSlice(gpa, tmp[0..nn]);
-                    try out.appendSlice(gpa, compressed[0..n]);
-                    return;
-                }
+        const hlen = huff.encodedLen(data);
+        if (hlen < data.len) {
+            // Huffman flag bit set + length of the encoded form.
+            var tmp: [10]u8 = undefined;
+            const nn = try pint.encode(tmp[0..], 7, 0x80, hlen);
+            try out.ensureUnusedCapacity(gpa, nn + hlen);
+            const base = out.items.len;
+            const cap = out.unusedCapacitySlice();
+            @memcpy(cap[0..nn], tmp[0..nn]);
+            if (huff.encode(cap[nn..][0..hlen], data)) |n| {
+                out.items.len = base + nn + n;
+                return;
             } else |_| {
-                // Fall through to raw encoding.
+                // `hlen` is the exact encoded length, so this cannot
+                // happen; fall back to the raw literal below.
             }
         }
         var tmp: [10]u8 = undefined;
@@ -518,8 +619,10 @@ pub const Encoder = struct {
             try out.appendSlice(self.allocator, tmp[0..n]);
         }
 
-        const name = try lowerBuf(self.allocator, nameIn);
-        defer self.allocator.free(name);
+        var name_stack: [name_stack_size]u8 = undefined;
+        const lowered = try lowerName(self.allocator, nameIn, &name_stack);
+        defer lowered.deinit(self.allocator);
+        const name = lowered.bytes;
 
         var ib: [10]u8 = undefined;
 
@@ -588,8 +691,29 @@ pub const Encoder = struct {
     }
 };
 
-fn lowerBuf(gpa: Allocator, name: []const u8) ![]u8 {
-    return std.ascii.allocLowerString(gpa, name);
+/// Stack scratch for the lowercased header name. HTTP/2 field names are
+/// short, so the common case never touches the heap.
+const name_stack_size = 64;
+
+/// A lowercased header name, either in the caller's stack buffer or in
+/// a heap allocation for unusually long names.
+const LoweredName = struct {
+    bytes: []const u8,
+    owned: bool,
+
+    fn deinit(self: LoweredName, gpa: Allocator) void {
+        if (self.owned) gpa.free(self.bytes);
+    }
+};
+
+fn lowerName(gpa: Allocator, name: []const u8, stack: []u8) !LoweredName {
+    if (name.len <= stack.len) {
+        return .{ .bytes = std.ascii.lowerString(stack, name)[0..name.len], .owned = false };
+    }
+    const owned = try gpa.alloc(u8, name.len);
+    errdefer gpa.free(owned);
+    _ = std.ascii.lowerString(owned, name);
+    return .{ .bytes = owned, .owned = true };
 }
 
 // Tests
@@ -842,8 +966,8 @@ test "dynamic table size arithmetic is checked at usize boundaries" {
     var dyn = DynTable.init(a);
     defer dyn.deinit();
     try dyn.entries.append(a, .{
-        .name = try a.dupe(u8, "x"),
-        .value = try a.dupe(u8, "y"),
+        .buf = try a.dupe(u8, "xy"),
+        .name_len = 1,
     });
     // This models a legal table close to the maximum representable size on a
     // 32-bit target. Adding the incoming size would wrap and skip eviction.
@@ -932,6 +1056,111 @@ test "never-indexed encoding never emits an indexed representation" {
     try std.testing.expectEqualStrings("authorization", r2.fields[0].name);
     try std.testing.expectEqualStrings("Bearer secret", r2.fields[0].value);
     try std.testing.expectEqual(tableLen, dec.dyn.entries.items.len);
+}
+
+test "static table lookups resolve the documented indices" {
+    const a = std.testing.allocator;
+    var enc = Encoder.init(a);
+    defer enc.deinit();
+
+    // ":method GET" is static entry 2, ":status 200" is entry 8.
+    var block = std.ArrayList(u8).empty;
+    defer block.deinit(a);
+    try enc.encode(&block, ":method", "GET", .without, false);
+    try std.testing.expectEqual(@as(u8, 0x82), block.items[0]);
+
+    block.clearRetainingCapacity();
+    try enc.encode(&block, ":status", "200", .without, false);
+    try std.testing.expectEqual(@as(u8, 0x88), block.items[0]);
+
+    // ":path /index.html" is static entry 5 and shares its name with
+    // ":path /" (entry 4).
+    block.clearRetainingCapacity();
+    try enc.encode(&block, ":path", "/index.html", .without, false);
+    try std.testing.expectEqual(@as(u8, 0x85), block.items[0]);
+    try std.testing.expectEqual(@as(usize, 1), block.items.len);
+
+    // A name that is in the table but whose value is not falls back to a
+    // literal that references the *first* entry with that name (":path").
+    block.clearRetainingCapacity();
+    try enc.encode(&block, ":path", "/other", .without, false);
+    try std.testing.expectEqual(@as(u8, 0x04), block.items[0] & 0x0F);
+    try std.testing.expectEqual(@as(u8, 0x00), block.items[0] & 0xF0);
+
+    // A name that is not in the static table falls back to a literal.
+    block.clearRetainingCapacity();
+    try enc.encode(&block, "x-not-in-static", "v", .without, false);
+    try std.testing.expectEqual(@as(u8, 0x00), block.items[0] & 0xF0);
+}
+
+test "encoder emits huffman-coded literals when they are shorter" {
+    const a = std.testing.allocator;
+    var enc = Encoder.init(a);
+    defer enc.deinit();
+    var dec = Decoder.init(a);
+    defer dec.deinit();
+
+    var block = std.ArrayList(u8).empty;
+    defer block.deinit(a);
+    // A long, highly compressible value must be Huffman coded.
+    try enc.encode(&block, "x-compressible", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .without, false);
+
+    // Literal without indexing (0x00) with a new name.
+    try std.testing.expectEqual(@as(u8, 0x00), block.items[0]);
+
+    var off: usize = 1;
+    const nameLen = try pint.decode(block.items, &off, 7);
+    // The name is not in the static table, so it is Huffman coded too.
+    try std.testing.expect(block.items[off - 1] & 0x80 != 0);
+    off += @intCast(nameLen);
+    // The value string carries the Huffman flag in bit 7 of its length
+    // octet: the raw value is 32 bytes, the coded one is much shorter.
+    try std.testing.expect(block.items[off] & 0x80 != 0);
+    const valueLen = try pint.decode(block.items, &off, 7);
+    try std.testing.expect(valueLen < 32);
+
+    const res = try dec.decode(block.items);
+    defer {
+        for (res.fields) |f| {
+            a.free(f.name);
+            a.free(f.value);
+        }
+        a.free(res.fields);
+    }
+    try std.testing.expectEqual(@as(usize, 1), res.fields.len);
+    try std.testing.expectEqualStrings("x-compressible", res.fields[0].name);
+    try std.testing.expectEqualStrings("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", res.fields[0].value);
+}
+
+test "huffman-coded literals decode through the shared codec" {
+    const a = std.testing.allocator;
+    var d = Decoder.init(a);
+    defer d.deinit();
+
+    var name_buf: [16]u8 = undefined;
+    const name_len = try huff.encode(&name_buf, "abc");
+    var value_buf: [16]u8 = undefined;
+    const value_len = try huff.encode(&value_buf, "xyz");
+
+    var block = std.ArrayList(u8).empty;
+    defer block.deinit(a);
+    try block.append(a, 0x10); // never indexed
+    try block.append(a, 0x80 | @as(u8, @intCast(name_len)));
+    try block.appendSlice(a, name_buf[0..name_len]);
+    try block.append(a, 0x80 | @as(u8, @intCast(value_len)));
+    try block.appendSlice(a, value_buf[0..value_len]);
+
+    const res = try d.decode(block.items);
+    defer {
+        for (res.fields) |f| {
+            a.free(f.name);
+            a.free(f.value);
+        }
+        a.free(res.fields);
+    }
+    try std.testing.expectEqual(@as(usize, 1), res.fields.len);
+    try std.testing.expectEqualStrings("abc", res.fields[0].name);
+    try std.testing.expectEqualStrings("xyz", res.fields[0].value);
 }
 
 test "never-indexed literals decode but stay out of the dynamic table" {

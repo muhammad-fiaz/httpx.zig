@@ -4,7 +4,7 @@ Path traversal attacks (CWE-22) occur when an attacker accesses files outside th
 
 ## Built-In Protections in HTTPX
 
-When mounting static assets via `server.static(url_prefix, root_dir)`:
+When mounting static assets via `server.static(.{ .mount = url_prefix, .root = root_dir })`:
 1. **Lexical Normalization**: Resolves and cleans all relative segments (`.` and `..`).
 2. **URL Decoding Validation**: Traversal sequences hidden within percent-encoded octets (`%2e%2e%2f` or `%252e%252e%252f`) are decoded and blocked before filesystem access.
 3. **Prefix Containment**: Validates that the canonicalized target path remains strictly a subpath of the declared root directory.
@@ -15,7 +15,7 @@ When mounting static assets via `server.static(url_prefix, root_dir)`:
 
 ```zig
 // Mount static directory securely
-server.static("/public", "./static_assets");
+server.static(.{ .mount = "/public", .root = "./static_assets" });
 
 // Requests such as:
 //   GET /public/../../etc/passwd

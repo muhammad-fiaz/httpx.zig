@@ -19,7 +19,7 @@ Read `Set-Cookie` values from any response with `res.header("Set-Cookie")`.
 For multi-request flows, keep a `httpx.client.jar` alongside the client:
 
 ```zig
-var jar = httpx.client.jar.init(allocator, io);
+var jar = httpx.client.jar.init(allocator, io, .{});
 defer jar.deinit();
 
 // After a login response carrying Set-Cookie:

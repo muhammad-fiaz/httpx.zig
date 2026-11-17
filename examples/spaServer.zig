@@ -26,8 +26,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 4,
+        .limits = .{ .maxConnections = 4 },
     });
     defer server.deinit();
 
@@ -35,7 +34,7 @@ pub fn main() !void {
     try server.get("/api/user", apiHandler);
 
     // Register SPA fallback using existing examples/static directory
-    try server.spa("/", "examples/static");
+    try server.spa(.{ .mount = "/", .root = "examples/static" });
 
     const port = server.localPort();
     std.debug.print("SPA server listening on http://127.0.0.1:{d}\n", .{port});

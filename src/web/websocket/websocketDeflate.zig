@@ -11,6 +11,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const flate = std.compress.flate;
+const z = @import("zigantic");
 
 pub const EXTENSION_NAME = "permessage-deflate";
 pub const TAIL_TRAILER = [_]u8{ 0x00, 0x00, 0xFF, 0xFF };
@@ -23,13 +24,14 @@ pub const DeflateError = error{
     InvalidExtensionHeader,
 };
 
-pub const PermessageDeflateConfig = struct {
-    clientNoContextTakeover: bool = true,
-    serverNoContextTakeover: bool = true,
-    clientMaxWindowBits: ?u4 = null,
-    serverMaxWindowBits: ?u4 = null,
-    maxDecompressedSize: usize = DEFAULT_MAX_DECOMPRESSED_SIZE,
-};
+const PermessageDeflateConfigSchema = z.objectOf(.{
+    .clientNoContextTakeover = z.withDefault(z.boolean(.{}), true),
+    .serverNoContextTakeover = z.withDefault(z.boolean(.{}), true),
+    .clientMaxWindowBits = z.optional(z.integer(u4, .{ .min = 8, .max = 15 })),
+    .serverMaxWindowBits = z.optional(z.integer(u4, .{ .min = 8, .max = 15 })),
+    .maxDecompressedSize = z.withDefault(z.positiveInt(usize, .{}), DEFAULT_MAX_DECOMPRESSED_SIZE),
+}, .{});
+pub const PermessageDeflateConfig = PermessageDeflateConfigSchema.Value;
 
 /// Formats a Sec-WebSocket-Extensions client offer string for permessage-deflate.
 pub fn formatOffer(allocator: Allocator, config: PermessageDeflateConfig) ![]u8 {

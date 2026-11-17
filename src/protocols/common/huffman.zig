@@ -33,11 +33,22 @@ pub fn maxEncodedLen(len: usize) usize {
     return len * 5 + 1;
 }
 
+/// Exact number of bytes `encode` will produce for `src`.
+///
+/// Lets callers size a buffer exactly (instead of the 5x `maxEncodedLen`
+/// over-estimate) and decide whether Huffman coding is worthwhile before
+/// paying for the encoding pass.
+pub fn encodedLen(src: []const u8) usize {
+    var bits: usize = 0;
+    for (src) |b| bits += symTable[b].len;
+    return (bits + 7) / 8;
+}
+
 /// Upper bound on decoded size for `encodedLen` compressed bytes. The
 /// shortest Huffman code is 5 bits, so each input byte emits at most
 /// ceil(8/5) symbols (the +1 covers a partial final symbol).
-pub fn maxDecodedLen(encodedLen: usize) usize {
-    return encodedLen * 8 / 5 + 1;
+pub fn maxDecodedLen(encoded_bytes: usize) usize {
+    return encoded_bytes * 8 / 5 + 1;
 }
 
 /// Encodes `src` into `out`, padding the final byte with EOS MSBs.
@@ -330,6 +341,27 @@ test "encode single 'a' pads with EOS MSBs" {
     var out: [4]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 1), try encode(&out, "a"));
     try std.testing.expectEqual(@as(u8, 0b00011111), out[0]);
+}
+
+test "encodedLen matches the encoder output size" {
+    const samples = [_][]const u8{
+        "",
+        "a",
+        "www.example.com",
+        ":method",
+        "GET",
+        "/index.html",
+        "no-cache",
+        "custom-key",
+        "content-type",
+        "application/json; charset=utf-8",
+        "\x00\x01\x02\xff control bytes survive",
+    };
+    var buf: [512]u8 = undefined;
+    for (samples) |s| {
+        const n = try encode(&buf, s);
+        try std.testing.expectEqual(n, encodedLen(s));
+    }
 }
 
 test "roundtrip ascii corpus" {

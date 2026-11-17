@@ -10,25 +10,19 @@ const Router = routerMod.Router;
 const Context = routerMod.Context;
 const Response = routerMod.Response;
 const staticFiles = @import("../staticFiles/static.zig");
+const z = @import("zigantic");
 
-pub const Config = struct {
-    /// The filesystem path to the SPA directory (e.g. "./dist").
-    root: []const u8 = "dist",
-    /// The fallback file for unmatched routes (default: "index.html").
-    fallback: []const u8 = "index.html",
-    /// URL prefix under which real files are served.
-    mount: []const u8 = "/",
-    /// Serve from the embedded registry only; never touch the filesystem.
-    filesystem: bool = true,
-    /// URL prefixes that must NEVER fall back to the SPA entry file (e.g. &[_][]const u8{"/api", "/auth"}).
-    excludePrefixes: []const []const u8 = &.{},
-    /// Live reload / hot reload for development.
-    liveReload: bool = false,
-    /// SSE endpoint path for live-reload broadcast (default: "/__httpx_liveReload").
-    reloadSsePath: []const u8 = "/__httpx_liveReload",
-    /// Cache-Control on success responses.
-    cacheControl: []const u8 = "public, max-age=3600",
-};
+const ConfigSchema = z.objectOf(.{
+    .root = z.withDefault(z.string(.{ .min = 1 }), "dist"),
+    .fallback = z.withDefault(z.string(.{ .min = 1 }), "index.html"),
+    .mount = z.withDefault(z.string(.{ .min = 1, .prefix = "/" }), "/"),
+    .filesystem = z.withDefault(z.boolean(.{}), true),
+    .excludePrefixes = z.withDefault(z.array(z.string(.{ .min = 1, .prefix = "/" }), .{}), &.{}),
+    .liveReload = z.withDefault(z.boolean(.{}), false),
+    .reloadSsePath = z.withDefault(z.string(.{ .min = 1, .prefix = "/" }), "/__httpx_liveReload"),
+    .cacheControl = z.withDefault(z.string(.{}), "public, max-age=3600"),
+}, .{});
+pub const Config = ConfigSchema.Value;
 
 /// Register the SPA's static assets on the router.
 ///
@@ -36,6 +30,10 @@ pub const Config = struct {
 /// precedence; register it last so the static mount only claims what
 /// remains.
 pub fn register(router: *Router, cfg: Config) !void {
+    var scratch: [4096]u8 = undefined;
+    const issue = z.checkFirst(ConfigSchema, cfg, &scratch, .{}) catch
+        return error.InvalidMount;
+    if (issue != null) return error.InvalidMount;
     try staticFiles.register(router, .{
         .root = cfg.root,
         .mount = cfg.mount,

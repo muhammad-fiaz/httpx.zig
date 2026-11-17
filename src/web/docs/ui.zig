@@ -14,169 +14,152 @@
 //! Route conflicts are surfaced as Router errors, never silently overwritten.
 //!
 //! Handlers are capture-less fn pointers, so mounted state is carried in
-//! `Context.userData`. Each router mount owns its own state; `unmountRouter`
+//! `Context.userData`. Each server mount owns its own state; `unmount`
 //! releases one mount and `unmount` releases every remaining mount.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const configCoerce = @import("../../common/configCoerce.zig");
 const routerMod = @import("../router/router.zig");
 const Router = routerMod.Router;
 const Response = routerMod.Response;
 const Context = routerMod.Context;
 const Method = @import("../../common/method.zig").Method;
 const mediaTypeMod = @import("../../common/mediaType.zig");
-const openapi = @import("../openApi/openApiSpec.zig");
+const openapi = @import("../openApi/spec.zig");
 const assets = @import("assets.zig");
 const metaMod = @import("../router/routeMetadata.zig");
 const versionInfo = @import("../../common/version.zig");
+const z = @import("zigantic");
+const headersMod = @import("../../common/headers.zig");
 
 /// Operation expansion for Swagger UI: `list`, `full`, or `none`.
 pub const DocExpansion = enum { list, full, none };
 pub const DefaultModelRendering = enum { example, model };
 pub const SubmitMethod = enum { get, put, post, delete, options, head, patch, trace };
 
-/// A single custom HTTP header. Only needed when the built-in header fields on
-/// `GraphiQLHeaders` do not cover the request.
-pub const Header = struct {
-    name: []const u8,
-    value: []const u8,
-};
+pub const HeaderSchema = headersMod.HeaderSchema;
+pub const Header = headersMod.Header;
 
 /// GraphiQL request headers. Common headers use flat fields so the simple case
 /// stays a single `.{ ... }` literal; `custom` is used only for extra headers.
-pub const GraphiQLHeaders = struct {
-    authorization: []const u8 = "",
-    cookie: []const u8 = "",
-    accept: []const u8 = "",
-    custom: []const Header = &.{},
-};
+pub const GraphiQLHeadersSchema = z.objectOf(.{
+    .authorization = z.withDefault(z.string(.{}), ""),
+    .cookie = z.withDefault(z.string(.{}), ""),
+    .accept = z.withDefault(z.string(.{}), ""),
+    .custom = z.withDefault(z.array(HeaderSchema, .{}), &.{}),
+}, .{});
+pub const GraphiQLHeaders = GraphiQLHeadersSchema.Value;
 
-/// Swagger UI options. Every field is explicit and typed; omitted fields use
-/// the vendor defaults documented next to each option.
-pub const SwaggerConfig = struct {
-    enabled: bool = true,
-    route: []const u8 = "/docs",
-    title: []const u8 = "Swagger UI",
-    docExpansion: DocExpansion = .list,
-    defaultModelRendering: DefaultModelRendering = .example,
-    defaultModelsExpandDepth: i32 = 1,
-    defaultModelExpandDepth: i32 = 1,
-    deepLinking: bool = true,
-    displayOperationId: bool = false,
-    displayRequestDuration: bool = false,
-    filter: bool = false,
-    persistAuthorization: bool = false,
-    tryItOutEnabled: bool = false,
-    showExtensions: bool = false,
-    showCommonExtensions: bool = false,
-    showMutatedRequest: bool = true,
-    withCredentials: bool = false,
-    useUnsafeMarkdown: bool = false,
-    requestSnippetsEnabled: bool = false,
-    /// `null` shows every tag.
-    maxDisplayedTags: ?i32 = null,
-    /// `null` disables the online validator; empty uses the vendor default.
-    validatorUrl: ?[]const u8 = null,
-    /// Methods allowed in "Try it out"; empty means every method.
-    supportedSubmitMethods: []const SubmitMethod = &.{},
-    /// OAuth2 redirect URL; null serves `{route}/oauth2-redirect.html`.
-    oauth2RedirectUrl: ?[]const u8 = null,
-};
+pub const SwaggerConfigSchema = z.objectOf(.{
+    .enabled = z.withDefault(z.boolean(.{}), true),
+    .route = z.withDefault(z.string(.{ .min = 1, .prefix = "/" }), "/docs"),
+    .title = z.withDefault(z.string(.{}), "Swagger UI"),
+    .docExpansion = z.withDefault(z.enumType(DocExpansion, .{}), .list),
+    .defaultModelRendering = z.withDefault(z.enumType(DefaultModelRendering, .{}), .example),
+    .defaultModelsExpandDepth = z.withDefault(z.integer(i32, .{}), 1),
+    .defaultModelExpandDepth = z.withDefault(z.integer(i32, .{}), 1),
+    .deepLinking = z.withDefault(z.boolean(.{}), true),
+    .displayOperationId = z.withDefault(z.boolean(.{}), false),
+    .displayRequestDuration = z.withDefault(z.boolean(.{}), false),
+    .filter = z.withDefault(z.boolean(.{}), false),
+    .persistAuthorization = z.withDefault(z.boolean(.{}), false),
+    .tryItOutEnabled = z.withDefault(z.boolean(.{}), false),
+    .showExtensions = z.withDefault(z.boolean(.{}), false),
+    .showCommonExtensions = z.withDefault(z.boolean(.{}), false),
+    .showMutatedRequest = z.withDefault(z.boolean(.{}), true),
+    .withCredentials = z.withDefault(z.boolean(.{}), false),
+    .useUnsafeMarkdown = z.withDefault(z.boolean(.{}), false),
+    .requestSnippetsEnabled = z.withDefault(z.boolean(.{}), false),
+    .maxDisplayedTags = z.optional(z.integer(i32, .{})),
+    .validatorUrl = z.optional(z.string(.{})),
+    .supportedSubmitMethods = z.withDefault(z.array(z.enumType(SubmitMethod, .{}), .{}), &.{}),
+    .oauth2RedirectUrl = z.optional(z.string(.{})),
+}, .{});
+pub const SwaggerConfig = SwaggerConfigSchema.Value;
 
-/// ReDoc options. Every field maps to the matching `Redoc.init` option.
-pub const RedocConfig = struct {
-    enabled: bool = true,
-    route: []const u8 = "/redoc",
-    title: []const u8 = "ReDoc",
-    hideHostname: bool = false,
-    hideDownloadButton: bool = false,
-    hideFab: bool = false,
-    hideLoading: bool = false,
-    hideLogo: bool = false,
-    hideSecuritySection: bool = false,
-    /// Comma-separated status codes expanded by default, e.g. `"200,201"`.
-    expandResponses: []const u8 = "",
-    pathInMiddlePanel: bool = false,
-    requiredPropsFirst: bool = false,
-    sortPropsAlphabetically: bool = false,
-    sortEnumValuesAlphabetically: bool = false,
-    noAutoAuth: bool = false,
-    disableSearch: bool = false,
-    nativeScrollbars: bool = false,
-    onlyRequiredInSamples: bool = false,
-    menuToggle: bool = false,
-    jsonSampleExpandLevel: i32 = 2,
-    generatedPayloadSamplesMaxDepth: i32 = 10,
-    /// Offset in pixels applied to the menu when scrolling; null uses the
-    /// vendor default.
-    scrollYOffset: ?i32 = null,
-};
+pub const RedocConfigSchema = z.objectOf(.{
+    .enabled = z.withDefault(z.boolean(.{}), true),
+    .route = z.withDefault(z.string(.{ .min = 1, .prefix = "/" }), "/redoc"),
+    .title = z.withDefault(z.string(.{}), "ReDoc"),
+    .hideHostname = z.withDefault(z.boolean(.{}), false),
+    .hideDownloadButton = z.withDefault(z.boolean(.{}), false),
+    .hideFab = z.withDefault(z.boolean(.{}), false),
+    .hideLoading = z.withDefault(z.boolean(.{}), false),
+    .hideLogo = z.withDefault(z.boolean(.{}), false),
+    .hideSecuritySection = z.withDefault(z.boolean(.{}), false),
+    .expandResponses = z.withDefault(z.string(.{}), ""),
+    .pathInMiddlePanel = z.withDefault(z.boolean(.{}), false),
+    .requiredPropsFirst = z.withDefault(z.boolean(.{}), false),
+    .sortPropsAlphabetically = z.withDefault(z.boolean(.{}), false),
+    .sortEnumValuesAlphabetically = z.withDefault(z.boolean(.{}), false),
+    .noAutoAuth = z.withDefault(z.boolean(.{}), false),
+    .disableSearch = z.withDefault(z.boolean(.{}), false),
+    .nativeScrollbars = z.withDefault(z.boolean(.{}), false),
+    .onlyRequiredInSamples = z.withDefault(z.boolean(.{}), false),
+    .menuToggle = z.withDefault(z.boolean(.{}), false),
+    .jsonSampleExpandLevel = z.withDefault(z.integer(i32, .{}), 2),
+    .generatedPayloadSamplesMaxDepth = z.withDefault(z.integer(i32, .{}), 10),
+    .scrollYOffset = z.optional(z.integer(i32, .{})),
+}, .{});
+pub const RedocConfig = RedocConfigSchema.Value;
 
-/// Scalar options. Every field is written into the page's
-/// `data-configuration` JSON, so no option is silently dropped.
-pub const ScalarConfig = struct {
-    enabled: bool = true,
-    route: []const u8 = "/scalar",
-    title: []const u8 = "Scalar API Reference",
-    /// `default`, `alternate`, `moon`, `purple`, `solarized`, …
-    theme: []const u8 = "default",
-    darkMode: bool = false,
-    hideModels: bool = false,
-    hideDownloadButton: bool = false,
-    hideTestRequestButton: bool = false,
-    hideClientButton: bool = false,
-    isEditable: bool = false,
-    showSidebar: bool = true,
-    showDeveloperTools: bool = false,
-    defaultOpenAllTags: bool = false,
-    telemetry: bool = true,
-    persistAuth: bool = false,
-    withDefaultFonts: bool = true,
-    /// Search hotkey, e.g. `"k"`.
-    searchHotKey: []const u8 = "k",
-    /// Optional proxy URL for "Try it out" requests.
-    proxyUrl: []const u8 = "",
-    /// Optional custom CSS injected into the page.
-    customCss: []const u8 = "",
-};
+pub const ScalarConfigSchema = z.objectOf(.{
+    .enabled = z.withDefault(z.boolean(.{}), true),
+    .route = z.withDefault(z.string(.{ .min = 1, .prefix = "/" }), "/scalar"),
+    .title = z.withDefault(z.string(.{}), "Scalar API Reference"),
+    .theme = z.withDefault(z.string(.{}), "default"),
+    .darkMode = z.withDefault(z.boolean(.{}), false),
+    .hideModels = z.withDefault(z.boolean(.{}), false),
+    .hideDownloadButton = z.withDefault(z.boolean(.{}), false),
+    .hideTestRequestButton = z.withDefault(z.boolean(.{}), false),
+    .hideClientButton = z.withDefault(z.boolean(.{}), false),
+    .isEditable = z.withDefault(z.boolean(.{}), false),
+    .showSidebar = z.withDefault(z.boolean(.{}), true),
+    .showDeveloperTools = z.withDefault(z.boolean(.{}), false),
+    .defaultOpenAllTags = z.withDefault(z.boolean(.{}), false),
+    .telemetry = z.withDefault(z.boolean(.{}), true),
+    .persistAuth = z.withDefault(z.boolean(.{}), false),
+    .withDefaultFonts = z.withDefault(z.boolean(.{}), true),
+    .searchHotKey = z.withDefault(z.string(.{}), "k"),
+    .proxyUrl = z.withDefault(z.string(.{}), ""),
+    .customCss = z.withDefault(z.string(.{}), ""),
+}, .{});
+pub const ScalarConfig = ScalarConfigSchema.Value;
 
-/// GraphiQL options passed to `window.renderGraphiQL(element, options)`.
-pub const GraphiQLConfig = struct {
-    enabled: bool = true,
-    route: []const u8 = "/graphiql",
-    graphqlEndpoint: []const u8 = "/graphql",
-    title: []const u8 = "GraphiQL IDE",
-    /// Query pre-filled in the editor.
-    defaultQuery: []const u8 = "",
-    /// Monaco editor theme, e.g. `"vs-dark"`.
-    editorTheme: []const u8 = "",
-    /// Extra HTTP headers attached to every GraphQL request.
-    headers: GraphiQLHeaders = .{},
-    shouldPersistHeaders: bool = false,
-    inputValueDeprecation: bool = false,
-    schemaDescription: bool = false,
-    docExplorerOpen: bool = false,
-    isHeadersEditorEnabled: bool = true,
-};
+pub const GraphiQLConfigSchema = z.objectOf(.{
+    .enabled = z.withDefault(z.boolean(.{}), true),
+    .route = z.withDefault(z.string(.{ .min = 1, .prefix = "/" }), "/graphiql"),
+    .graphqlEndpoint = z.withDefault(z.string(.{ .min = 1, .prefix = "/" }), "/graphql"),
+    .title = z.withDefault(z.string(.{}), "GraphiQL IDE"),
+    .defaultQuery = z.withDefault(z.string(.{}), ""),
+    .editorTheme = z.withDefault(z.string(.{}), ""),
+    .headers = z.withDefault(GraphiQLHeadersSchema, .{}),
+    .shouldPersistHeaders = z.withDefault(z.boolean(.{}), false),
+    .inputValueDeprecation = z.withDefault(z.boolean(.{}), false),
+    .schemaDescription = z.withDefault(z.boolean(.{}), false),
+    .docExplorerOpen = z.withDefault(z.boolean(.{}), false),
+    .isHeadersEditorEnabled = z.withDefault(z.boolean(.{}), true),
+}, .{});
+pub const GraphiQLConfig = GraphiQLConfigSchema.Value;
 
-pub const OpenApiConfig = struct {
-    enabled: bool = true,
-    route: []const u8 = "/openapi.json",
-};
+pub const OpenApiConfigSchema = z.objectOf(.{
+    .enabled = z.withDefault(z.boolean(.{}), true),
+    .route = z.withDefault(z.string(.{ .min = 1, .prefix = "/" }), "/openapi.json"),
+}, .{});
+pub const OpenApiConfig = OpenApiConfigSchema.Value;
 
-pub const Config = struct {
-    /// Master switch; when false nothing is registered.
-    enabled: bool = true,
-    title: []const u8 = versionInfo.defaultInfo.title,
-    version: []const u8 = versionInfo.version,
-    description: []const u8 = versionInfo.defaultInfo.description,
-    openapi: OpenApiConfig = .{},
-    swagger: SwaggerConfig = .{},
-    redoc: RedocConfig = .{},
-    scalar: ScalarConfig = .{},
-    graphiql: GraphiQLConfig = .{},
-};
+pub const ConfigSchema = z.objectOf(.{
+    .enabled = z.withDefault(z.boolean(.{}), true),
+    .title = z.withDefault(z.string(.{}), versionInfo.defaultInfo.title),
+    .version = z.withDefault(z.string(.{}), versionInfo.defaultInfo.version),
+    .description = z.withDefault(z.string(.{}), versionInfo.defaultInfo.description),
+    .openapi = z.withDefault(OpenApiConfigSchema, .{}),
+    .swagger = z.withDefault(SwaggerConfigSchema, .{}),
+    .redoc = z.withDefault(RedocConfigSchema, .{}),
+    .scalar = z.withDefault(ScalarConfigSchema, .{}),
+    .graphiql = z.withDefault(GraphiQLConfigSchema, .{}),
+}, .{});
+pub const Config = ConfigSchema.Value;
 
 const DocsState = struct {
     allocator: Allocator,
@@ -268,18 +251,33 @@ fn freeState(st: *DocsState) void {
     a.destroy(st);
 }
 
-/// Registers documentation routes on `router` and captures the generated
-/// OpenAPI document. The spec reflects routes registered BEFORE this call.
-pub fn mount(
+/// Mounts documentation on an initialized server. Its router and allocator
+/// are borrowed from the server owner, and `cfg` is compile-time so disabled
+/// UI bundles can be eliminated when the compiler can prove them unreachable.
+pub fn mount(server: anytype, comptime cfg: Config) !void {
+    try mountRouter(server.allocator, &server.router, cfg);
+}
+
+/// Removes only the documentation mount belonging to this initialized server.
+pub fn unmount(server: anytype) void {
+    unmountFromRouter(&server.router);
+}
+
+/// Internal router-level implementation shared with the module tests.
+fn mountRouter(
     allocator: Allocator,
     router: *Router,
-    cfg_in: anytype,
-    info: ?openapi.Info,
+    comptime cfg: Config,
 ) !void {
-    const cfg = configCoerce.to(Config, cfg_in);
     if (!cfg.enabled) return;
+    {
+        var scratch: [4096]u8 = undefined;
+        const issue = z.checkFirst(ConfigSchema, cfg, &scratch, .{}) catch
+            return error.InvalidConfig;
+        if (issue != null) return error.InvalidConfig;
+    }
 
-    const actualInfo = info orelse openapi.Info{
+    const actualInfo = openapi.Info{
         .title = cfg.title,
         .version = cfg.version,
         .description = cfg.description,
@@ -410,8 +408,8 @@ pub fn mount(
     gMounts = st;
 }
 
-/// Frees the docs state mounted on `router`. Other mounts are untouched.
-pub fn unmountRouter(router: *const Router) void {
+/// Frees docs state mounted on one router. Other mounts are untouched.
+fn unmountFromRouter(router: *const Router) void {
     var link = &gMounts;
     while (link.*) |st| {
         if (st.router == router) {
@@ -423,8 +421,8 @@ pub fn unmountRouter(router: *const Router) void {
     }
 }
 
-/// Frees every mounted docs state. Safe to call when nothing is mounted.
-pub fn unmount() void {
+/// Frees every mounted docs state. Intended for process/test teardown.
+pub fn unmountAll() void {
     var current = gMounts;
     gMounts = null;
     while (current) |st| {
@@ -752,8 +750,8 @@ test "mount registers spec, pages, and local assets" {
     defer router.deinit();
     try router.get("/hello", helloHandler, .{});
 
-    try mount(a, &router, .{}, .{ .title = "Demo" });
-    defer unmount();
+    try mountRouter(a, &router, .{});
+    defer unmountAll();
 
     // Spec excludes docs routes but includes user routes.
     const res = (try invoke(&router, .GET, "/openapi.json", a)).?;
@@ -806,8 +804,8 @@ test "scalar opt-in mounts its page and bundle" {
     defer router.deinit();
     try router.get("/users/{id}", helloHandler, .{});
 
-    try mount(a, &router, .{ .redoc = .{ .enabled = false }, .scalar = .{ .enabled = true } }, null);
-    defer unmount();
+    try mountRouter(a, &router, .{ .redoc = .{ .enabled = false }, .scalar = .{ .enabled = true } });
+    defer unmountAll();
 
     const page = (try invoke(&router, .GET, "/scalar", a)).?;
     try std.testing.expect(std.mem.indexOf(u8, page.body, "id=\"api-reference\"") != null);
@@ -825,7 +823,7 @@ test "disabled config registers nothing" {
     var router = Router.init(a, .{});
     defer router.deinit();
 
-    try mount(a, &router, .{ .enabled = false }, null);
+    try mountRouter(a, &router, .{ .enabled = false });
     try std.testing.expect((try invoke(&router, .GET, "/openapi.json", a)) == null);
 }
 
@@ -834,7 +832,7 @@ test "disabled docs releases routes to the application" {
     var router = Router.init(a, .{});
     defer router.deinit();
 
-    try mount(a, &router, .{ .enabled = false }, null);
+    try mountRouter(a, &router, .{ .enabled = false });
 
     // The application can now own /docs; requests reach its handler.
     try router.get("/docs", helloHandler, .{});
@@ -848,8 +846,8 @@ test "openapi disabled option suppresses /openapi.json only" {
     defer router.deinit();
     try router.get("/ping", helloHandler, .{});
 
-    try mount(a, &router, .{ .openapi = .{ .enabled = false }, .swagger = .{ .enabled = true } }, null);
-    defer unmount();
+    try mountRouter(a, &router, .{ .openapi = .{ .enabled = false }, .swagger = .{ .enabled = true } });
+    defer unmountAll();
 
     try std.testing.expect((try invoke(&router, .GET, "/openapi.json", a)) == null);
     try std.testing.expect((try invoke(&router, .GET, "/docs", a)) != null);
@@ -861,8 +859,8 @@ test "conflicting user route is reported, not overwritten" {
     defer router.deinit();
     try router.get("/docs", helloHandler, .{}); // user already owns /docs
 
-    try std.testing.expectError(error.DuplicateRoute, mount(a, &router, .{}, null));
-    unmount(); // partial state cleaned up
+    try std.testing.expectError(error.DuplicateRoute, mountRouter(a, &router, .{}));
+    unmountAll(); // partial state cleaned up
 }
 
 test "graphiql opt-in mounts its page and all worker assets" {
@@ -871,8 +869,8 @@ test "graphiql opt-in mounts its page and all worker assets" {
     defer router.deinit();
     try router.get("/graphql", helloHandler, .{});
 
-    try mount(a, &router, .{ .graphiql = .{ .enabled = true, .graphqlEndpoint = "/graphql" } }, null);
-    defer unmount();
+    try mountRouter(a, &router, .{ .graphiql = .{ .enabled = true, .graphqlEndpoint = "/graphql" } });
+    defer unmountAll();
 
     const page = (try invoke(&router, .GET, "/graphiql", a)).?;
     try std.testing.expect(std.mem.indexOf(u8, page.body, "id=\"graphiql\"") != null);
@@ -898,8 +896,8 @@ test "graphiql codicon font resolves under a custom mount route" {
     defer router.deinit();
     try router.get("/graphql", helloHandler, .{});
 
-    try mount(a, &router, .{ .graphiql = .{ .enabled = true, .route = "/internal/ide", .graphqlEndpoint = "/graphql" } }, null);
-    defer unmount();
+    try mountRouter(a, &router, .{ .graphiql = .{ .enabled = true, .route = "/internal/ide", .graphqlEndpoint = "/graphql" } });
+    defer unmountAll();
 
     const css = (try invoke(&router, .GET, "/internal/ide/graphiql.css", a)).?;
     try std.testing.expect(std.mem.indexOf(u8, css.body, "url(\"codicon-mxdk0fnd.ttf\")") != null);
@@ -919,7 +917,7 @@ test "every ui option reaches the rendered page" {
     defer router.deinit();
     try router.get("/ping", helloHandler, .{});
 
-    try mount(a, &router, .{
+    try mountRouter(a, &router, .{
         .swagger = .{
             .route = "/api-docs",
             .docExpansion = .full,
@@ -953,8 +951,8 @@ test "every ui option reaches the rendered page" {
             .headers = .{ .authorization = "Bearer demo" },
             .docExplorerOpen = true,
         },
-    }, null);
-    defer unmount();
+    });
+    defer unmountAll();
 
     const swagger = (try invoke(&router, .GET, "/api-docs", a)).?;
     try std.testing.expect(std.mem.indexOf(u8, swagger.body, "\"docExpansion\":\"full\"") != null);
@@ -992,8 +990,8 @@ test "all documentation pages are self-hosted and offline" {
     defer router.deinit();
     try router.get("/hello", helloHandler, .{});
 
-    try mount(a, &router, .{}, null);
-    defer unmount();
+    try mountRouter(a, &router, .{});
+    defer unmountAll();
 
     const Pages = struct {
         fn page(r: *Router, path: []const u8, alloc: Allocator) !Response {
@@ -1018,8 +1016,8 @@ test "all vendored assets serve with correct mime and markers" {
     defer router.deinit();
     try router.get("/hello", helloHandler, .{});
 
-    try mount(a, &router, .{}, .{ .title = "Demo" });
-    defer unmount();
+    try mountRouter(a, &router, .{});
+    defer unmountAll();
 
     const Case = struct {
         path: []const u8,
@@ -1076,8 +1074,8 @@ test "disabling swagger and redoc leaves scalar and spec" {
     defer router.deinit();
     try router.get("/ping", helloHandler, .{});
 
-    try mount(a, &router, .{ .swagger = .{ .enabled = false }, .redoc = .{ .enabled = false } }, null);
-    defer unmount();
+    try mountRouter(a, &router, .{ .swagger = .{ .enabled = false }, .redoc = .{ .enabled = false } });
+    defer unmountAll();
 
     try std.testing.expect((try invoke(&router, .GET, "/docs", a)) == null);
     try std.testing.expect((try invoke(&router, .GET, "/redoc", a)) == null);
@@ -1095,9 +1093,9 @@ test "docs mounts are isolated per router and unmount removes routes" {
     try first.get("/first", helloHandler, .{});
     try second.get("/second", helloHandler, .{});
 
-    try mount(a, &first, .{}, null);
-    try mount(a, &second, .{}, null);
-    defer unmount();
+    try mountRouter(a, &first, .{});
+    try mountRouter(a, &second, .{});
+    defer unmountAll();
 
     // Both mounts serve independently.
     try std.testing.expect((try invoke(&first, .GET, "/openapi.json", a)) != null);
@@ -1106,11 +1104,33 @@ test "docs mounts are isolated per router and unmount removes routes" {
 
     // Unmounting one router leaves the other mount usable and removes only
     // the first router's docs routes.
-    unmountRouter(&first);
+    unmountFromRouter(&first);
     try std.testing.expect((try invoke(&first, .GET, "/openapi.json", a)) == null);
     try std.testing.expect((try invoke(&first, .GET, "/docs", a)) == null);
     try std.testing.expect((try invoke(&second, .GET, "/openapi.json", a)) != null);
     try std.testing.expect((try invoke(&second, .GET, "/docs", a)) != null);
+}
+
+test "public docs mount borrows server resources and unmount is owner-scoped" {
+    const Owner = struct {
+        allocator: Allocator,
+        router: Router,
+    };
+    var owner = Owner{
+        .allocator = std.testing.allocator,
+        .router = Router.init(std.testing.allocator, .{}),
+    };
+    defer owner.router.deinit();
+
+    try mount(&owner, .{
+        .swagger = .{ .enabled = false },
+        .redoc = .{ .enabled = false },
+        .scalar = .{ .enabled = false },
+        .graphiql = .{ .enabled = false },
+    });
+    try std.testing.expect(owner.router.hasConflict(.GET, "/openapi.json"));
+    unmount(&owner);
+    try std.testing.expect(!owner.router.hasConflict(.GET, "/openapi.json"));
 }
 
 test "openapi document is a stable mount-time snapshot" {
@@ -1119,8 +1139,8 @@ test "openapi document is a stable mount-time snapshot" {
     defer router.deinit();
     try router.get("/before", helloHandler, .{});
 
-    try mount(a, &router, .{}, null);
-    defer unmount();
+    try mountRouter(a, &router, .{});
+    defer unmountAll();
 
     const first = (try invoke(&router, .GET, "/openapi.json", a)).?;
     const first_copy = try a.dupe(u8, first.body);

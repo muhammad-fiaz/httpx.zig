@@ -19,7 +19,6 @@
 //! arrives exactly as sent.
 
 const std = @import("std");
-const configCoerce = @import("../../common/configCoerce.zig");
 const Allocator = std.mem.Allocator;
 const routerMod = @import("../router/router.zig");
 const Context = routerMod.Context;
@@ -27,6 +26,17 @@ const Response = routerMod.Response;
 const schemaMod = @import("graphQlSchema.zig");
 const jsonMod = @import("../../common/json.zig");
 const mediaTypeMod = @import("../../common/mediaType.zig");
+const z = @import("zigantic");
+
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
 
 pub const Schema = schemaMod.Schema;
 pub const SchemaConfig = schemaMod.SchemaConfig;
@@ -37,42 +47,50 @@ pub const Mutation = schemaMod.Mutation;
 
 /// GraphQL-over-HTTP request payload. Parsed dynamically from the document so
 /// arbitrary JSON keys in `variables` are preserved exactly.
-pub const HandlerConfig = struct {
-    /// Route the endpoint is mounted on.
-    endpoint: []const u8 = "/graphql",
-    /// Maximum accepted request body.
-    maxBodySize: usize = 2 * 1024 * 1024,
-    /// Emit `Access-Control-Allow-Origin: *`.
-    cors: bool = true,
-    /// Allow queries over GET (`?query=…`).
-    allowGet: bool = true,
-    /// Response media type. `application/graphql-response+json` is the
-    /// GraphQL-over-HTTP registration; the JSON default stays compatible with
-    /// clients that only accept `application/json`.
-    responseContentType: []const u8 = jsonMod.applicationJsonUtf8,
-};
+const HandlerConfigSchema = z.objectOf(.{
+    .endpoint = z.withDefault(z.string(.{ .min = 1, .prefix = "/" }), "/graphql"),
+    .maxBodySize = z.withDefault(z.positiveInt(usize, .{}), 2 * 1024 * 1024),
+    .cors = z.withDefault(z.boolean(.{}), true),
+    .allowGet = z.withDefault(z.boolean(.{}), true),
+    .responseContentType = z.withDefault(z.string(.{ .min = 1 }), jsonMod.applicationJsonUtf8),
+}, .{});
+pub const HandlerConfig = HandlerConfigSchema.Value;
 
 /// Server-side mount configuration. `server.graphql(.{ .query = …, .types = … })`
 /// builds the `Schema` from the server's allocator and `std.Io`, so no
 /// separate `Schema.init` is needed: schema fields and mount fields live in
 /// one literal.
-pub const MountConfig = struct {
-    query: schemaMod.ObjectTypeDef,
-    mutation: ?schemaMod.ObjectTypeDef = null,
-    types: []const schemaMod.ObjectTypeDef = &.{},
-    enums: []const schemaMod.EnumTypeDef = &.{},
-    inputs: []const schemaMod.InputTypeDef = &.{},
-    interfaces: []const schemaMod.InterfaceTypeDef = &.{},
-    unions: []const schemaMod.UnionTypeDef = &.{},
-    maxDepth: usize = 32,
-    maxComplexity: usize = 500,
-    introspection: bool = true,
-    endpoint: []const u8 = "/graphql",
-    maxBodySize: usize = 2 * 1024 * 1024,
-    cors: bool = true,
-    allowGet: bool = true,
-    responseContentType: []const u8 = jsonMod.applicationJsonUtf8,
-};
+pub const MountConfigSchema = z.objectOf(.{
+    .query = typedSchema(schemaMod.ObjectTypeDef),
+    .mutation = z.optional(typedSchema(schemaMod.ObjectTypeDef)),
+    .types = z.withDefault(typedSchema([]const schemaMod.ObjectTypeDef), &.{}),
+    .enums = z.withDefault(typedSchema([]const schemaMod.EnumTypeDef), &.{}),
+    .inputs = z.withDefault(typedSchema([]const schemaMod.InputTypeDef), &.{}),
+    .interfaces = z.withDefault(typedSchema([]const schemaMod.InterfaceTypeDef), &.{}),
+    .unions = z.withDefault(typedSchema([]const schemaMod.UnionTypeDef), &.{}),
+    .maxDepth = z.withDefault(z.positiveInt(usize, .{}), 32),
+    .maxComplexity = z.withDefault(z.integer(usize, .{}), 500),
+    .introspection = z.withDefault(z.boolean(.{}), true),
+    .endpoint = z.withDefault(z.string(.{ .min = 1, .prefix = "/" }), "/graphql"),
+    .maxBodySize = z.withDefault(z.positiveInt(usize, .{}), 2 * 1024 * 1024),
+    .cors = z.withDefault(z.boolean(.{}), true),
+    .allowGet = z.withDefault(z.boolean(.{}), true),
+    .responseContentType = z.withDefault(z.string(.{ .min = 1 }), jsonMod.applicationJsonUtf8),
+}, .{});
+pub const MountConfig = MountConfigSchema.Value;
+
+/// Splits a mount configuration into the handler half the HTTP layer needs.
+/// The mount config carries the schema plus the handler fields; this keeps
+/// that mapping in one place instead of at every call site.
+pub fn handlerConfigFrom(cfg: MountConfig) HandlerConfig {
+    return .{
+        .endpoint = cfg.endpoint,
+        .maxBodySize = cfg.maxBodySize,
+        .cors = cfg.cors,
+        .allowGet = cfg.allowGet,
+        .responseContentType = cfg.responseContentType,
+    };
+}
 
 pub const ServerState = struct {
     /// Ownership borrowed from the mounter; `unmount` reuses it to release
@@ -109,9 +127,14 @@ pub fn mount(
     io: std.Io,
     router: *routerMod.Router,
     schema: Schema,
-    cfg_in: anytype,
+    cfg: HandlerConfig,
 ) !void {
-    const cfg = configCoerce.to(HandlerConfig, cfg_in);
+    {
+        var scratch: [4096]u8 = undefined;
+        const issue = z.checkFirst(HandlerConfigSchema, cfg, &scratch, .{}) catch
+            return error.InvalidConfig;
+        if (issue != null) return error.InvalidConfig;
+    }
     if (router.hasConflict(.POST, cfg.endpoint) or
         router.hasConflict(.GET, cfg.endpoint) or
         router.hasConflict(.OPTIONS, cfg.endpoint))

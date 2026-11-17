@@ -22,7 +22,7 @@ The HTTP/3 runtime has loopback integration coverage on the native test host. Cr
 ## Features
 
 - **High-level Client Runtime** - `Client` performs QUIC + TLS 1.3 with ALPN `h3`, certificate verification, QPACK dynamic-table encoding, response trailers, and loss recovery.
-- **High-level Server Runtime** - `httpx.Server` can bind a UDP endpoint when `.http3 = true` and a default certificate/key identity are provided. It routes supported H3 requests through server handlers. The handshake requires that default identity; selector-only TLS configuration does not initialize the H3 endpoint.
+- **High-level Server Runtime** - `httpx.Server` can bind a UDP endpoint when `.protocols = .{ .http3 = true }` and a default certificate/key identity are provided. It routes supported H3 requests through server handlers. The handshake requires that default identity; selector-only TLS configuration does not initialize the H3 endpoint.
 - **Protocol-level Server Runtime** - serve H3 over QUIC directly with `httpx.protocols.quic` (Endpoint + Pump + Handshake) and `httpx.protocols.http3` builders; see `examples/http3Client.zig` for a complete loopback server.
 - **Handshake Lifecycle** - the server confirms the handshake after verifying the client Finished and sends `HANDSHAKE_DONE`; the client confirms on that frame or on a 1-RTT acknowledgment. Confirmation discards the Handshake keys on both ends and late Handshake packets are ignored (RFC 9001 Sections 4.1.2 and 4.9.2).
 
@@ -34,7 +34,7 @@ HTTP/3 shares the HTTP/1.1 port number (RFC 9114 Section 3), so a client normall
 const server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 0,
-    .http3 = true,
+    .protocols = .{ .http3 = true },
     .tls = .{ .certificatePem = certPem, .privateKeyPem = keyPem },
 });
 
@@ -74,7 +74,7 @@ Always prefer `server.http3.port()` over `server.localPort()` when dialling HTTP
 - Require QUIC address validation before the Initial flight with one inline field:
 
   ```zig
-  var server = try httpx.Server.init(allocator, io, .{ .http3Retry = true });
+  var server = try httpx.Server.init(allocator, io, .{ .http3Options = .{ .retry = true } });
   defer server.deinit();
   ```
 
@@ -497,10 +497,10 @@ peer's advertised `max_idle_timeout`; zero disables enforcement. When it
 expires, `pollTimeouts` transitions the connection to `.draining` and
 returns `error.Draining`.
 
-On the server these values are exposed as `http3MaxIdleTimeoutMs`,
-`http3InitialMaxData`, `http3InitialMaxStreamDataBidiLocal`,
-`http3InitialMaxStreamDataBidiRemote`, `http3InitialMaxStreamDataUni`,
-`http3MaxStreamsBidi`, `http3MaxStreamsUni`, and `http3MaxUdpPayload`.
+On the server these values are exposed as `http3Options.maxIdleTimeoutMs`,
+`http3Options.initialMaxData`, `http3Options.initialMaxStreamDataBidiLocal`,
+`http3Options.initialMaxStreamDataBidiRemote`, `http3Options.initialMaxStreamDataUni`,
+`http3Options.maxStreamsBidi`, `http3Options.maxStreamsUni`, and `http3Options.maxUdpPayload`.
 
 ## GOAWAY and CONNECTION_CLOSE
 

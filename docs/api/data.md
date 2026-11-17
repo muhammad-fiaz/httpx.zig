@@ -161,10 +161,18 @@ var res = try client.post("https://example.com/users", .{
 defer res.deinit();
 ```
 
-The fluent builder has the same behavior:
+The fluent builder has the same behavior. The builder owns the header, query,
+and encoded-body buffers, so it must be released with `deinit()`; the
+response owns the header and body allocations and must be released too:
 
 ```zig
-_ = try client.builder(.POST, url).json(user).send();
+var builder = client.builder(.POST, url);
+defer builder.deinit();
+
+_ = try builder.json(user);
+
+var res = try builder.send();
+defer res.deinit();
 ```
 
 ### Client responses
@@ -226,7 +234,7 @@ parser.
 ## Cookies
 
 `httpx.client.cookie` / `httpx.client.jar` (`Cookie` and `Jar`, including
-`Cookie.SameSite`) are the cookie primitives. The jar stores cookies only when
+`httpx.client.sameSite`) are the cookie primitives. The jar stores cookies only when
 your code passes `Set-Cookie` values to it; the client does not attach a jar or
 persist cookies across requests automatically. Server handlers read cookies
 with `ctx.cookie(name)`. `Set-Cookie` parsing, domain/path matching, expiry,

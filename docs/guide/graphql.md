@@ -93,23 +93,12 @@ const QueryType = httpx.graphql.Query(.{
 });
 ```
 
-Mount the schema on the server and enable the bundled GraphiQL UI through the
-docs configuration; the server owns the mount and tears it down in `deinit`:
+Mount the schema on the server, then opt into the bundled GraphiQL UI. The docs
+mount captures routes already registered, so call it after `server.graphql`:
 
 ```zig
 var server = try httpx.Server.init(allocator, io, .{
     .port = 8080,
-    .enableDocs = true,
-    .docs = .{
-        .graphiql = .{
-            .enabled = true,
-            .route = "/graphiql",
-            .graphqlEndpoint = "/graphql",
-            .title = "HTTPX GraphQL Explorer",
-            .defaultQuery = "{ me { id name role } }",
-            .editorTheme = "vs-dark",
-        },
-    },
 });
 defer server.deinit();
 
@@ -120,6 +109,16 @@ try server.graphql(.{
     .inputs = &.{UserFilter},
     .endpoint = "/graphql",
 });
+try httpx.docs.mount(&server, .{
+    .graphiql = .{
+        .route = "/graphiql",
+        .graphqlEndpoint = "/graphql",
+        .title = "HTTPX GraphQL Explorer",
+        .defaultQuery = "{ me { id name role } }",
+        .editorTheme = "vs-dark",
+    },
+});
+defer httpx.docs.unmount(&server);
 
 server.run();
 ```

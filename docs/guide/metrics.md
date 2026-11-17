@@ -34,8 +34,8 @@ std.debug.print("requests={d} responses={d}\n", .{
 std.debug.print("2xx={d} 4xx={d} 5xx={d}\n", .{
     snap.status2xx, snap.status4xx, snap.status5xx,
 });
-std.debug.print("avg_latency={d:.3}ms\n", .{snap.averageLatencyMs()});
-std.debug.print("error_rate={d:.2}\n", .{snap.errorRate()});
+std.debug.print("avg_latency={d:.3}ms\n", .{httpx.metrics.averageLatencyMs(snap)});
+std.debug.print("error_rate={d:.2}\n", .{httpx.metrics.errorRate(snap)});
 ```
 
 ### `MetricsSnapshot` fields
@@ -58,9 +58,9 @@ std.debug.print("error_rate={d:.2}\n", .{snap.errorRate()});
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `errorRate()` | `f64` | `errorsTotal / requestsTotal`, 0.0 if no requests |
-| `averageLatencySeconds()` | `f64` | Mean latency in seconds |
-| `averageLatencyMs()` | `f64` | Mean latency in milliseconds |
+| `httpx.metrics.errorRate(snapshot)` | `f64` | `errorsTotal / requestsTotal`, 0.0 if no requests |
+| `httpx.metrics.averageLatencySeconds(snapshot)` | `f64` | Mean latency in seconds |
+| `httpx.metrics.averageLatencyMs(snapshot)` | `f64` | Mean latency in milliseconds |
 
 ## Server snapshots
 

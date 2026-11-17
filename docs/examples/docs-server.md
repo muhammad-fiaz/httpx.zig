@@ -85,59 +85,56 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = true,
-        .docs = .{
-            .title = "HTTPX Modern API Suite",
-            .version = httpx.version,
-            .description = "Full-featured native HTTP server with OpenAPI & GraphQL documentation.",
-            // Every UI option is explicit here; nothing is hidden in a preset.
-            .swagger = .{
-                .enabled = true,
-                .route = "/docs",
-                .title = "Swagger UI",
-                .docExpansion = .full,
-                .deepLinking = true,
-                .displayRequestDuration = true,
-                .filter = true,
-                .persistAuthorization = true,
-                .tryItOutEnabled = true,
-                .defaultModelsExpandDepth = 2,
-            },
-            .redoc = .{
-                .enabled = true,
-                .route = "/redoc",
-                .title = "ReDoc",
-                .hideDownloadButton = true,
-                .requiredPropsFirst = true,
-                .sortPropsAlphabetically = true,
-                .expandResponses = "200,201",
-            },
-            .scalar = .{
-                .enabled = true,
-                .route = "/scalar",
-                .title = "Scalar Reference",
-                .theme = "default",
-                .darkMode = false,
-                .hideDownloadButton = true,
-                .showSidebar = true,
-            },
-            .graphiql = .{
-                .enabled = true,
-                .route = "/graphiql",
-                .graphqlEndpoint = "/graphql",
-                .title = "GraphiQL IDE",
-                .defaultQuery = "query { __typename }",
-                .editorTheme = "vs-dark",
-            },
-        },
-        .maxConnections = 5,
-        .logging = .{},
     });
     defer server.deinit();
-
     try server.get("/", homePageHandler);
     try server.get("/api/items", listItemsHandler);
     try server.get("/api/items/{id}", getItemHandler);
+    try httpx.docs.mount(&server, .{
+        .title = "HTTPX Modern API Suite",
+        .version = httpx.version,
+        .description = "Full-featured native HTTP server with OpenAPI & GraphQL documentation.",
+        // Every UI option is explicit here; nothing is hidden in a preset.
+        .swagger = .{
+            .enabled = true,
+            .route = "/docs",
+            .title = "Swagger UI",
+            .docExpansion = .full,
+            .deepLinking = true,
+            .displayRequestDuration = true,
+            .filter = true,
+            .persistAuthorization = true,
+            .tryItOutEnabled = true,
+            .defaultModelsExpandDepth = 2,
+        },
+        .redoc = .{
+            .enabled = true,
+            .route = "/redoc",
+            .title = "ReDoc",
+            .hideDownloadButton = true,
+            .requiredPropsFirst = true,
+            .sortPropsAlphabetically = true,
+            .expandResponses = "200,201",
+        },
+        .scalar = .{
+            .enabled = true,
+            .route = "/scalar",
+            .title = "Scalar Reference",
+            .theme = "default",
+            .darkMode = false,
+            .hideDownloadButton = true,
+            .showSidebar = true,
+        },
+        .graphiql = .{
+            .enabled = true,
+            .route = "/graphiql",
+            .graphqlEndpoint = "/graphql",
+            .title = "GraphiQL IDE",
+            .defaultQuery = "query { __typename }",
+            .editorTheme = "vs-dark",
+        },
+    });
+    defer httpx.docs.unmount(&server);
 
     const port = server.localPort();
     std.debug.print("[INFO] Server started on http://127.0.0.1:{d}\n", .{port});

@@ -44,33 +44,39 @@ const frames = @import("frames.zig");
 const paramsMod = @import("transportParameters.zig");
 const quicVarint = @import("varint.zig");
 const clockMod = @import("../../common/clock.zig");
-const configCoerce = @import("../../common/configCoerce.zig");
 const addressMod = @import("../../net/address.zig");
 
 const sessionMod = @import("../tls/tlsSession.zig");
+const z = @import("zigantic");
+
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
 
 /// Handshake configuration. `role` selects the side; client fields and
 /// server-identity fields coexist so `.{}` plus the relevant fields is
 /// the single constructor form for both roles.
-pub const Config = struct {
-    role: connMod.Role = .client,
-    /// Client: server hostname for SNI, chain verification, ticket binding.
-    host: []const u8 = "127.0.0.1",
-    verify: transportTls.VerifyMode = .caBundle,
-    /// Client: extra/custom CA PEM trusted in addition to system roots.
-    caPem: ?[]const u8 = null,
-    /// Client: resumption session with 0-RTT allowance.
-    session: ?*const sessionMod.ClientSession = null,
-    earlyData: bool = false,
-    /// Client: output pointer capturing the new session ticket.
-    sessionOut: ?*sessionMod.ClientSession = null,
-    /// Server: identity PEM material.
-    certChainPem: []const u8 = "",
-    privateKeyPem: []const u8 = "",
-    ticketKeys: ?sessionMod.TicketKeys = null,
-    maxEarlyData: u32 = 0,
-    replayCache: ?*sessionMod.ReplayCache = null,
-};
+const ConfigSchema = z.objectOf(.{
+    .role = z.withDefault(z.enumType(connMod.Role, .{}), .client),
+    .host = z.withDefault(z.string(.{ .min = 1 }), "127.0.0.1"),
+    .verify = z.withDefault(z.enumType(transportTls.VerifyMode, .{}), .caBundle),
+    .caPem = z.optional(z.string(.{ .min = 1 })),
+    .session = z.optional(typedSchema(*const sessionMod.ClientSession)),
+    .earlyData = z.withDefault(z.boolean(.{}), false),
+    .sessionOut = z.optional(typedSchema(*sessionMod.ClientSession)),
+    .certChainPem = z.withDefault(z.string(.{}), ""),
+    .privateKeyPem = z.withDefault(z.string(.{}), ""),
+    .ticketKeys = z.optional(typedSchema(sessionMod.TicketKeys)),
+    .maxEarlyData = z.withDefault(z.integer(u32, .{}), 0),
+    .replayCache = z.optional(typedSchema(*sessionMod.ReplayCache)),
+}, .{});
+pub const Config = ConfigSchema.Value;
 
 /// Precise handshake failure cause, preserved across the TlsDriver seam.
 pub const Detail = enum {
@@ -115,8 +121,7 @@ pub const Handshake = struct {
     certChainPem: []const u8 = "",
     privateKeyPem: []const u8 = "",
 
-    pub fn init(allocator: Allocator, io: std.Io, cfg_in: anytype) Handshake {
-        const cfg = configCoerce.to(Config, cfg_in);
+    pub fn init(allocator: Allocator, io: std.Io, cfg: Config) Handshake {
         var eng = tlsEngine.Engine.init(allocator, io, .{ .role = switch (cfg.role) {
             .client => tlsEngine.Role.client,
             .server => tlsEngine.Role.server,
@@ -678,16 +683,16 @@ fn parseOfferedAlpn(a: Allocator, body: []const u8) ![][]const u8 {
 /// flights must reach the wire without waiting for peer traffic first,
 /// or both sides idle forever. Pumps NEVER block: the reader thread
 /// owns all waiting, so this is purely feed + flush on the owner thread.
-pub const PumpConfig = struct {
-    ep: *Endpoint,
-    pump: *transportMod.Pump,
-    dest: ?std.Io.net.IpAddress = null,
-    quantumMs: u64 = 100,
-    nowMs: u64,
-};
+const PumpConfigSchema = z.objectOf(.{
+    .ep = typedSchema(*Endpoint),
+    .pump = typedSchema(*transportMod.Pump),
+    .dest = z.optional(typedSchema(std.Io.net.IpAddress)),
+    .quantumMs = z.withDefault(z.positiveInt(u64, .{}), 100),
+    .nowMs = typedSchema(u64),
+}, .{});
+pub const PumpConfig = PumpConfigSchema.Value;
 
-pub fn feedPumped(cfg_in: anytype) !void {
-    const cfg = configCoerce.to(PumpConfig, cfg_in);
+pub fn feedPumped(cfg: PumpConfig) !void {
     const ep = cfg.ep;
     const pump = cfg.pump;
     const dest = cfg.dest;
@@ -731,15 +736,15 @@ pub fn feedPumped(cfg_in: anytype) !void {
 /// passes. `hs` (nullable) is polled for fast failure. The pump is
 /// NOT stopped here — the caller owns its lifetime (handshake, then
 /// request exchange, then stop).
-pub const ServeConfig = struct {
-    ep: *Endpoint,
-    pump: *transportMod.Pump,
-    hs: ?*Handshake = null,
-    deadlineMs: u64 = 15_000,
-};
+const ServeConfigSchema = z.objectOf(.{
+    .ep = typedSchema(*Endpoint),
+    .pump = typedSchema(*transportMod.Pump),
+    .hs = z.optional(typedSchema(*Handshake)),
+    .deadlineMs = z.withDefault(z.integer(u64, .{}), 15_000),
+}, .{});
+pub const ServeConfig = ServeConfigSchema.Value;
 
-pub fn serve(cfg_in: anytype) !void {
-    const cfg = configCoerce.to(ServeConfig, cfg_in);
+pub fn serve(cfg: ServeConfig) !void {
     const serverEp = cfg.ep;
     const pump = cfg.pump;
     const hs = cfg.hs;
@@ -787,7 +792,7 @@ const hsTestKeyPem = @embedFile("../tls/testdata/localhostKey.pem");
 
 test "live handshake over real udp loopback establishes both ends" {
     const a = std.testing.allocator;
-    var ctx = @import("../../sockets/tcp.zig").IoContext.init(a) catch return;
+    var ctx = try @import("../../sockets/tcp.zig").IoContext.init(a);
     defer ctx.deinit();
 
     var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
@@ -834,7 +839,7 @@ test "live handshake over real udp loopback establishes both ends" {
 
 test "live retry handshake over real udp loopback establishes both ends" {
     const a = std.testing.allocator;
-    var ctx = @import("../../sockets/tcp.zig").IoContext.init(a) catch return;
+    var ctx = try @import("../../sockets/tcp.zig").IoContext.init(a);
     defer ctx.deinit();
 
     var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
@@ -1067,7 +1072,7 @@ test "server closes unknown alpn with no_application_protocol" {
 
 test "live QUIC 0-RTT resumption over real udp loopback sends early data and establishes" {
     const a = std.testing.allocator;
-    var ctx = @import("../../sockets/tcp.zig").IoContext.init(a) catch return;
+    var ctx = try @import("../../sockets/tcp.zig").IoContext.init(a);
     defer ctx.deinit();
 
     const tk = sessionMod.TicketKeys{ .current = (@as([32]u8, @splat(0x5A))) };
@@ -1271,7 +1276,7 @@ test "the initial keys are discarded once the handshake moves on" {
     // first sends a Handshake packet and a server discards them when it
     // first processes one. After that no Initial packet may be sent.
     const a = std.testing.allocator;
-    var ctx = @import("../../sockets/tcp.zig").IoContext.init(a) catch return;
+    var ctx = try @import("../../sockets/tcp.zig").IoContext.init(a);
     defer ctx.deinit();
 
     var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});

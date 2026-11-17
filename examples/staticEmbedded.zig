@@ -24,6 +24,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
+    defer httpx.assets.deinitGlobalStore();
 
     // 1. Register embedded assets (logical web paths, served from memory).
     try httpx.assets.registerEmbedded(allocator, "index.html", indexHtml, null);
@@ -38,13 +39,12 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 4,
+        .limits = .{ .maxConnections = 4 },
         .templates = .{ .enabled = true },
     });
     defer server.deinit();
 
-    try server.static("/", "examples/static");
+    try server.static(.{ .mount = "/", .root = "examples/static" });
     try server.get("/hello", hello);
 
     const port = server.localPort();
@@ -56,6 +56,7 @@ pub fn main() !void {
     };
     const t = try std.Thread.spawn(.{}, ServerThread.run, .{&server});
     defer t.join();
+    defer server.requestShutdown();
 
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
@@ -77,7 +78,4 @@ pub fn main() !void {
     std.debug.print("GET /hello -> Status: {d}, Body: {s}\n", .{ res2.status, res2.body });
 
     server.stop();
-
-    // Release global registry keys/etags owned by the debug allocator.
-    httpx.assets.globalStore(allocator).deinit();
 }

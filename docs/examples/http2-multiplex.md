@@ -5,21 +5,46 @@ Demonstrates http2Multiplex.zig using the canonical HTTPX API.
 ## Complete Example
 
 ```zig
-//! HTTP/2 Multiplexing, Flow Control, and HPACK Example.
+//! HTTP/2 over the public client/server API, plus the HPACK engine.
 //!
 //! Demonstrates:
-//! 1. HPACK Dynamic Table Header Encoding and Decoding (RFC 7541)
-//! 2. Frame serialization: HEADERS, DATA, SETTINGS, PING, WINDOW_UPDATE, GOAWAY
-//! 3. Full stream multiplexing with flow control accounting
+//! 1. HPACK dynamic-table header encoding and decoding (RFC 7541)
+//! 2. A live HTTP/2 (h2c) server started with `httpx.Server.init`
+//! 3. Requests issued through `httpx.Client` with `.httpVersion = .http2`
+//!
+//! The high-level client pools one HTTP/2 connection per origin and
+//! serializes requests over it; the protocol engine itself supports true
+//! stream multiplexing, which the server side exercises for every stream it
+//! accepts.
+//!
 //! Run with: `zig build run-http2-multiplex`
 
 const std = @import("std");
 const httpx = @import("httpx");
 
+/// The response body is copied by the router right after the handler returns,
+/// so it lives in a static buffer.
+var response_buf: [256]u8 = undefined;
+
+fn echoHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
+    const path = ctx.path;
+    const body = ctx.body;
+    const head = if (path.len > 0 and path[0] == '/') path[1..] else path;
+    if (head.len + body.len + 1 > response_buf.len) return error.ResponseTooLarge;
+    @memcpy(response_buf[0..head.len], head);
+    response_buf[head.len] = ':';
+    @memcpy(response_buf[head.len + 1 ..][0..body.len], body);
+    return .{
+        .status = 200,
+        .body = response_buf[0 .. head.len + 1 + body.len],
+    };
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     std.debug.print("=== HTTP/2 Advanced Protocol & Multiplexing ===\n", .{});
 
@@ -62,47 +87,40 @@ pub fn main() !void {
         std.debug.print("     {s}: {s}\n", .{ h.name, h.value });
     }
 
-    // 2. HTTP/2 Session Multiplexing & Frame Processing (RFC 9113)
-    var clientSess = try httpx.http2.Session.init(allocator, .client, .{});
-    defer clientSess.deinit();
-    var serverSess = try httpx.http2.Session.init(allocator, .server, .{});
-    defer serverSess.deinit();
-
-    // Client starts handshake (connection preface + initial settings)
-    try clientSess.startHandshake();
-    try serverSess.startHandshake();
-
-    // Exchange prefaces & initial frames
-    try serverSess.feed(clientSess.outbound.items);
-    clientSess.outbound.clearRetainingCapacity();
-
-    try clientSess.feed(serverSess.outbound.items);
-    serverSess.outbound.clearRetainingCapacity();
-
-    std.debug.print("2. Handshake exchanged: Client & Server synchronized SETTINGS\n", .{});
-
-    // 3. Multiplexing 3 Concurrent Streams
-    const sid1 = try clientSess.nextClientStreamId();
-    const sid2 = try clientSess.nextClientStreamId();
-    const sid3 = try clientSess.nextClientStreamId();
-
-    try clientSess.sendHeaders(sid1, &testHeaders, false);
-    _ = try clientSess.sendData(sid1, "{\"item\":1}", true);
-
-    try clientSess.sendHeaders(sid2, &testHeaders, false);
-    _ = try clientSess.sendData(sid2, "{\"item\":2}", true);
-
-    try clientSess.sendHeaders(sid3, &testHeaders, true);
-
-    std.debug.print("3. Multiplexed streams {d}, {d}, {d} (outbound: {d} bytes)\n", .{
-        sid1,
-        sid2,
-        sid3,
-        clientSess.outbound.items.len,
+    // 2. A live HTTP/2 server, started through the regular server API.
+    var server = try httpx.Server.init(allocator, io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .protocols = .{ .http2 = true },
     });
+    defer server.deinit();
 
-    try serverSess.feed(clientSess.outbound.items);
-    clientSess.outbound.clearRetainingCapacity();
+    try server.router.add(.POST, "/{name}", echoHandler, .{});
+
+    const port = server.localPort();
+    const thread = try server.start();
+    defer {
+        server.requestShutdown();
+        thread.join();
+    }
+
+    // 3. The client speaks HTTP/2 over the pooled connection.
+    var client = httpx.Client.init(allocator, io, .{
+        .httpVersion = .http2,
+    });
+    defer client.deinit();
+
+    const bodies = [_][]const u8{ "{\"item\":1}", "{\"item\":2}", "{\"item\":3}" };
+    const paths = [_][]const u8{ "/one", "/two", "/three" };
+    for (paths, 0..) |path, i| {
+        var urlBuf: [64]u8 = undefined;
+        const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}{s}", .{ port, path });
+        var res = try client.post(url, .{ .body = bodies[i] });
+        defer res.deinit();
+        std.debug.print("2. POST {s} -> status={d} version={s} body={s}\n", .{ path, res.status, @tagName(res.version), res.body });
+        if (res.status != 200) return error.UnexpectedStatus;
+        if (res.version != .http2) return error.UnexpectedVersion;
+    }
 
     std.debug.print("HTTP/2 multiplexing demonstration completed successfully.\n", .{});
 }
@@ -112,15 +130,16 @@ pub fn main() !void {
 
 ```text
 === HTTP/2 Advanced Protocol & Multiplexing ===
-1. HPACK Encoded 5 headers into 87 bytes (dynamic table entries: 5)
+1. HPACK Encoded 5 headers into 51 compressed bytes (dynamic table entries: 2)
    Decoded 5 headers successfully:
      :method: POST
      :scheme: https
      :path: /api/v2/stream
      content-type: application/json
      x-custom-trace: trace-id-998877
-2. Handshake exchanged: Client & Server synchronized SETTINGS
-3. Multiplexed streams 1, 3, 5 (outbound: 1234 bytes)
+2. POST /one -> status=200 version=http2 body=one:{"item":1}
+2. POST /two -> status=200 version=http2 body=two:{"item":2}
+2. POST /three -> status=200 version=http2 body=three:{"item":3}
 HTTP/2 multiplexing demonstration completed successfully.
 ```
 

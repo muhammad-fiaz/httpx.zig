@@ -89,7 +89,6 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false, // documentation is mounted explicitly below
     });
     defer server.deinit();
 
@@ -150,7 +149,7 @@ pub fn main() !void {
         .tags = &.{"system"},
     });
 
-    try server.docs(.{
+    try httpx.docs.mount(&server, .{
         .title = "HTTPX Typed REST API",
         .version = "1.0.0",
         .description = "Explicit, typed REST endpoints with automated OpenAPI 3.1 documentation.",
@@ -160,6 +159,7 @@ pub fn main() !void {
         .scalar = .{ .enabled = true, .route = "/scalar", .title = "Scalar Reference" },
         .graphiql = .{ .enabled = false },
     });
+    defer httpx.docs.unmount(&server);
 
     const port = server.localPort();
     std.debug.print("listening on http://127.0.0.1:{d}\n", .{port});

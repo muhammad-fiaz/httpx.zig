@@ -32,17 +32,15 @@ const sync = @import("../../common/sync.zig");
 const clock = @import("../../common/clock.zig");
 const h2Transport = @import("../../protocols/http2/transport.zig");
 const h3Transport = @import("../../protocols/http3/transport.zig");
+const z = @import("zigantic");
 
-pub const PoolConfig = struct {
-    /// Hard ceiling across all origins.
-    maxConnections: u32 = 256,
-    /// Ceiling per origin.
-    maxPerHost: u16 = 16,
-    /// Parked connections older than this are dropped.
-    idleTimeoutMs: i64 = 30_000,
-    /// Max time a connection may stay parked. 0 disables.
-    maxParkedMs: i64 = 300_000,
-};
+pub const PoolConfigSchema = z.objectOf(.{
+    .maxConnections = z.withDefault(z.nonNegativeInt(u32, .{}), 256),
+    .maxPerHost = z.withDefault(z.nonNegativeInt(u16, .{}), 16),
+    .idleTimeoutMs = z.withDefault(z.nonNegativeInt(i64, .{}), 30_000),
+    .maxParkedMs = z.withDefault(z.nonNegativeInt(i64, .{}), 300_000),
+}, .{});
+pub const PoolConfig = PoolConfigSchema.Value;
 
 /// Upper bound on expired HTTP/3 sessions detached under the pool lock and
 /// destroyed after unlocking. PooledConn.deinit joins the QUIC pump thread,
@@ -630,9 +628,9 @@ pub const Pool = struct {
 const tTcp = tcp;
 
 test "release then acquire reuses connection" {
-    var ctx = tTcp.IoContext.init(std.testing.allocator) catch return;
+    var ctx = try tTcp.IoContext.init(std.testing.allocator);
     defer ctx.deinit();
-    var l = tTcp.Listener.bind(ctx.io, 0) catch return;
+    var l = tTcp.Listener.bind(ctx.io, 0) catch |err| return err;
     // LIFO runs these in reverse: release the accept, join, then close.
     const th = spawnEchoServer(&l, ctx.io, 1);
     defer l.close(ctx.io);
@@ -707,9 +705,9 @@ fn spawnEchoServer(l: *tTcp.Listener, io: std.Io, count: usize) std.Thread {
 }
 
 test "maxPerHost parking cap enforced" {
-    var ctx = tTcp.IoContext.init(std.testing.allocator) catch return;
+    var ctx = try tTcp.IoContext.init(std.testing.allocator);
     defer ctx.deinit();
-    var l = tTcp.Listener.bind(ctx.io, 0) catch return;
+    var l = tTcp.Listener.bind(ctx.io, 0) catch |err| return err;
     // Two PHYSICAL connections here: the second release exceeds the cap and
     // must be dropped (drainThenClose), not parked.
     const th = spawnEchoServer(&l, ctx.io, 2);
@@ -722,11 +720,11 @@ test "maxPerHost parking cap enforced" {
     defer p.deinit();
 
     const port = l.localPort();
-    const s1 = tTcp.connect(ctx.io, "127.0.0.1", port) catch return;
+    const s1 = tTcp.connect(ctx.io, "127.0.0.1", port) catch |err| return err;
     p.release("h", port, s1);
     try std.testing.expectEqual(@as(usize, 1), p.parkedCount());
     try std.testing.expect(!p.canPark("h", port));
-    const s2 = tTcp.connect(ctx.io, "127.0.0.1", port) catch return;
+    const s2 = tTcp.connect(ctx.io, "127.0.0.1", port) catch |err| return err;
 
     p.release("h", port, s2);
 
@@ -746,9 +744,9 @@ test "total parking cap enforced" {
 }
 
 test "lazy sweep evicts expired idle connections without a reaper thread" {
-    var ctx = tTcp.IoContext.init(std.testing.allocator) catch return;
+    var ctx = try tTcp.IoContext.init(std.testing.allocator);
     defer ctx.deinit();
-    var l = tTcp.Listener.bind(ctx.io, 0) catch return;
+    var l = tTcp.Listener.bind(ctx.io, 0) catch |err| return err;
     const th = spawnEchoServer(&l, ctx.io, 1);
     defer l.close(ctx.io);
     defer th.join();
@@ -776,9 +774,9 @@ test "lazy sweep evicts expired idle connections without a reaper thread" {
 }
 
 test "purge detaches and closes parked sockets" {
-    var ctx = tTcp.IoContext.init(std.testing.allocator) catch return;
+    var ctx = try tTcp.IoContext.init(std.testing.allocator);
     defer ctx.deinit();
-    var l = tTcp.Listener.bind(ctx.io, 0) catch return;
+    var l = tTcp.Listener.bind(ctx.io, 0) catch |err| return err;
     const th = spawnEchoServer(&l, ctx.io, 1);
     defer l.close(ctx.io);
     defer th.join();

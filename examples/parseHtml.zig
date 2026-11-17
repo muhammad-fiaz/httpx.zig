@@ -136,7 +136,7 @@ pub fn main() !void {
     ;
 
     var feed = try httpx.parsing.init(allocator, io, .{}).parseFeed(rssSrc, "application/rss+xml");
-    defer feed.deinit();
+    defer httpx.parsing.feed.deinitFeed(&feed, allocator);
     std.debug.print("  Feed Title: {s}\n", .{feed.title});
     std.debug.print("  Feed Link:  {s}\n", .{feed.link});
     std.debug.print("  Entries ({d}):\n", .{feed.entries.len});

@@ -78,9 +78,10 @@ control over compression.
 
 ## Rate Limiting
 
-Use `httpx.RateLimiter` for per-key request-rate enforcement (see
-`src/web/middleware/rateLimiter.zig` for `RateLimitPolicy`,
-`RateLimitResult`, and `RateLimitDimension`).
+Use `httpx.RateLimiter` for per-key request-rate enforcement. It takes an
+inline literal: `httpx.RateLimiter.init(allocator, io, .{ .policy = .{ .limit =
+100 } })` (see `src/web/middleware/rateLimiter.zig` for the policy fields and
+`RateLimitResult`/`RateLimitDimension`).
 
 ## CSRF Protection
 

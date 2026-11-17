@@ -108,8 +108,7 @@ test "local TLS handshake serves HTTPS end to end" {
     var server = try httpServerMod.Server.init(a, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 2,
+        .limits = .{ .maxConnections = 2 },
         .tls = .{
             .certificatePem = @embedFile("testdata/localhostCert.pem"),
             .privateKeyPem = @embedFile("testdata/localhostKey.pem"),

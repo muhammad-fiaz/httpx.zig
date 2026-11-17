@@ -38,9 +38,8 @@ pub fn main() !void {
         .host = "127.0.0.1",
         .port = 8080,
         .portStrategy = .incremental,
-        .maxConnections = 10000,
-        .http2 = true,
-        .http3 = false,
+        .limits = .{ .maxConnections = 10000 },
+        .protocols = .{ .http2 = true, .http3 = false },
         .keepAlive = true,
     });
     defer server.deinit();

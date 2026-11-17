@@ -28,6 +28,17 @@ const tcp = @import("../../sockets/tcp.zig");
 const serverMod = @import("tlsServer.zig");
 const transportMod = @import("tlsTransport.zig");
 const sessionMod = @import("tlsSession.zig");
+const z = @import("zigantic");
+
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
 
 // Errors
 
@@ -342,53 +353,32 @@ pub const Client = struct {
     /// Client-side TLS configuration. `. {}` is a safe default: system
     /// trust, `h2`+`http/1.1` ALPN, no client identity. All slices are
     /// borrowed and must outlive the client.
-    pub const Config = struct {
-        /// How the server certificate is verified.
-        verify: transportMod.VerifyMode = .caBundle,
-        /// PEM bundle of extra/custom CAs. Null means system trust only.
-        /// Parsed once at `init`, not per handshake.
-        caPem: ?[]const u8 = null,
-        /// Client certificate chain (PEM) presented when the server requests
-        /// mutual TLS. Both identity PEMs must be set; otherwise a
-        /// CertificateRequest fails the handshake loudly instead of
-        /// proceeding unauthenticated.
-        clientCertPem: ?[]const u8 = null,
-        /// Client private key (PEM, P-256 ECDSA) for `clientCertPem`.
-        clientKeyPem: ?[]const u8 = null,
-        /// ALPN protocols offered in preference order.
-        alpn: []const alpnMod.Protocol = &.{ .h2, .@"http/1.1" },
-        /// Transport selection (see `Transport`).
-        transport: Transport = .auto,
-    };
+    pub const ConfigSchema = z.objectOf(.{
+        .verify = z.withDefault(z.enumType(transportMod.VerifyMode, .{}), .caBundle),
+        .caPem = z.optional(z.string(.{ .min = 1 })),
+        .clientCertPem = z.optional(z.string(.{ .min = 1 })),
+        .clientKeyPem = z.optional(z.string(.{ .min = 1 })),
+        .alpn = z.withDefault(z.array(z.enumType(alpnMod.Protocol, .{}), .{}), &.{ .h2, .@"http/1.1" }),
+        .transport = z.withDefault(z.enumType(Transport, .{}), .auto),
+    }, .{});
+    pub const Config = ConfigSchema.Value;
 
     /// Per-connection overrides. Every field is optional: null inherits the
     /// corresponding `Config` value (explicit values win per field only).
-    pub const ConnectOptions = struct {
-        verify: ?transportMod.VerifyMode = null,
-        caPem: ?[]const u8 = null,
-        /// Borrowed pre-parsed CA bundle for the standard transport.
-        /// The native transport ignores it (it uses PEM trust instead).
-        caBundle: ?*std.crypto.Certificate.Bundle = null,
-        /// Lock paired with `caBundle` when the bundle can be shared or
-        /// mutated by another handshake. Omitted bundles inherit the
-        /// owner's lock automatically.
-        caBundleLock: ?*std.Io.RwLock = null,
-        clientCertPem: ?[]const u8 = null,
-        clientKeyPem: ?[]const u8 = null,
-        alpn: ?[]const alpnMod.Protocol = null,
-        transport: ?Transport = null,
-        /// Resumption session to offer (single PSK identity). Borrowed for
-        /// the handshake only; ownership stays with the caller. The offer is
-        /// skipped unless usable for `host` right now.
-        session: ?*const sessionMod.ClientSession = null,
-        /// When true, post-handshake NewSessionTicket messages are captured
-        /// into the connection (see `takeCapturedSession`). Zero behavior
-        /// change otherwise.
-        captureSession: bool = false,
-        /// Allow peer FIN without closeNotify (standard transport only;
-        /// the native transport always enforces closeNotify).
-        allowTruncation: bool = false,
-    };
+    pub const ConnectOptionsSchema = z.objectOf(.{
+        .verify = z.optional(z.enumType(transportMod.VerifyMode, .{})),
+        .caPem = z.optional(z.string(.{ .min = 1 })),
+        .caBundle = z.optional(typedSchema(*std.crypto.Certificate.Bundle)),
+        .caBundleLock = z.optional(typedSchema(*std.Io.RwLock)),
+        .clientCertPem = z.optional(z.string(.{ .min = 1 })),
+        .clientKeyPem = z.optional(z.string(.{ .min = 1 })),
+        .alpn = z.optional(z.array(z.enumType(alpnMod.Protocol, .{}), .{})),
+        .transport = z.optional(z.enumType(Transport, .{})),
+        .session = z.optional(typedSchema(*const sessionMod.ClientSession)),
+        .captureSession = z.withDefault(z.boolean(.{}), false),
+        .allowTruncation = z.withDefault(z.boolean(.{}), false),
+    }, .{});
+    pub const ConnectOptions = ConnectOptionsSchema.Value;
     allocator: Allocator,
     io: std.Io,
     config: Config,

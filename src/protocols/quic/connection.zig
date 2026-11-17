@@ -35,7 +35,17 @@ const ths = @import("../tls/tlsHandshake.zig");
 const h3conn = @import("../http3/connection.zig");
 const h3frame = @import("../http3/frame.zig");
 const h3qpack = @import("../http3/qpack.zig");
-const configCoerce = @import("../../common/configCoerce.zig");
+const z = @import("zigantic");
+
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
 
 pub const Error = error{
     ProtocolViolation,
@@ -201,41 +211,22 @@ pub const Callbacks = struct {
     onStopSending: ?*const fn (ctx: ?*anyopaque, sid: u64, code: u64) void = null,
 };
 
-pub const Config = struct {
-    /// Effective idle timeout: the smaller of our value and the peer's
-    /// advertised `max_idle_timeout` (RFC 9000 Section 10.1). Zero
-    /// disables idle-timeout enforcement on our side.
-    maxIdleTimeoutMs: u64 = 30_000,
-    /// Connection-level receive window advertised in transport
-    /// parameters and enforced against incoming STREAM bytes.
-    initialMaxData: u64 = 1 << 20,
-    /// Receive window for bidirectional streams we open. Matches the
-    /// per-stream default in `stream.zig`; RFC 9000 Section 4.1.
-    initialMaxStreamDataBidiLocal: u64 = 65_535,
-    /// Receive window for bidirectional streams the peer opens.
-    initialMaxStreamDataBidiRemote: u64 = 65_535,
-    /// Receive window for unidirectional streams the peer opens.
-    initialMaxStreamDataUni: u64 = 65_535,
-    /// Concurrent bidirectional streams the peer may open.
-    initialMaxStreamsBidi: u64 = 128,
-    /// Concurrent unidirectional streams the peer may open.
-    initialMaxStreamsUni: u64 = 128,
-    maxUdpPayload: usize = 1472,
-    /// Local endpoint role. Clients keep the default; servers set
-    /// `.role = .server`. This is part of the options struct so that
-    /// `Connection.init(allocator, io, .{})` is the single constructor.
-    role: Role = .client,
-    /// Preferred QUIC version for clients (default v1). Servers accept
-    /// either v1 or v2 and adopt the version of the first Initial.
-    version: u32 = 0x00000001,
-    /// Require a Retry token before accepting a server-side Initial.
-    retry: bool = false,
-    /// Advertise the RFC 9000 prohibition on active migration to peers.
-    disableActiveMigration: bool = false,
-    /// Stable key for stateless Retry tokens. Generated per connection
-    /// when omitted; production servers should supply a shared key.
-    retryKey: ?[32]u8 = null,
-};
+pub const ConfigSchema = z.objectOf(.{
+    .maxIdleTimeoutMs = z.withDefault(z.integer(u64, .{}), 30_000),
+    .initialMaxData = z.withDefault(z.integer(u64, .{ .max = MAX_VARINT }), 1 << 20),
+    .initialMaxStreamDataBidiLocal = z.withDefault(z.integer(u64, .{ .max = MAX_VARINT }), 65_535),
+    .initialMaxStreamDataBidiRemote = z.withDefault(z.integer(u64, .{ .max = MAX_VARINT }), 65_535),
+    .initialMaxStreamDataUni = z.withDefault(z.integer(u64, .{ .max = MAX_VARINT }), 65_535),
+    .initialMaxStreamsBidi = z.withDefault(z.integer(u64, .{ .max = MAX_STREAM_COUNT }), 128),
+    .initialMaxStreamsUni = z.withDefault(z.integer(u64, .{ .max = MAX_STREAM_COUNT }), 128),
+    .maxUdpPayload = z.withDefault(z.integer(usize, .{ .min = MIN_INITIAL_DATAGRAM, .max = MAX_DATAGRAM }), 1472),
+    .role = z.withDefault(z.enumType(Role, .{}), .client),
+    .version = z.withDefault(z.integer(u32, .{}), 0x00000001),
+    .retry = z.withDefault(z.boolean(.{}), false),
+    .disableActiveMigration = z.withDefault(z.boolean(.{}), false),
+    .retryKey = z.optional(typedSchema([32]u8)),
+}, .{});
+pub const Config = ConfigSchema.Value;
 
 pub const State = enum {
     initial,
@@ -261,20 +252,22 @@ const MAX_CRYPTO_SEGMENTS = 1024;
 /// in a smaller datagram.
 pub const MIN_INITIAL_DATAGRAM = 1200;
 
-pub const CidEntry = struct {
-    sequence: u64,
-    cid: [20]u8 = undefined,
-    cidLen: u8 = 0,
-    statelessResetToken: [16]u8 = undefined,
-    retired: bool = false,
-};
+const CidEntrySchema = z.objectOf(.{
+    .sequence = z.integer(u64, .{}),
+    .cid = z.withDefault(z.fixedArray(z.integer(u8, .{}), 20, .{}), @as([20]u8, @splat(0))),
+    .cidLen = z.withDefault(z.nonNegativeInt(u8, .{ .max = 20 }), 0),
+    .statelessResetToken = z.withDefault(z.fixedArray(z.integer(u8, .{}), 16, .{}), @as([16]u8, @splat(0))),
+    .retired = z.withDefault(z.boolean(.{}), false),
+}, .{});
+pub const CidEntry = CidEntrySchema.Value;
 
 /// A control frame waiting for the next outgoing packet. Close reasons
 /// are owned (duped at queue time, freed on drain).
-pub const QueuedControl = struct {
-    frame: frames.Frame,
-    ownedReason: ?[]u8 = null,
-};
+const QueuedControlSchema = z.objectOf(.{
+    .frame = typedSchema(frames.Frame),
+    .ownedReason = z.withDefault(typedSchema(?[]u8), null),
+}, .{});
+pub const QueuedControl = QueuedControlSchema.Value;
 
 /// Encryption level of a packet that is serialized but not yet flushed.
 /// 0-RTT is tracked separately from 1-RTT even though both use the
@@ -458,19 +451,14 @@ pub const Connection = struct {
     /// deliberately no seed parameter: one invites callers to pass a
     /// clock value, and a predictable CID lets an off-path attacker
     /// correlate or hijack a flow (RFC 9000 Section 8.2).
-    pub fn init(allocator: Allocator, io: std.Io, cfg_in: anytype) !*Connection {
-        const cfg = configCoerce.to(Config, cfg_in);
+    pub fn init(allocator: Allocator, io: std.Io, cfg: Config) !*Connection {
         const role = cfg.role;
         if (!packetMod.Version.isSupported(cfg.version)) return Error.UnsupportedVersion;
-        if (cfg.maxUdpPayload < MIN_INITIAL_DATAGRAM or cfg.maxUdpPayload > MAX_DATAGRAM)
-            return Error.InvalidConfig;
-        if (cfg.initialMaxData > MAX_VARINT or
-            cfg.initialMaxStreamDataBidiLocal > MAX_VARINT or
-            cfg.initialMaxStreamDataBidiRemote > MAX_VARINT or
-            cfg.initialMaxStreamDataUni > MAX_VARINT)
-            return Error.InvalidConfig;
-        if (cfg.initialMaxStreamsBidi > MAX_STREAM_COUNT or cfg.initialMaxStreamsUni > MAX_STREAM_COUNT)
-            return Error.InvalidConfig;
+        {
+            var scratch: [4096]u8 = undefined;
+            const issue = z.checkFirst(ConfigSchema, cfg, &scratch, .{}) catch return Error.InvalidConfig;
+            if (issue != null) return Error.InvalidConfig;
+        }
         const self = try allocator.create(Connection);
         self.* = .{
             .allocator = allocator,

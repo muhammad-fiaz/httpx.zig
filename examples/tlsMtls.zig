@@ -43,8 +43,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 2,
+        .limits = .{ .maxConnections = 2 },
         .tls = .{
             .certificatePem = certPem,
             .privateKeyPem = keyPem,

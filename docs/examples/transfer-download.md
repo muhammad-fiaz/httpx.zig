@@ -14,7 +14,7 @@ const res = try client.download(url, .{
     .createDirs = true,
 });
 std.debug.print("Downloaded: {s} ({d} bytes)\n", .{
-    res.destinationPath(), res.downloadedBytes,
+    httpx.client.download.destinationPath(&res), res.downloadedBytes,
 });
 ```
 

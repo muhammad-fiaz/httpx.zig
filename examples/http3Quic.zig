@@ -1,19 +1,45 @@
-//! HTTP/3 & QUIC Transport Engine Example.
+//! HTTP/3 & QUIC example.
 //!
 //! Demonstrates:
-//! 1. QUIC Packet construction, Variable-length integer encoding (RFC 9000)
-//! 2. QUIC Frame serialization (STREAM, ACK, CRYPTO, CONNECTION_CLOSE)
-//! 3. QPACK dynamic table encoder/decoder operations (RFC 9204)
-//! 4. Full HTTP/3 control & request stream multiplexing (RFC 9114)
+//! 1. QUIC variable-length integer encoding (RFC 9000 Section 16)
+//! 2. QUIC frame construction (RFC 9000 Section 12.4)
+//! 3. QPACK dynamic-table encoding (RFC 9204)
+//! 4. A live HTTP/3 request through `httpx.Client` against `httpx.Server`
+//!    (QUIC + TLS 1.3 over UDP)
+//!
 //! Run with: `zig build run-http3-quic`
 
 const std = @import("std");
 const httpx = @import("httpx");
 
+// Loopback test identity (P-256, SAN 127.0.0.1/localhost). Inlined because
+// examples build as separate packages.
+const demoCertPem =
+    \\-----BEGIN CERTIFICATE-----
+    \\MIIBmTCCAT+gAwIBAgIURhx0CMJWTUTFJXV9z2OlmW/cNlcwCgYIKoZIzj0EAwIw
+    \\FDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MDkwOTE4MTczOFoXDTM2MDkwNjE4
+    \\MTczOFowFDESMBAGA1UEAwwJMTI3LjAuMC4xMFkwEwYHKoZIzj0CAQYIKoZIzj0D
+    \\AQcDQgAE71D4pM0SAPK8sdt+xlEESZX/EJoKHUC+4IpPuSlOiQuCXOkN04ozVGKA
+    \\mrmUtDqQCdvmdjHbjqGY6TCszXTCnKNvMG0wHQYDVR0OBBYEFFjYJYGodkVKyvXf
+    \\4qrn7rvQx+PFMB8GA1UdIwQYMBaAFFjYJYGodkVKyvXf4qrn7rvQx+PFMA8GA1Ud
+    \\EwEB/wQFMAMBAf8wGgYDVR0RBBMwEYcEfwAAAYIJbG9jYWxob3N0MAoGCCqGSM49
+    \\BAMCA0gAMEUCIQD0sAcuw/jdWdfBrxLXY1ur2cU8F0CAkPCvS2qKn7XK4QIgAP71
+    \\95toW+Gsh8/VZlNoHL2s14olRp5zl3cYDPzKM10=
+    \\-----END CERTIFICATE-----
+;
+const demoKeyPem =
+    \\-----BEGIN PRIVATE KEY-----
+    \\MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgyp549r9FrXbm02Cn
+    \\81gAdAbUzHatPYQWVDIWnQdCMPChRANCAATvUPikzRIA8ryx237GUQRJlf8Qmgod
+    \\QL7gik+5KU6JC4Jc6Q3TijNUYoCauZS0OpAJ2+Z2MduOoZjpMKzNdMKc
+    \\-----END PRIVATE KEY-----
+;
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     std.debug.print("=== HTTP/3 & QUIC Protocol Engine ===\n", .{});
 
@@ -28,7 +54,7 @@ pub fn main() !void {
         std.debug.print("   Value {d} -> encoded {d} bytes, decoded {d}\n", .{ val, n, decodedVal });
     }
 
-    // 2. QUIC Frame Construction (RFC 9000 section 12.4) - using clean wrapper
+    // 2. QUIC Frame Construction (RFC 9000 section 12.4)
     var frame = try httpx.quic.encodeFrame(allocator, .{
         .stream = .{
             .id = 4,
@@ -43,8 +69,6 @@ pub fn main() !void {
     // 3. QPACK Dynamic Table Encoding (RFC 9204)
     var qenc = httpx.http3.qpack.Encoder.init(allocator);
     defer qenc.deinit();
-    var qdec = httpx.http3.qpack.Decoder.init(allocator);
-    defer qdec.deinit();
 
     var fieldSection = std.ArrayList(u8).empty;
     defer fieldSection.deinit(allocator);
@@ -59,28 +83,60 @@ pub fn main() !void {
 
     std.debug.print("3. QPACK encoded 5 HTTP/3 headers into {d} bytes\n", .{fieldSection.items.len});
 
-    // 4. HTTP/3 Client-Server Connection Lifecycle
-    var clientConn = httpx.http3.Connection.init(allocator, .{ .role = .client });
-    defer clientConn.deinit();
-    var serverConn = httpx.http3.Connection.init(allocator, .{ .role = .server });
-    defer serverConn.deinit();
+    // 4. Live HTTP/3 request: server over QUIC/TLS, client through the
+    //    public HTTP API.
+    try liveHttp3Demo(allocator, io);
 
-    const clientCtrl = try clientConn.buildControlStream();
-    defer allocator.free(clientCtrl);
-
-    var off: usize = 1;
-    const parsedFrame = try httpx.http3.frame.parseFrame(clientCtrl, &off);
-    try serverConn.processControlFrame(parsedFrame.frameType, parsedFrame.payload);
-
-    const bidiId = clientConn.nextBidiStreamId();
-    var reqStream = clientConn.createRequestStream(bidiId);
-
-    const reqHeaders = [_]httpx.http3.qpack.FieldLine{
-        .{ .name = "user-agent", .value = "httpx-quic-client" },
-    };
-    const reqBytes = try reqStream.buildRequestHeaders("GET", "https", "quic.example.org", "/", &reqHeaders);
-    defer allocator.free(reqBytes);
-
-    std.debug.print("4. HTTP/3 request stream #{d} constructed: {d} bytes with QPACK\n", .{ bidiId, reqBytes.len });
     std.debug.print("HTTP/3 & QUIC demonstration completed successfully.\n", .{});
+}
+
+fn liveHttp3Demo(allocator: std.mem.Allocator, io: std.Io) !void {
+    var server = try httpx.Server.init(allocator, io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .protocols = .{ .http3 = true },
+        .tls = .{
+            .certificatePem = demoCertPem,
+            .privateKeyPem = demoKeyPem,
+        },
+    });
+    defer server.deinit();
+
+    const ApiHandler = struct {
+        fn handle(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
+            const body = try std.fmt.allocPrint(ctx.allocator, "{{\"path\":\"{s}\",\"protocol\":\"HTTP/3\"}}", .{ctx.path});
+            return .{ .status = 200, .body = body, .contentType = "application/json" };
+        }
+    };
+    try server.get("/api/v1/resource", ApiHandler.handle);
+
+    const thread = try server.start();
+    defer {
+        server.requestShutdown();
+        thread.join();
+    }
+
+    // HTTP/3 normally shares the TCP port but falls back to its own when the
+    // UDP bind fails, so ask the server which port it actually got.
+    const port = server.http3.port() orelse return error.NoHttp3Endpoint;
+
+    while (server.h3Pump == null) {
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake) catch {};
+    }
+
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
+
+    var urlBuf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&urlBuf, "https://127.0.0.1:{d}/api/v1/resource", .{port});
+    var res = try client.get(url, .{
+        .httpVersion = .http3,
+        .tls = .{ .verify = .caBundle, .caPem = demoCertPem },
+        .timeoutMs = 15_000,
+    });
+    defer res.deinit();
+
+    std.debug.print("4. LIVE client.get: status={d} version={s} body={s}\n", .{ res.status, @tagName(res.version), res.body });
+    if (res.status != 200) return error.UnexpectedStatus;
+    if (res.version != .http3) return error.UnexpectedVersion;
 }

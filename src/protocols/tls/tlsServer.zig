@@ -39,6 +39,17 @@ const fsMod = @import("../../utils/fs.zig");
 const clockMod = @import("../../common/clock.zig");
 const addressMod = @import("../../net/address.zig");
 const tcp = @import("../../sockets/tcp.zig");
+const z = @import("zigantic");
+
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
 
 // Errors
 
@@ -140,42 +151,20 @@ pub const Server = struct {
     };
 
     /// Configuration for the TLS server.
-    pub const Config = struct {
-        /// Default certificate (PEM string or file path). Used when SNI
-        /// doesn't match any selector identity. Both must be set for the
-        /// server to complete handshakes (validated once at `init`).
-        certificatePem: ?[]const u8 = null,
-        /// Default private key (PEM string or file path).
-        privateKeyPem: ?[]const u8 = null,
-
-        /// SNI certificate selector (optional; falls back to the default
-        /// identity above).
-        certSelector: ?CertSelector = null,
-
-        /// ALPN protocols in server preference order (TCP: no h3, QUIC
-        /// handles h3 separately).
-        alpn: []const alpnMod.Protocol = &alpnMod.DEFAULT_TCP_PREFERENCE,
-
-        /// Mutual TLS mode: request and enforce client certificates.
-        clientAuth: configMod.ClientAuthMode = .disabled,
-        /// PEM bundle (or file path) of CAs trusted for client
-        /// certificates. Parsed once at `init` when mTLS is enabled.
-        clientCaPem: ?[]const u8 = null,
-        /// Ticket keys for TLS 1.3 session resumption (stateless NST issue
-        /// + PSK-accept on offer). Null disables resumption entirely: no
-        /// tickets are sent and PSK offers fall back to full handshakes.
-        ticketKeys: ?sessionMod.TicketKeys = null,
-        /// Lifetime (seconds) stamped into issued session tickets.
-        ticketLifetimeSecs: u32 = 7200,
-        /// Maximum early data allowance in bytes. 0 disables early data (safe default).
-        maxEarlyData: u32 = 0,
-        /// Replay window capacity for bounded replay defense.
-        replayWindowCapacity: u32 = 1024,
-        /// Whether the listener accepts cleartext HTTP on the TLS port
-        /// (dispatch behavior, not cryptography). Defaults to false
-        /// (strict HTTPS: plain HTTP gets 400 Bad Request).
-        allowPlainHttp: bool = false,
-    };
+    pub const ConfigSchema = z.objectOf(.{
+        .certificatePem = z.optional(z.string(.{ .min = 1 })),
+        .privateKeyPem = z.optional(z.string(.{ .min = 1 })),
+        .certSelector = z.optional(typedSchema(CertSelector)),
+        .alpn = z.withDefault(z.array(z.enumType(alpnMod.Protocol, .{}), .{}), &alpnMod.DEFAULT_TCP_PREFERENCE),
+        .clientAuth = z.withDefault(z.enumType(configMod.ClientAuthMode, .{}), .disabled),
+        .clientCaPem = z.optional(z.string(.{ .min = 1 })),
+        .ticketKeys = z.optional(typedSchema(sessionMod.TicketKeys)),
+        .ticketLifetimeSecs = z.withDefault(z.integer(u32, .{}), 7200),
+        .maxEarlyData = z.withDefault(z.integer(u32, .{}), 0),
+        .replayWindowCapacity = z.withDefault(z.positiveInt(u32, .{}), 1024),
+        .allowPlainHttp = z.withDefault(z.boolean(.{}), false),
+    }, .{});
+    pub const Config = ConfigSchema.Value;
 
     pub const Connection = struct {
         socket: *tcp.Socket,
@@ -914,10 +903,11 @@ pub const Server = struct {
 
 const maxHandshakeBody = 1 << 14;
 
-const ParsedClientHello = struct {
-    sni: ?[]const u8 = null,
-    alpnProtocols: std.ArrayList([]const u8),
-};
+const ParsedClientHelloSchema = z.objectOf(.{
+    .sni = z.optional(z.string(.{})),
+    .alpnProtocols = typedSchema(std.ArrayList([]const u8)),
+}, .{});
+const ParsedClientHello = ParsedClientHelloSchema.Value;
 
 /// Parse extensions from a ClientHello body to extract SNI and ALPN.
 fn parseClientHelloExtensions(allocator: Allocator, body: []const u8) !ParsedClientHello {

@@ -108,12 +108,11 @@ fn liveLoopbackDemo(allocator: std.mem.Allocator, io: std.Io) !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .http3 = true,
+        .protocols = .{ .http3 = true },
         .tls = .{
             .certificatePem = demoCertPem,
             .privateKeyPem = demoKeyPem,
         },
-        .enableDocs = false,
     });
     defer server.deinit();
 

@@ -3,12 +3,14 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const errMod = @import("templateError.zig");
+const z = @import("zigantic");
 pub const TemplateError = errMod.TemplateError;
 
-pub const LoaderConfig = struct {
-    directory: []const u8 = "templates",
-    maxFileSize: usize = 10 * 1024 * 1024, // 10MB
-};
+const LoaderConfigSchema = z.objectOf(.{
+    .directory = z.withDefault(z.string(.{ .min = 1 }), "templates"),
+    .maxFileSize = z.withDefault(z.positiveInt(usize, .{}), 10 * 1024 * 1024),
+}, .{});
+pub const LoaderConfig = LoaderConfigSchema.Value;
 
 pub const Loader = struct {
     directory: []const u8,

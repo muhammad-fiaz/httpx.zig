@@ -373,8 +373,8 @@ test "rdc backend watches its root and reports a write" {
     const root = ".zig-cache/tmp-rdc-probe";
     {
         const cwd: std.Io.Dir = .cwd();
-        cwd.createDir(io, ".zig-cache", .default_dir) catch {};
-        cwd.createDir(io, root, .default_dir) catch {};
+        cwd.createDir(io, ".zig-cache", .default_dir) catch |err| if (err != error.PathAlreadyExists) return err;
+        cwd.createDir(io, root, .default_dir) catch |err| if (err != error.PathAlreadyExists) return err;
     }
     defer {
         const cwd: std.Io.Dir = .cwd();

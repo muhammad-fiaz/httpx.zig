@@ -20,7 +20,6 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
     });
     defer server.deinit();
     try server.router.add(.GET, "/sample-local-pdf.pdf", pdfHandler, .{});
@@ -54,7 +53,7 @@ pub fn main() !void {
 
     if (result.verified) {
         std.debug.print("File verified and saved successfully to: {s}\n", .{
-            result.destinationPath(),
+            httpx.client.download.destinationPath(&result),
         });
         if (result.sha256Hex) |h| {
             std.debug.print("SHA-256: {s}\n", .{h});

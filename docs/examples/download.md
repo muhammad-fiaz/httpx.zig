@@ -36,7 +36,7 @@ pub fn main() !void {
     };
 
     std.debug.print("Downloaded with auto filename: {s} ({d} bytes in {d} ms)\n", .{
-        result1.destinationPath(),
+        httpx.client.download.destinationPath(&result1),
         result1.downloadedBytes,
         result1.elapsedMs,
     });
@@ -56,7 +56,7 @@ pub fn main() !void {
     };
 
     std.debug.print("Downloaded with explicit filename: {s} ({d} bytes)\n", .{
-        result2.destinationPath(),
+        httpx.client.download.destinationPath(&result2),
         result2.downloadedBytes,
     });
 }

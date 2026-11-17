@@ -81,6 +81,7 @@ const Method = @import("../../common/method.zig").Method;
 const Status = @import("../../common/status.zig").Status;
 const jsonMod = @import("../../common/json.zig");
 const metaMod = @import("../router/routeMetadata.zig");
+const z = @import("zigantic");
 
 const MetaSchema = metaMod.Schema;
 /// Parameter declaration, re-exported so `params` stays explicit and typed.
@@ -267,27 +268,20 @@ pub fn typeSchema(comptime T: type) MetaSchema {
 
 /// Metadata for a single typed endpoint. All fields are optional; only what the
 /// caller states is used.
-pub const EndpointOptions = struct {
-    operationId: ?[]const u8 = null,
-    summary: []const u8 = "",
-    description: []const u8 = "",
-    tags: []const []const u8 = &.{},
-    deprecated: bool = false,
-    security: []const metaMod.SecurityReq = &.{},
-    /// Declared parameters in every location: `.path`, `.query`, `.header`,
-    /// `.cookie`. Use [`schemaOf`] for the schema pointer.
-    params: []const metaMod.Param = &.{},
-    /// Explicit response list. Empty derives one response from the handler's
-    /// return type (`200`/`204`, or `201` for POST).
-    responses: []const metaMod.ResponseDesc = &.{},
-    /// Request-body descriptor override. Typed handlers decode JSON only, so
-    /// `.content` must stay `.json`; `description` and `required` are free.
-    request: ?metaMod.RequestBody = null,
-    /// Excludes the route from the generated OpenAPI document.
-    internal: bool = false,
-    /// Response media type. JSON by default; set it for vendor JSON types.
-    mediaType: []const u8 = jsonMod.applicationJsonUtf8,
-};
+const EndpointOptionsSchema = z.objectOf(.{
+    .operationId = z.optional(z.string(.{ .min = 1 })),
+    .summary = z.withDefault(z.string(.{}), ""),
+    .description = z.withDefault(z.string(.{}), ""),
+    .tags = z.withDefault(z.array(z.string(.{ .min = 1 }), .{}), &.{}),
+    .deprecated = z.withDefault(z.boolean(.{}), false),
+    .security = z.withDefault(z.array(metaMod.SecurityReqSchema, .{}), &.{}),
+    .params = z.withDefault(z.array(metaMod.ParamSchema, .{}), &.{}),
+    .responses = z.withDefault(z.array(metaMod.ResponseDescSchema, .{}), &.{}),
+    .request = z.optional(metaMod.RequestBodySchema),
+    .internal = z.withDefault(z.boolean(.{}), false),
+    .mediaType = z.withDefault(z.string(.{ .min = 1 }), jsonMod.applicationJsonUtf8),
+}, .{});
+pub const EndpointOptions = EndpointOptionsSchema.Value;
 
 /// Typed route controller over a router.
 ///
@@ -683,7 +677,7 @@ test "endpoint options expose params, custom responses, request overrides, and i
         .internal = true,
     });
 
-    const openapi = @import("../openApi/openApiSpec.zig");
+    const openapi = @import("../openApi/spec.zig");
     const spec = try openapi.generate(&router, .{ .title = "Options", .version = "1.0.0" });
     defer a.free(spec);
 
@@ -745,7 +739,7 @@ test "typed REST endpoint: JSON body, Result, OpenAPI, quoted identifiers" {
     try testing.expectEqual(@as(usize, 3), router.entries().len);
 
     // OpenAPI reflects the renamed wire key, not the Zig field name.
-    const openapi = @import("../openApi/openApiSpec.zig");
+    const openapi = @import("../openApi/spec.zig");
     const spec = try openapi.generate(&router, .{ .title = "REST Test API", .version = "1.0.0" });
     defer a.free(spec);
     try testing.expect(std.mem.indexOf(u8, spec, "\"operationId\":\"createUser\"") != null);
@@ -877,7 +871,7 @@ test "dynamic JSON request and response types derive a free-form OpenAPI schema"
     try testing.expect(typeSchema(jsonMod.Array) == .array);
     try testing.expect(typeSchema([]const std.json.Value).array.* == .any);
 
-    const openapi = @import("../openApi/openApiSpec.zig");
+    const openapi = @import("../openApi/spec.zig");
     const spec = try openapi.generate(&router, .{ .title = "Dynamic", .version = "1.0.0" });
     defer testing.allocator.free(spec);
     // Both the request and response schemas are the empty (any) schema.

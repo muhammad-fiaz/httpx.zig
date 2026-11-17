@@ -21,6 +21,9 @@ const metaMod = @import("../router/routeMetadata.zig");
 const patternMod = @import("../router/routePattern.zig");
 pub const Info = @import("../../common/version.zig").Info;
 
+/// OpenAPI document format emitted by this generator.
+pub const openApiVersion = "3.1.0";
+
 const PathGroup = struct {
     openapiPath: []u8, // owned
     methods: std.ArrayList(Method) = .empty,
@@ -82,7 +85,7 @@ pub fn generate(router: *const Router, info: Info) GenerateError![]u8 {
 
     try j.beginObject();
     try j.objectField("openapi");
-    try j.write("3.1.0");
+    try j.write(openApiVersion);
 
     try j.objectField("info");
     try j.beginObject();
@@ -148,42 +151,6 @@ fn isDocsPath(path: []const u8) bool {
         if (path.len > prefix.len and std.mem.startsWith(u8, path, prefix) and path[prefix.len] == '/') return true;
     }
     return false;
-}
-
-fn renderOpenApiPathInto(buf: []u8, pattern: anytype) ![]u8 {
-    var n: usize = 0;
-    buf[n] = '/';
-    n += 1;
-    for (pattern.segments[0..pattern.count], 0..) |seg, i| {
-        if (i > 0) {
-            buf[n] = '/';
-            n += 1;
-        }
-        switch (seg.kind) {
-            .literal => {
-                @memcpy(buf[n..][0..seg.text.len], seg.text);
-                n += seg.text.len;
-            },
-            .parameter => {
-                buf[n] = '{';
-                n += 1;
-                @memcpy(buf[n..][0..seg.text.len], seg.text);
-                n += seg.text.len;
-                buf[n] = '}';
-                n += 1;
-            },
-            .wildcard => {
-                buf[n] = '{';
-                n += 1;
-                const nm = if (seg.text.len > 0) seg.text else "path";
-                @memcpy(buf[n..][0..nm.len], nm);
-                n += nm.len;
-                buf[n] = '}';
-                n += 1;
-            },
-        }
-    }
-    return buf[0..n];
 }
 
 /// Explicit operation ids must be globally unique — collisions are a
@@ -538,7 +505,7 @@ test "generates valid spec for mixed routes" {
     defer parsed.deinit();
 
     const root = parsed.value;
-    try std.testing.expectEqualStrings("3.1.0", root.object.get("openapi").?.string);
+    try std.testing.expectEqualStrings(openApiVersion, root.object.get("openapi").?.string);
     const paths = root.object.get("paths").?.object;
 
     try std.testing.expect(paths.get("/users/{id}") != null);

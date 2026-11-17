@@ -1,29 +1,25 @@
-//! Library identity - version string and server token.
+//! Library identity and default documentation metadata.
 //!
-//! Provides the canonical library name and version, used in `Server`
-//! response headers (RFC 9110 Section 12.5.3) and user-agent string
-//! construction (RFC 9110 Section 10.1.5).
-//!
-//! References:
-//!   - RFC 9110 Section 10.1.5 - User-Agent
-//!   - RFC 9110 Section 12.5.3 - Server Header Field
+//! One zigantic schema is the single source of truth: the OpenAPI document,
+//! the `Server` header, and the client `User-Agent` all read the same values,
+//! so the library can never advertise two different versions.
 
 const std = @import("std");
+const z = @import("zigantic");
 
-pub const name = "httpx";
-pub const version = "0.2.4";
-/// Default `User-Agent` value sent by the built-in client.
-pub const userAgent = name ++ "/" ++ version;
+/// Default metadata for generated API documentation, the `Server` header,
+/// and the client `User-Agent`.
+const InfoSchema = z.objectOf(.{
+    .title = z.withDefault(z.string(.{ .min = 1 }), "HTTPX API"),
+    .version = z.withDefault(z.string(.{ .min = 1 }), "0.2.4"),
+    .description = z.withDefault(z.string(.{}), "A Fast, High-Performance HTTP Client and Server Library for Zig."),
+}, .{});
+pub const Info = InfoSchema.Value;
 
-/// Default metadata for generated API documentation and the `Server` header.
-pub const Info = struct {
-    title: []const u8 = "HTTPX API",
-    version: []const u8 = version,
-    description: []const u8 = "Fast, modern web framework for Zig with automated OpenAPI & GraphQL documentation.",
-};
-
+/// The schema defaults, used wherever the library identifies itself.
 pub const defaultInfo: Info = .{};
 
 test "version identity" {
-    try std.testing.expectEqualStrings("httpx/0.2.4", userAgent);
+    try std.testing.expectEqualStrings("HTTPX API", defaultInfo.title);
+    try std.testing.expectEqualStrings("0.2.4", defaultInfo.version);
 }

@@ -3,7 +3,7 @@
 HTTPX has no in-memory HTTP cache subsystem. HTTP caching is handled where
 it is actually implemented:
 
-- **Static files**: `server.static(mount, dir)` serves with ETags and honors
+- **Static files**: `server.static(.{ .mount = mount, .root = dir })` serves with ETags and honors
   `If-None-Match` (`304 Not Modified`). See `examples/staticFiles.zig`.
 - **Downloads**: `.existing = .verifyExisting` skips re-downloads, and
   `.replaceIfChanged` uses conditional headers. See

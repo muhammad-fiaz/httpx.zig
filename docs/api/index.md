@@ -10,7 +10,7 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 
 - `client.request(url, options)` - generic request; `.method` defaults to GET
 - `client.fetch(url, options)` - Fetch-style convenience using the native client transport
-- `client.get / post / put / patch / delete / head / options / trace / connect / request(url, options)`
+- `client.get / post / put / patch / delete / head / options / request(url, options)`
 - `client.checkConnectivity(options)` — connectivity probe using client I/O
 - Additional operations: `client.download`, `client.graphql`, `client.lookupFileInfo`, `client.updateFile`, `httpx.client.download.verifyFile`, `client.sitemap.fetch`, `client.resolve`, `client.resolveUrl`
 
@@ -55,6 +55,7 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 - `httpx.clock.millisNow(io)` / `monotonicMillis(io)` / `sleepMillis(io, ms)` — wall-clock, monotonic, and sleep helpers
 - `httpx.Uri.parse(...)` — RFC 3986 URI parsing
 - `httpx.quic.varint` — QUIC variable-length integers
+- `httpx.env` — process environment and `.env` helpers
 
 ### DNS Cache
 

@@ -16,6 +16,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const addressMod = @import("address.zig");
+const z = @import("zigantic");
 
 pub const Error = error{
     ResolverUnsupported,
@@ -40,10 +41,10 @@ pub const Resolver = struct {
         return .{ .allocator = allocator, .io = io };
     }
 
-    pub const LookupOptions = struct {
-        /// Port stamped onto every returned address. Defaults to 443 (HTTPS).
-        port: u16 = 443,
-    };
+    const LookupOptionsSchema = z.objectOf(.{
+        .port = z.withDefault(z.integer(u16, .{}), 443),
+    }, .{});
+    pub const LookupOptions = LookupOptionsSchema.Value;
 
     /// Resolve `host` to addresses (system order preserved). Caller owns the returned slice.
     ///
@@ -308,7 +309,7 @@ test "localhost resolves offline (hosts file)" {
         // due to restricted networking or missing IPv6 support.
         // In both cases fall back to an IP literal to verify the code path.
         if (err != error.HostNotFound and err != error.NoAddresses) return err;
-        const fallback = resolver.lookup("127.0.0.1", .{ .port = 80 }) catch return;
+        const fallback = resolver.lookup("127.0.0.1", .{ .port = 80 }) catch |fallbackErr| return fallbackErr;
         defer a.free(fallback);
         try std.testing.expect(fallback.len >= 1);
         return;
@@ -331,10 +332,10 @@ test "garbage hostname fails cleanly" {
 
 test "std.Io resolver returns canonical project addresses" {
     const IoContext = @import("../sockets/tcp.zig").IoContext;
-    var ctx = IoContext.init(std.testing.allocator) catch return;
+    var ctx = try IoContext.init(std.testing.allocator);
     defer ctx.deinit();
     const resolver = Resolver.init(std.testing.allocator, ctx.io);
-    const addrs = resolver.lookup("localhost", .{ .port = 80 }) catch return;
+    const addrs = resolver.lookup("localhost", .{ .port = 80 }) catch |err| return err;
     defer std.testing.allocator.free(addrs);
     try std.testing.expect(addrs.len >= 1);
     for (addrs) |addr| try std.testing.expectEqual(@as(u16, 80), addr.port);

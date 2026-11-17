@@ -39,7 +39,7 @@ pub fn main() !void {
 
     if (result.verified) {
         std.debug.print("File verified and saved successfully to: {s}\n", .{
-            result.destinationPath(),
+            httpx.client.download.destinationPath(&result),
         });
         if (result.sha256Hex) |h| {
             std.debug.print("SHA-256: {s}\n", .{h});

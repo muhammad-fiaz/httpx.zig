@@ -8,7 +8,18 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const configCoerce = @import("../../common/configCoerce.zig");
+const z = @import("zigantic");
+
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
+
 const tls = std.crypto.tls;
 const x25519 = std.crypto.dh.X25519;
 
@@ -137,10 +148,11 @@ pub const Role = enum { client, server };
 
 /// Engine configuration. `role` selects the handshake side; `cbs` carries
 /// the key/alert callbacks. `.{}` is a client engine with default callbacks.
-pub const Config = struct {
-    role: Role = .client,
-    cbs: Callbacks = .{},
-};
+pub const ConfigSchema = z.objectOf(.{
+    .role = z.withDefault(z.enumType(Role, .{}), .client),
+    .cbs = z.withDefault(typedSchema(Callbacks), .{}),
+}, .{});
+pub const Config = ConfigSchema.Value;
 
 // Derived keys
 
@@ -364,8 +376,7 @@ pub const Engine = struct {
         serverFinishedSent,
     };
 
-    pub fn init(allocator: Allocator, io: std.Io, cfg_in: anytype) Engine {
-        const cfg = configCoerce.to(Config, cfg_in);
+    pub fn init(allocator: Allocator, io: std.Io, cfg: Config) Engine {
         return .{
             .io = io,
             .allocator = allocator,

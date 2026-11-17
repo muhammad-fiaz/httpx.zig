@@ -5,6 +5,11 @@ pub const snapshotMod = @import("metricsSnapshot.zig");
 pub const MetricsSnapshot = snapshotMod.MetricsSnapshot;
 pub const ServerSnapshot = snapshotMod.ServerSnapshot;
 pub const ClientSnapshot = snapshotMod.ClientSnapshot;
+pub const errorRate = snapshotMod.errorRate;
+pub const averageLatencySeconds = snapshotMod.averageLatencySeconds;
+pub const averageLatencyMs = snapshotMod.averageLatencyMs;
+pub const serverErrorRate = snapshotMod.serverErrorRate;
+pub const requestsPerSecond = snapshotMod.requestsPerSecond;
 pub const LATENCY_BUCKET_COUNT = snapshotMod.LATENCY_BUCKET_COUNT;
 
 /// Standard Prometheus latency bucket thresholds in seconds.

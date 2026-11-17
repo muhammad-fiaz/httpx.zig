@@ -29,7 +29,6 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
         .tls = .{
             .certificatePem = @embedFile("cert.pem"),
             .privateKeyPem = @embedFile("key.pem"),

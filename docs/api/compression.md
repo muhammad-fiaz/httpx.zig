@@ -43,8 +43,13 @@ Compresses data using the specified encoding. The caller owns the returned slice
 
 ## Incremental Codec APIs
 
-For chunked data, compress or decompress incrementally with the
-`zstd` / `brotli` packages (`httpx.zstd`, `httpx.brotli`). The HTTP
-client and server still buffer complete bodies at their public APIs; they
-negotiate `Accept-Encoding` automatically, and compressed responses carry
-`Content-Encoding` plus `Vary: Accept-Encoding`.
+Httpx's public compression API is buffer-oriented: `compress` and `decompress`
+return complete buffers, and the HTTP client and server buffer bodies at their
+public APIs. Brotli and Zstandard are implemented by the internal `brotli` and
+`zstd` dependencies; those package namespaces are not re-exported. If an
+application needs incremental codec objects, add the package directly to its
+own `build.zig.zon` and import it there.
+
+Automatic negotiation encodes responses with `Content-Encoding` and adds
+`Vary: Accept-Encoding`. `decompressLimited` enforces the output cap before any
+decoded body is returned.

@@ -15,7 +15,6 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const configCoerce = @import("../common/configCoerce.zig");
 const tcp = @import("../sockets/tcp.zig");
 const mimeMod = @import("../common/mime.zig");
 const mediaTypeMod = @import("../common/mediaType.zig");
@@ -24,8 +23,9 @@ const sync = @import("../common/sync.zig");
 const logging = @import("../common/logging.zig");
 const Method = @import("../common/method.zig").Method;
 const req = @import("requestBuilder.zig");
-const Pool = @import("pool/connectionPool.zig").Pool;
-const PoolConfig = @import("pool/connectionPool.zig").PoolConfig;
+const poolNs = @import("pool/connectionPool.zig");
+const Pool = poolNs.Pool;
+const PoolConfig = poolNs.PoolConfig;
 const tlsSessionCache = @import("../protocols/tls/tlsSession.zig");
 const dnsCache = @import("../net/dns/dnsCache.zig");
 const clock = @import("../common/clock.zig");
@@ -49,6 +49,19 @@ pub const RemoteFileInfo = DownloadCore.RemoteFileInfo;
 
 const addressMod = @import("../net/address.zig");
 const netResolve = @import("../net/resolve.zig");
+const encoderMod = @import("../web/multipart/multipartEncoder.zig");
+const z = @import("zigantic");
+
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
+
 pub const Address = addressMod.Address;
 
 /// Restricts DNS resolution to a particular address family.
@@ -62,16 +75,13 @@ pub const AddressFamilyPreference = enum {
 };
 
 /// Options for `Client.resolve` and `Client.resolveUrl`.
-pub const ResolveOptions = struct {
-    /// Address family to keep; defaults to both families.
-    family: AddressFamilyPreference = .any,
-    /// Reuse the client DNS cache when an entry is still fresh.
-    useCache: bool = true,
-    /// Per-resolution timeout in milliseconds; `null` uses the resolver default.
-    timeoutMs: ?u64 = null,
-    /// Port stamped onto every returned address. Defaults to 443 (HTTPS).
-    port: u16 = 443,
-};
+const ResolveOptionsSchema = z.objectOf(.{
+    .family = z.withDefault(z.enumType(AddressFamilyPreference, .{}), .any),
+    .useCache = z.withDefault(z.boolean(.{}), true),
+    .timeoutMs = z.optional(z.integer(u64, .{})),
+    .port = z.withDefault(z.integer(u16, .{}), 443),
+}, .{});
+pub const ResolveOptions = ResolveOptionsSchema.Value;
 
 /// Owned list of resolved addresses returned by `Client.resolve`.
 pub const ResolvedAddresses = struct {
@@ -114,82 +124,57 @@ pub const ResolvedAddresses = struct {
 ///
 /// Every field has a safe production default, so `.{}` is a complete
 /// configuration. Per-request options always override these values.
-pub const Config = struct {
-    /// Maximum redirect hops followed for one request.
-    maxRedirects: u8 = 10,
-    /// Follow 3xx responses automatically.
-    followRedirects: bool = true,
-    /// Connection-pool limits and idle policy.
-    pool: PoolConfig = .{},
-    /// Application-supplied callback for client events (request completed, failed, etc.).
-    /// When null (the default), HTTPX produces no output.
-    eventCallback: ?logging.ClientEventCallback = null,
-    /// DNS cache controls.
-    dnsCache: DnsCacheOptions = .{},
-    /// Allow bare LF line endings (instead of strict CRLF) for
-    /// non-compliant peers (issue #37). Stripping optional trailing
-    /// \r. Default false (strict RFC 9110/9112).
-    allowLfLineEndings: bool = false,
-    /// Default HTTP version for requests when per-request version not set.
-    httpVersion: ?HttpVersion = null,
-    /// Default TLS options for https:// requests.
-    tls: ?req.TlsOptions = null,
-    /// Default request timeout in ms.
-    timeoutMs: ?u64 = null,
-    /// Default max response body size.
-    maxResponseSize: ?usize = null,
-    /// Number of retry attempts for failed requests (0 = no retry).
-    maxRetries: u32 = 0,
-    /// Delay between retry attempts in milliseconds.
-    retryDelayMs: u64 = 1000,
-    /// HTTP status codes that trigger a retry (502, 503, 504 by default).
-    retryStatusCodes: []const u16 = &.{ 502, 503, 504 },
-    /// Retry replay-sensitive methods (POST, PATCH, CONNECT). Keep this
-    /// false unless the server is idempotent or deduplicates requests.
-    retryUnsafeMethods: bool = false,
-    /// Default proxy URL (e.g. "socks5://127.0.0.1:1080", "socks5h://127.0.0.1:1080", "http://127.0.0.1:8080").
-    proxy: ?[]const u8 = null,
-    /// Allow HTTP/1.0 in the automatic protocol selection.
-    http10: bool = true,
-    /// Allow HTTP/1.1 in the automatic protocol selection.
-    http11: bool = true,
-    /// Prefer HTTP/2 when the transport supports it.
-    http2: bool = false,
-    /// Prefer HTTP/3 when the transport supports it.
-    http3: bool = false,
-    /// Default early data options (disabled by default).
-    earlyData: req.EarlyDataOptions = .{},
-    /// Protocol engine tuning. The top-level `http2`/`http3` booleans
-    /// select the preferred protocol; these nested structures tune the
-    /// engines that are actually used. `.{}` keeps secure defaults.
-    protocols: Protocols = .{},
+const ConfigSchema = z.objectOf(.{
+    .maxRedirects = z.withDefault(z.integer(u8, .{}), 10),
+    .followRedirects = z.withDefault(z.boolean(.{}), true),
+    .pool = z.withDefault(poolNs.PoolConfigSchema, .{}),
+    .eventCallback = z.withDefault(z.custom(?logging.ClientEventCallback, .{
+        .check = struct {
+            fn accept(_: ?logging.ClientEventCallback) bool {
+                return true;
+            }
+        }.accept,
+    }), null),
+    .dnsCache = z.withDefault(DnsCacheOptionsSchema, .{}),
+    .allowLfLineEndings = z.withDefault(z.boolean(.{}), false),
+    .httpVersion = z.optional(z.enumType(HttpVersion, .{})),
+    .tls = z.optional(req.TlsOptionsSchema),
+    .timeoutMs = z.optional(z.integer(u64, .{})),
+    .maxResponseSize = z.optional(z.integer(usize, .{})),
+    .maxRetries = z.withDefault(z.integer(u32, .{}), 0),
+    .retryDelayMs = z.withDefault(z.integer(u64, .{}), 1000),
+    .retryStatusCodes = z.withDefault(z.array(z.integer(u16, .{}), .{}), &.{ 502, 503, 504 }),
+    .retryUnsafeMethods = z.withDefault(z.boolean(.{}), false),
+    .proxy = z.optional(z.string(.{ .min = 1 })),
+    .http10 = z.withDefault(z.boolean(.{}), true),
+    .http11 = z.withDefault(z.boolean(.{}), true),
+    .http2 = z.withDefault(z.boolean(.{}), false),
+    .http3 = z.withDefault(z.boolean(.{}), false),
+    .earlyData = z.withDefault(req.EarlyDataOptionsSchema, .{}),
+    .protocols = z.withDefault(ProtocolsSchema, .{}),
+}, .{});
+pub const Config = ConfigSchema.Value;
 
-    /// Nested protocol-engine tuning.
-    pub const Protocols = struct {
-        /// HTTP/3 transport tuning.
-        http3: Http3Options = .{},
-    };
+/// Nested protocol-engine tuning.
+const ProtocolsSchema = z.objectOf(.{
+    .http3 = z.withDefault(Http3OptionsSchema, .{}),
+}, .{});
+pub const Protocols = ProtocolsSchema.Value;
 
-    /// HTTP/3 transport tuning.
-    pub const Http3Options = struct {
-        /// QUIC transport parameters used for new client sessions.
-        /// Flow-control windows, stream limits, idle timeout and UDP
-        /// payload size are validated when the connection is created.
-        quic: quicModule.Config = .{},
-    };
+/// HTTP/3 transport tuning.
+const Http3OptionsSchema = z.objectOf(.{
+    .quic = z.withDefault(quicModule.ConfigSchema, .{}),
+}, .{});
+pub const Http3Options = Http3OptionsSchema.Value;
 
-    /// DNS cache sizing and TTL controls.
-    pub const DnsCacheOptions = struct {
-        /// Enable the in-process DNS cache.
-        enable: bool = true,
-        /// Positive-entry time to live in milliseconds.
-        ttlMs: i64 = 60_000,
-        /// Negative (NXDOMAIN) entry time to live in milliseconds.
-        negativeTtlMs: i64 = 5_000,
-        /// Maximum cached host entries.
-        maxEntries: u32 = 1024,
-    };
-};
+/// DNS cache sizing and TTL controls.
+const DnsCacheOptionsSchema = z.objectOf(.{
+    .enable = z.withDefault(z.boolean(.{}), true),
+    .ttlMs = z.withDefault(z.nonNegativeInt(i64, .{}), 60_000),
+    .negativeTtlMs = z.withDefault(z.nonNegativeInt(i64, .{}), 5_000),
+    .maxEntries = z.withDefault(z.positiveInt(u32, .{}), 1024),
+}, .{});
+pub const DnsCacheOptions = DnsCacheOptionsSchema.Value;
 
 /// Canonical description of every per-request client option.
 ///
@@ -199,87 +184,58 @@ pub const Config = struct {
 /// single, compile-time source of truth for the *names* and documented
 /// defaults, and [`validateRequestOptions`] rejects misspelled or unknown
 /// fields at build time — there is no runtime string allowlist.
-pub const RequestOptions = struct {
-    /// HTTP method. Defaults to the verb of the called operation.
-    method: ?Method = null,
-    /// `[]const Header` or a struct whose field names are header names.
-    headers: ?[]const req.Header = null,
-    /// `[]const Header` or a struct whose field names are query keys.
-    query: ?[]const req.Header = null,
-    /// Raw body bytes or a streaming [`BodySource`].
-    body: ?BodySource = null,
-    /// Any value serialized as JSON.
-    json: ?std.json.Value = null,
-    /// Form fields as `[]const Header` or a struct literal.
-    form: ?[]const req.Header = null,
-    /// Plain text body; implies `text/plain; charset=utf-8` unless overridden.
-    text: ?[]const u8 = null,
-    /// Explicit `Content-Type` override.
-    contentType: ?[]const u8 = null,
-    /// Multipart form data; see [`MultipartOptions`].
-    multipart: ?MultipartOptions = null,
-    /// Redirect policy override.
-    followRedirects: ?bool = null,
-    /// Maximum redirects override.
-    maxRedirects: ?u8 = null,
-    /// Strict CRLF policy override.
-    allowLfLineEndings: ?bool = null,
-    /// Protocol preference override.
-    httpVersion: ?HttpVersion = null,
-    /// Boolean protocol shortcuts (mutually exclusive with `httpVersion`).
-    http10: ?bool = null,
-    http11: ?bool = null,
-    http2: ?bool = null,
-    http3: ?bool = null,
-    /// TLS client options for this request only.
-    tls: ?req.TlsOptions = null,
-    /// Literal `Cookie` header value.
-    cookie: ?[]const u8 = null,
-    /// `user:password` encoded as Basic auth.
-    basicAuth: ?[]const u8 = null,
-    /// Bearer token encoded as `Authorization: Bearer …`.
-    bearerAuth: ?[]const u8 = null,
-    /// Per-request timeout in milliseconds.
-    timeoutMs: ?u64 = null,
-    /// Upper bound on the buffered response body.
-    maxResponseSize: ?usize = null,
-    /// Proxy URL override.
-    proxy: ?[]const u8 = null,
-    /// TLS 1.3 early-data options.
-    earlyData: ?req.EarlyDataOptions = null,
-    /// Cooperative cancellation flag.
-    cancel: ?*const std.atomic.Value(bool) = null,
-};
+pub const RequestOptionsSchema = z.objectOf(.{
+    .method = z.optional(z.enumType(Method, .{})),
+    .headers = z.optional(z.array(req.HeaderSchema, .{})),
+    .query = z.optional(z.array(req.HeaderSchema, .{})),
+    .body = z.optional(typedSchema(BodySource)),
+    .json = z.optional(typedSchema(std.json.Value)),
+    .form = z.optional(z.array(req.HeaderSchema, .{})),
+    .text = z.optional(z.string(.{})),
+    .contentType = z.optional(z.string(.{ .min = 1 })),
+    .multipart = z.optional(MultipartOptionsSchema),
+    .followRedirects = z.optional(z.boolean(.{})),
+    .maxRedirects = z.optional(z.integer(u8, .{})),
+    .allowLfLineEndings = z.optional(z.boolean(.{})),
+    .httpVersion = z.optional(z.enumType(HttpVersion, .{})),
+    .http10 = z.optional(z.boolean(.{})),
+    .http11 = z.optional(z.boolean(.{})),
+    .http2 = z.optional(z.boolean(.{})),
+    .http3 = z.optional(z.boolean(.{})),
+    .tls = z.optional(req.TlsOptionsSchema),
+    .cookie = z.optional(z.string(.{})),
+    .basicAuth = z.optional(z.string(.{})),
+    .bearerAuth = z.optional(z.string(.{})),
+    .timeoutMs = z.optional(z.integer(u64, .{})),
+    .maxResponseSize = z.optional(z.integer(usize, .{})),
+    .proxy = z.optional(z.string(.{ .min = 1 })),
+    .earlyData = z.optional(req.EarlyDataOptionsSchema),
+    .cancel = z.optional(typedSchema(*const std.atomic.Value(bool))),
+}, .{});
+pub const RequestOptions = RequestOptionsSchema.Value;
 
 /// Canonical multipart request-option shape. Every member is optional so the
 /// caller can use any of the supported forms: generic `.parts`, the
 /// `.fields` + `.files` shorthand, a single `.file`, or a bare single-part
 /// struct with `.name` and `.data` / `.value`.
-pub const MultipartOptions = struct {
-    /// MIME subtype: `.formData`, `.mixed`, `.related`, `.alternative`,
-    /// `.byteranges`, or `.{ .custom = "signed" }`.
-    subtype: ?@import("../web/multipart/multipartEncoder.zig").Subtype = null,
-    /// Explicit boundary; a cryptographically random one is generated when null.
-    boundary: ?[]const u8 = null,
-    /// Full-control parts: `.parts = .{ .{ .name, .data, … } }`.
-    parts: ?[]const @import("../web/multipart/multipartEncoder.zig").Part = null,
-    /// Text fields: `.fields = .{ .{ .name, .value } }`.
-    fields: ?[]const @import("../web/multipart/multipartEncoder.zig").FieldValue = null,
-    /// File fields: `.files = .{ .{ .name, .filename, .data } }`.
-    files: ?[]const @import("../web/multipart/multipartEncoder.zig").File = null,
-    /// Single file shorthand: `.file = .{ .name, .filename, .data }`.
-    file: ?@import("../web/multipart/multipartEncoder.zig").File = null,
-    /// Bare single-part shorthand: `.name` plus `.data` / `.value`.
-    name: ?[]const u8 = null,
-    /// Optional filename for the bare single-part shorthand.
-    filename: ?[]const u8 = null,
-    /// Optional content type for the bare single-part shorthand.
-    contentType: ?[]const u8 = null,
-    /// Raw bytes for the bare single-part shorthand.
-    data: ?[]const u8 = null,
-    /// Alias for `data` when the bare shorthand carries a text value.
-    value: ?[]const u8 = null,
-};
+/// Canonical multipart request-option shape. Every member is optional so the
+/// caller can use any of the supported forms: generic `.parts`, the
+/// `.fields` + `.files` shorthand, a single `.file`, or a bare single-part
+/// struct with `.name` and `.data` / `.value`.
+const MultipartOptionsSchema = z.objectOf(.{
+    .subtype = z.optional(typedSchema(encoderMod.Subtype)),
+    .boundary = z.optional(z.string(.{ .min = 1 })),
+    .parts = z.optional(z.array(encoderMod.PartSchema, .{})),
+    .fields = z.optional(z.array(encoderMod.FieldValueSchema, .{})),
+    .files = z.optional(z.array(encoderMod.FileSchema, .{})),
+    .file = z.optional(encoderMod.FileSchema),
+    .name = z.optional(z.string(.{})),
+    .filename = z.optional(z.string(.{})),
+    .contentType = z.optional(z.string(.{ .min = 1 })),
+    .data = z.optional(z.string(.{})),
+    .value = z.optional(z.string(.{})),
+}, .{});
+pub const MultipartOptions = MultipartOptionsSchema.Value;
 
 fn validateNestedOptions(comptime label: []const u8, comptime T: type, comptime Allowed: type) void {
     const info = @typeInfo(T);
@@ -499,12 +455,11 @@ pub const Session = struct {
     io: std.Io,
     defaultTls: req.TlsOptions,
 
-    pub const CacheOptions = struct {
-        /// ALPN protocol the cached session must have negotiated.
-        alpn: []const u8 = "h2",
-        /// TLS policy for this lookup; `null` uses the client default policy.
-        tls: ?req.TlsOptions = null,
-    };
+    const CacheOptionsSchema = z.objectOf(.{
+        .alpn = z.withDefault(z.string(.{ .min = 1 }), "h2"),
+        .tls = z.optional(req.TlsOptionsSchema),
+    }, .{});
+    pub const CacheOptions = CacheOptionsSchema.Value;
 
     pub fn init(allocator: Allocator, io: std.Io, default_tls: ?req.TlsOptions) Session {
         return .{
@@ -520,8 +475,7 @@ pub const Session = struct {
 
     /// Returns an owned copy of a cached session for `host`/`port`, or `null`.
     /// The caller owns the result and releases it with `ClientSession.deinit`.
-    pub fn cache(self: *Session, host: []const u8, port: u16, opts: anytype) ?tlsSessionCache.ClientSession {
-        const options = configCoerce.to(CacheOptions, opts);
+    pub fn cache(self: *Session, host: []const u8, port: u16, options: CacheOptions) ?tlsSessionCache.ClientSession {
         const tls = options.tls orelse self.defaultTls;
         return self.sessions.getWithAlpnPolicy(
             host,
@@ -533,8 +487,7 @@ pub const Session = struct {
     }
 
     /// Stores an owned copy of `session` for later resumption.
-    pub fn store(self: *Session, host: []const u8, port: u16, session: *const tlsSessionCache.ClientSession, opts: anytype) void {
-        const options = configCoerce.to(CacheOptions, opts);
+    pub fn store(self: *Session, host: []const u8, port: u16, session: *const tlsSessionCache.ClientSession, options: CacheOptions) void {
         const tls = options.tls orelse self.defaultTls;
         self.sessions.putWithPolicy(host, port, session, req.sessionPolicyFingerprint(tls));
     }
@@ -567,6 +520,9 @@ pub const Client = struct {
     /// Origin-keyed TLS 1.3 session cache for resumption on the native TLS
     /// paths. Reached as `client.session`.
     session: Session,
+    /// False when the configuration failed schema validation; requests then
+    /// fail with `error.InvalidConfig` instead of running with bad bounds.
+    configValid: bool = true,
 
     /// Creates a client from an explicit allocator, shared I/O, and a partial
     /// or full `.{}` config. Omitted fields keep their declared defaults.
@@ -575,14 +531,16 @@ pub const Client = struct {
     /// var client = httpx.Client.init(allocator, io, .{ .timeoutMs = 5_000 });
     /// defer client.deinit();
     /// ```
-    pub fn init(allocator: Allocator, io: std.Io, config_in: anytype) Client {
-        const config = configCoerce.to(Config, config_in);
+    pub fn init(allocator: Allocator, io: std.Io, config: Config) Client {
+        var scratch: [4096]u8 = undefined;
+        const issue = z.checkFirst(ConfigSchema, config, &scratch, .{}) catch null;
         var c = Client{
             .allocator = allocator,
             .io = io,
             .pool = Pool.init(allocator, io, config.pool),
             .config = config,
             .session = Session.init(allocator, io, config.tls),
+            .configValid = issue == null,
         };
         if (config.dnsCache.enable) {
             c.dnsCache = dnsCache.Cache.init(
@@ -670,20 +628,14 @@ pub const Client = struct {
         return self.doRequestStream(m, url, opts);
     }
 
-    fn coerceDownloadOptions(opts: anytype) DownloadOptions {
-        return configCoerce.to(DownloadOptions, opts);
-    }
-
     /// Streams a download to disk with progress reporting, resume, and verification.
-    pub fn download(self: *Client, url: []const u8, opts: anytype) DownloadError!DownloadResult {
+    pub fn download(self: *Client, url: []const u8, opts: DownloadOptions) DownloadError!DownloadResult {
         var dl = DownloadCore.Downloader.init(self.allocator, self);
-        const downloadOptions = coerceDownloadOptions(opts);
-        return dl.download(url, downloadOptions);
+        return dl.download(url, opts);
     }
 
     /// Queries remote file metadata (size, filename, Content-Type, ETag, Range support) without downloading.
-    pub fn lookupFileInfo(self: *Client, url: []const u8, opts: anytype) DownloadError!RemoteFileInfo {
-        const downloadOptions = coerceDownloadOptions(opts);
+    pub fn lookupFileInfo(self: *Client, url: []const u8, downloadOptions: DownloadOptions) DownloadError!RemoteFileInfo {
         return DownloadCore.lookupFileInfo(self, url, downloadOptions);
     }
 
@@ -928,9 +880,8 @@ pub const Client = struct {
     /// ```zig
     /// if (!client.isOnline(.{})) return error.NoInternet;
     /// ```
-    pub fn isOnline(self: *Client, opts: anytype) bool {
-        const o = configCoerce.to(ConnectivityOptions, opts);
-        return connectivity.checkConnectivity(self.io, o).online;
+    pub fn isOnline(self: *Client, opts: ConnectivityOptions) bool {
+        return connectivity.checkConnectivity(self.io, opts).online;
     }
 
     /// Probes internet connectivity and returns detailed results.
@@ -943,8 +894,8 @@ pub const Client = struct {
     /// const r = client.checkConnectivity(.{ .timeoutMs = 2000 });
     /// if (r.online) std.debug.print("online via {s} ({?d}ms)\n", .{ r.endpointStr(), r.latencyMs });
     /// ```
-    pub fn checkConnectivity(self: *Client, opts: anytype) ConnectivityResult {
-        return connectivity.checkConnectivity(self.io, configCoerce.to(ConnectivityOptions, opts));
+    pub fn checkConnectivity(self: *Client, opts: ConnectivityOptions) ConnectivityResult {
+        return connectivity.checkConnectivity(self.io, opts);
     }
 
     /// Resolves a hostname or IP address to structured Address results,
@@ -961,9 +912,7 @@ pub const Client = struct {
     /// IPv4-only:
     ///   var addresses = try client.resolve("httpbun.com", .{ .family = .ipv4 });
     ///   defer addresses.deinit();
-    pub fn resolve(self: *Client, host: []const u8, opts: anytype) Error!ResolvedAddresses {
-        const resolveOpts = configCoerce.to(ResolveOptions, opts);
-
+    pub fn resolve(self: *Client, host: []const u8, resolveOpts: ResolveOptions) Error!ResolvedAddresses {
         var outList = std.ArrayList(addressMod.Address).empty;
         errdefer outList.deinit(self.allocator);
 
@@ -1050,7 +999,7 @@ pub const Client = struct {
     pub fn resolveUrl(self: *Client, urlStr: []const u8, opts: anytype) Error!ResolvedAddresses {
         const uriMod = @import("../common/uri.zig");
         const u = uriMod.parse(urlStr) catch return Error.InvalidUrl;
-        const p = u.effectivePort();
+        const p = uriMod.effectivePort(&u);
         if (p == 0) return Error.InvalidUrl;
         if (@TypeOf(opts) == ResolveOptions) {
             var o = opts;
@@ -1103,6 +1052,7 @@ pub const Client = struct {
     }
 
     fn doRequestWithOverride(self: *Client, method: Method, urlOverride: []const u8, opts: anytype) Error!Response {
+        if (!self.configValid) return error.InvalidConfig;
         var attempt: u32 = 0;
         const maxAttempts = self.config.maxRetries + 1;
         // RFC 9110 Section 9.2.2: only idempotent methods may be replayed
@@ -1835,14 +1785,14 @@ test "dns cache serves second hostname request from cache" {
     // Windows (accept CANCELLED => unreachable). The HTTP path is
     // already covered by keep-alive / connection-close tests; the
     // FakeResolver unit test covers coalescing deterministically.
-    const r1 = client.dnsCache.?.resolve("localhost") catch return;
+    const r1 = client.dnsCache.?.resolve("localhost") catch |err| return err;
     defer {
         for (r1) |addr| a.free(addr);
         a.free(r1);
     }
     try std.testing.expect(r1.len >= 1);
 
-    const r2 = client.dnsCache.?.resolve("localhost") catch return;
+    const r2 = client.dnsCache.?.resolve("localhost") catch |err| return err;
     defer {
         for (r2) |addr| a.free(addr);
         a.free(r2);
@@ -2019,7 +1969,7 @@ test "client request with socks5 proxy connects through mock server" {
     defer client.deinit();
 
     // Fetch through the mock proxy - verifies handshake was routed through SOCKS
-    _ = client.request("http://127.0.0.1:8080/test", .{ .timeoutMs = 500 }) catch {};
+    try std.testing.expectError(error.MalformedResponse, client.request("http://127.0.0.1:8080/test", .{ .timeoutMs = 500 }));
     try std.testing.expect(mock.recordedAtyp.load(.acquire) != 0);
 }
 
@@ -2039,7 +1989,7 @@ test "client request with socks4 proxy connects through mock server" {
     var client = Client.init(a, ctx.io, .{ .proxy = proxyUrl });
     defer client.deinit();
 
-    _ = client.request("http://127.0.0.1:8080/test", .{ .timeoutMs = 500 }) catch {};
+    try std.testing.expectError(error.MalformedResponse, client.request("http://127.0.0.1:8080/test", .{ .timeoutMs = 500 }));
     try std.testing.expectEqual(@as(u32, 0x7F000001), mock.recordedIp);
 }
 

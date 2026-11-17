@@ -42,15 +42,16 @@ builder API.
 
 | Field | Type | Description |
 |---|---|---|
-| `url` | `[]const u8` | Request URL when using `httpx.client.request`; client convenience methods take the URL as their first argument |
+| *(not an option)* | — | The URL is the **first argument** of every client method (`client.get(url, .{ ... })`). `url` is a field of the low-level `httpx.client.request` struct only. |
 | `method` | `?Method` | Explicit method for generic `request`; convenience methods choose the method |
 | `headers` | `[]const Header` | Slice of request header name/value pairs |
 | `query` | `[]const Header` | URL query parameters automatically encoded |
-| `body` | `?[]const u8` | Raw payload bytes |
+| `body` | `[]const u8` or `httpx.BodySource` | Request payload (raw bytes, string, or streaming body adapter) |
 | `json` | any value | Serialized as JSON using exact Zig field names, quoted identifiers included (sets Content-Type) |
 | `form` | `?[]const u8` | Pre-encoded `application/x-www-form-urlencoded` body |
 | `text` | `?[]const u8` | Plain-text body |
-| `contentType` | `?[]const u8` | Explicit Content-Type override |
+| `contentType` | `?[]const u8` | Request Content-Type header override (e.g. `application/json`) |
+| `multipart` | inline `.{}` | `multipart/form-data` body (`.fields`/`.files`/`.file`/`.parts`) |
 | `cookie` | `?[]const u8` | Value for `Cookie` header |
 | `basicAuth` | `?[]const u8` | `"user:pass"` for Basic Authorization |
 | `bearerAuth` | `?[]const u8` | Token for Bearer Authorization |
@@ -60,15 +61,14 @@ builder API.
 | `maxResponseSize` | `?usize` | Max response body size for this request |
 | `followRedirects` | `?bool` | Whether to automatically follow 3xx redirects |
 | `maxRedirects` | `?u8` | Maximum redirect hops before error |
-| `allowLfLineEndings` | `bool` | Accept bare LF line endings in the response |
+| `allowLfLineEndings` | `?bool` | Accept bare LF line endings in the response |
 | `httpVersion` | `?HttpVersion` | Protocol version (`.auto`, `.http10`, `.http11`, `.http2`, `.http3`) |
 | `http10` | `?bool` | Fast toggle to force HTTP/1.0 |
 | `http11` | `?bool` | Fast toggle to force HTTP/1.1 |
 | `http2` | `?bool` | Fast toggle to force HTTP/2 |
 | `http3` | `?bool` | Fast toggle to force HTTP/3 |
-| `earlyData` | inline `.{}` | Per-request 0-RTT settings |
-| `body` | `[]const u8` or `httpx.BodySource` | Request payload (raw bytes, string, or streaming body adapter) |
-| `contentType` | `?[]const u8` | Request Content-Type header override (e.g. `application/json`) |
+| `earlyData` | inline `.{}` | Per-request 0-RTT settings (`.enabled`, `.allowUnsafeMethods`) |
+| `cancel` | `*const std.atomic.Value(bool)` | Cooperative cancellation flag |
 
 ## Related
 

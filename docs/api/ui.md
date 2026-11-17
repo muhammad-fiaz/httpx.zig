@@ -1,7 +1,7 @@
 # Documentation UI API
 
-The documentation UI integration is exposed through `httpx.docs` and the
-server's `Config.docs` field.
+The documentation UI integration is exposed through `httpx.docs` and mounted
+explicitly on a router with `httpx.docs.mount`.
 
 ## Configuration
 
@@ -124,7 +124,9 @@ escaped inside inline scripts. There is no string-based option passthrough.
 ```zig
 // Full explicit configuration: every UI is enabled with its own route and
 // every option is set, so nothing depends on a hidden default.
-try httpx.docs.mount(allocator, &router, .{
+var server = try httpx.Server.init(allocator, io, .{});
+defer server.deinit();
+try httpx.docs.mount(&server, .{
     .enabled = true,
     .title = "Quick Start API",
     .version = httpx.version,
@@ -173,7 +175,8 @@ try httpx.docs.mount(allocator, &router, .{
         .headers = .{ .authorization = "Bearer token" },
         .docExplorerOpen = true,
     },
-}, null);
+});
+defer httpx.docs.unmount(&server);
 ```
 
 The mount registers the OpenAPI document first, then the enabled UI pages

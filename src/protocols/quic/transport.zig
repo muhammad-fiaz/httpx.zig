@@ -23,7 +23,7 @@ const udpMod = @import("../../sockets/udp.zig");
 const connMod = @import("connection.zig");
 const syncMod = @import("../../common/sync.zig");
 const clockMod = @import("../../common/clock.zig");
-const configCoerce = @import("../../common/configCoerce.zig");
+const z = @import("zigantic");
 const Connection = connMod.Connection;
 
 /// Background datagram pump for deadline-driven QUIC code.
@@ -173,14 +173,14 @@ pub const Endpoint = struct {
     candidatePeer: ?std.Io.net.IpAddress = null,
     io: std.Io,
 
-    pub const Options = struct {
-        port: u16 = 0,
-    };
+    const OptionsSchema = z.objectOf(.{
+        .port = z.withDefault(z.integer(u16, .{}), 0),
+    }, .{});
+    pub const Options = OptionsSchema.Value;
 
     /// Binds `options.port` (0 = ephemeral by default) for `conn`. Servers bind a known
     /// port so clients can address them; clients use ephemeral ports.
-    pub fn init(allocator: Allocator, io: std.Io, conn: *Connection, options: anytype) !Endpoint {
-        const opts = configCoerce.to(Options, options);
+    pub fn init(allocator: Allocator, io: std.Io, conn: *Connection, opts: Options) !Endpoint {
         const sock = try udpMod.Socket.init(allocator, io, .{ .port = opts.port });
         // No SO_RCVTIMEO on purpose: a receive timeout surfaces as
         // error.WouldBlock, which the Threaded std.Io backend treats as
@@ -363,7 +363,7 @@ test "quic pump rejects a duplicate start without losing its reader" {
 
 test "quic endpoints exchange protected initial packets over real udp" {
     const a = std.testing.allocator;
-    var ctx = @import("../../sockets/tcp.zig").IoContext.init(a) catch return;
+    var ctx = try @import("../../sockets/tcp.zig").IoContext.init(a);
 
     defer ctx.deinit();
 
@@ -442,7 +442,7 @@ test "coalesced packets are never split across datagrams" {
     // A QUIC datagram carries whole packets only (RFC 9000 Section 12.2).
     // Splitting a packet in half makes the peer discard the datagram.
     const a = std.testing.allocator;
-    var ctx = @import("../../sockets/tcp.zig").IoContext.init(a) catch return;
+    var ctx = try @import("../../sockets/tcp.zig").IoContext.init(a);
     defer ctx.deinit();
 
     var client = try connMod.Connection.init(a, ctx.io, .{});

@@ -9,6 +9,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const dom = @import("dom.zig");
 const ts = @import("treesitter");
+const z = @import("zigantic");
 const Tree = dom.Tree;
 const Attribute = dom.Attribute;
 
@@ -411,18 +412,24 @@ pub const ParseError = error{
     InputTooLarge,
 };
 
-pub const Options = struct {
-    lenient: bool = true,
-    maxInputSize: usize = 64 * 1024 * 1024,
-    maxNodes: u32 = dom.MAX_NODES,
-    maxDepth: u32 = dom.MAX_DEPTH,
-    maxAttrs: u32 = 256,
-    maxAttrValue: usize = 8192,
-};
+const OptionsSchema = z.objectOf(.{
+    .lenient = z.withDefault(z.boolean(.{}), true),
+    .maxInputSize = z.withDefault(z.positiveInt(usize, .{}), 64 * 1024 * 1024),
+    .maxNodes = z.withDefault(z.integer(u32, .{ .min = 1, .max = dom.MAX_NODES }), dom.MAX_NODES),
+    .maxDepth = z.withDefault(z.integer(u32, .{ .min = 1, .max = dom.MAX_DEPTH }), dom.MAX_DEPTH),
+    .maxAttrs = z.withDefault(z.positiveInt(u32, .{}), 256),
+    .maxAttrValue = z.withDefault(z.positiveInt(usize, .{}), 8192),
+}, .{});
+pub const Options = OptionsSchema.Value;
 
 pub fn parse(arena: Allocator, xmlSrc: []const u8, opts: Options) ParseError!Tree {
     if (xmlSrc.len > opts.maxInputSize) return error.InputTooLarge;
-    if (opts.maxNodes == 0) return error.TooManyNodes;
+    {
+        var scratch: [4096]u8 = undefined;
+        const issue = z.checkFirst(OptionsSchema, opts, &scratch, .{}) catch
+            return error.TooManyNodes;
+        if (issue != null) return error.TooManyNodes;
+    }
     const capacity = @min(@min(xmlSrc.len / 12 + 4, opts.maxNodes), dom.MAX_NODES);
     var tree = try Tree.initCapacity(arena, capacity);
     errdefer tree.deinit(arena);

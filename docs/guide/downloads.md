@@ -16,7 +16,7 @@ const res = try client.download("https://example.com/file.zip", .{
         .sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     },
 });
-std.debug.print("Downloaded {d} bytes to {s}\n", .{ res.downloadedBytes, res.destinationPath() });
+std.debug.print("Downloaded {d} bytes to {s}\n", .{ res.downloadedBytes, httpx.client.download.destinationPath(&res) });
 ```
 
 ## Downloading Multiple Files

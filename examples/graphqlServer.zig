@@ -91,7 +91,7 @@ const QueryRoot = httpx.graphql.Query(.{
 });
 
 fn statusHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.json(.{ .@"server-name" = httpx.name, .@"uptime-seconds" = 42 });
+    return ctx.json(.{ .@"server-name" = "httpx", .@"uptime-seconds" = 42 });
 }
 
 fn helloHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
@@ -107,32 +107,13 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    // One init owns the listener, router, docs, and GraphQL mount. Every
-    // option lives in this single `.{}` literal.
+    // The server owns the listener and router; documentation assets are
+    // mounted explicitly below so applications that omit them stay small.
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = true,
-        .docs = .{
-            .title = "HTTPX GraphQL & REST API",
-            .version = httpx.version,
-            .description = "Full-featured native HTTP server with OpenAPI documentation.",
-            .openapi = .{ .enabled = true, .route = "/openapi.json" },
-            .swagger = .{ .enabled = true, .route = "/docs", .title = "Swagger UI" },
-            .redoc = .{ .enabled = true, .route = "/redoc", .title = "ReDoc" },
-            .scalar = .{ .enabled = true, .route = "/scalar", .title = "Scalar Reference" },
-            .graphiql = .{
-                .enabled = true,
-                .route = "/graphiql",
-                .graphqlEndpoint = graphqlEndpoint,
-                .title = "GraphiQL IDE",
-                // Pre-fill the editor and use a dark Monaco theme.
-                .defaultQuery = "{ me { id name role } }",
-                .editorTheme = "vs-dark",
-            },
-        },
         .logging = .{},
-        .maxConnections = 5,
+        .limits = .{ .maxConnections = 5 },
     });
     defer server.deinit();
 
@@ -157,6 +138,24 @@ pub fn main() !void {
         .introspection = true,
         .endpoint = graphqlEndpoint,
     });
+    try httpx.docs.mount(&server, .{
+        .title = "HTTPX GraphQL & REST API",
+        .version = httpx.version,
+        .description = "Full-featured native HTTP server with OpenAPI documentation.",
+        .openapi = .{ .enabled = true, .route = "/openapi.json" },
+        .swagger = .{ .enabled = true, .route = "/docs", .title = "Swagger UI" },
+        .redoc = .{ .enabled = true, .route = "/redoc", .title = "ReDoc" },
+        .scalar = .{ .enabled = true, .route = "/scalar", .title = "Scalar Reference" },
+        .graphiql = .{
+            .enabled = true,
+            .route = "/graphiql",
+            .graphqlEndpoint = graphqlEndpoint,
+            .title = "GraphiQL IDE",
+            .defaultQuery = "{ me { id name role } }",
+            .editorTheme = "vs-dark",
+        },
+    });
+    defer httpx.docs.unmount(&server);
 
     const port = server.localPort();
     std.debug.print("GraphQL server listening on http://127.0.0.1:{d}\n", .{port});

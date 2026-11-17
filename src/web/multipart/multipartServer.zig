@@ -8,12 +8,14 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const parser = @import("multipartParser.zig");
 const common = @import("multipartCommon.zig");
+const z = @import("zigantic");
 
-pub const Options = struct {
-    limits: parser.Limits = .{},
-    max_fields: usize = 1024,
-    max_files: usize = 64,
-};
+const OptionsSchema = z.objectOf(.{
+    .limits = z.withDefault(parser.LimitsSchema, .{}),
+    .max_fields = z.withDefault(z.positiveInt(usize, .{}), 1024),
+    .max_files = z.withDefault(z.nonNegativeInt(usize, .{}), 64),
+}, .{});
+pub const Options = OptionsSchema.Value;
 
 pub const Error = parser.ParseError || error{
     InvalidOptions,
@@ -93,6 +95,10 @@ pub const Form = struct {
 /// Parses a form-data body. The subtype is detected from `contentType`;
 /// `multipart/form-data` requires Content-Disposition names.
 pub fn parse(allocator: Allocator, io: std.Io, body: []const u8, contentType: []const u8, options: Options) Error!Form {
+    var scratch: [4096]u8 = undefined;
+    const issue = z.checkFirst(OptionsSchema, options, &scratch, .{}) catch
+        return Error.InvalidOptions;
+    if (issue != null) return Error.InvalidOptions;
     var decoder = try parser.Decoder.init(allocator, io, .{ .limits = options.limits });
     errdefer decoder.deinit();
     const fields = try decoder.parse(body, contentType);
@@ -113,19 +119,16 @@ pub fn parse(allocator: Allocator, io: std.Io, body: []const u8, contentType: []
     return .{ .decoder = decoder, .fields = fields };
 }
 
-pub const SaveOptions = struct {
-    /// Parser-level request and part limits for streamed uploads.
-    limits: parser.Limits = .{},
-    max_fields: usize = 1024,
-    max_files: usize = 64,
-    /// Destination directory. Created when `create_dir` is true.
-    directory: []const u8 = "uploads",
-    /// Prefix for the generated on-disk filename.
-    prefix: []const u8 = "upload-",
-    /// Refuse files larger than this (0 = parser limit only).
-    max_size: usize = 0,
-    create_dir: bool = true,
-};
+pub const SaveOptionsSchema = z.objectOf(.{
+    .limits = z.withDefault(parser.LimitsSchema, .{}),
+    .max_fields = z.withDefault(z.nonNegativeInt(usize, .{}), 1024),
+    .max_files = z.withDefault(z.nonNegativeInt(usize, .{}), 64),
+    .directory = z.withDefault(z.string(.{ .min = 1 }), "uploads"),
+    .prefix = z.withDefault(z.string(.{ .min = 0 }), "upload-"),
+    .max_size = z.withDefault(z.nonNegativeInt(usize, .{}), 0),
+    .create_dir = z.withDefault(z.boolean(.{}), true),
+}, .{});
+pub const SaveOptions = SaveOptionsSchema.Value;
 
 pub const SavedFile = struct {
     /// Absolute or directory-relative path of the saved file.

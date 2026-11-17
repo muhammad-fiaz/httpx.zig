@@ -48,7 +48,7 @@ else
 var env_server = try httpx.Server.init(allocator, io, .{
     .host = httpx.env.get("HOST") orelse "0.0.0.0",
     .port = port,
-    .workerCount = httpx.env.getInt(u16, "HTTPX_WORKERS") orelse 0,
+    .limits = .{ .workerCount = httpx.env.getInt(u16, "HTTPX_WORKERS") orelse 0 },
 });
 defer env_server.deinit();
 ```
@@ -62,15 +62,15 @@ defer env_server.deinit();
 | `portStrategy` | `PortStrategy` | `.incremental` | Startup behavior when the port is occupied (`.incremental`, `.strict`, `.exit`). |
 | `maxPortAttempts` | `u16` | `50` | Port candidates to try when `portStrategy = .incremental`. |
 | `maxBody` | `usize` | `8MB` | Largest accepted request body. |
-| `maxConnections` | `usize` | `0` | Total connections successfully queued before `run()` stops accepting (`0` = unlimited). |
-| `maxConcurrentConnections` | `usize` | `128` | Bound across connections being processed or queued. New connections above the limit are closed. Must be greater than zero. |
-| `maxQueuedConnectionTasks` | `usize` | `128` | Bounded worker queue capacity. Newly accepted sockets are closed when the queue is full. Must be greater than zero. |
-| `workerCount` | `u16` | `0` | Fixed worker count; zero selects up to 16 CPUs, capped by `maxConcurrentConnections`. |
-| `initialRequestTimeoutMs` | `u32` | `5000` | Maximum time from accept to the first request bytes and protocol sniff. Zero disables the deadline. |
-| `headerReadTimeoutMs` | `u32` | `10000` | Absolute time to finish request headers after the first byte. Zero disables the deadline. |
-| `requestBodyTimeoutMs` | `u32` | `30000` | Absolute time to receive a complete body. Zero disables the deadline. |
-| `writeTimeoutMs` | `u32` | `30000` | Absolute time allowed for an interim or final response write. Zero disables the deadline. |
-| `keepAliveIdleTimeoutMs` | `u32` | `30000` | Maximum wait for the next request on an HTTP/1 keep-alive connection. Zero disables the deadline. |
+| `limits.maxConnections` | `usize` | `0` | Total connections successfully queued before `run()` stops accepting (`0` = unlimited). |
+| `limits.maxConcurrentConnections` | `usize` | `128` | Bound across connections being processed or queued. New connections above the limit are closed. Must be greater than zero. |
+| `limits.maxQueuedConnectionTasks` | `usize` | `128` | Bounded worker queue capacity. Newly accepted sockets are closed when the queue is full. Must be greater than zero. |
+| `limits.workerCount` | `u16` | `0` | Fixed worker count; zero selects up to 16 CPUs, capped by `limits.maxConcurrentConnections`. |
+| `timeouts.initialRequest` | `u32` | `5000` | Maximum time from accept to the first request bytes and protocol sniff. Zero disables the deadline. |
+| `timeouts.headerRead` | `u32` | `10000` | Absolute time to finish request headers after the first byte. Zero disables the deadline. |
+| `timeouts.requestBody` | `u32` | `30000` | Absolute time to receive a complete body. Zero disables the deadline. |
+| `timeouts.write` | `u32` | `30000` | Absolute time allowed for an interim or final response write. Zero disables the deadline. |
+| `timeouts.keepAliveIdle` | `u32` | `30000` | Maximum wait for the next request on an HTTP/1 keep-alive connection. Zero disables the deadline. |
 | `maxRequestsPerConn` | `usize` | `1000` | Max requests served per keep-alive connection. |
 | `keepAlive` | `bool` | `false` | Honor HTTP/1.1 keep-alive on connections. |
 | `compression` | `compression.Config` | `{}` | Automatic response compression codec settings for HTTP/1.1, HTTP/2, and HTTP/3. |
@@ -78,32 +78,45 @@ defer env_server.deinit();
 | `allowLfLineEndings` | `bool` | `false` | Accept bare LF line endings when parsing requests. |
 | `trustForwardedHeaders` | `bool` | `false` | Trust `X-Forwarded-*` headers from reverse proxies. |
 | `trustedProxies` | `[]const []const u8` | `&.{}` | IPs/CIDRs allowed to supply forwarded headers; forwarded chains skip entries matching these rules. Empty trusts every peer when forwarding is enabled. |
-| `httpVersion` | `?HttpVersion` | `null` | Preferred HTTP version enforcement. |
-| `http10` | `bool` | `true` | Enable HTTP/1.0 handling. |
-| `http11` | `bool` | `true` | Enable HTTP/1.1 handling. |
-| `http2` | `bool` | `true` | HTTP/2 cleartext/TLS server runtime path. |
-| `http3` | `bool` | `false` | HTTP/3 server runtime path. |
-| `http3Retry` | `bool` | `false` | Require a Retry token before accepting the QUIC Initial, validating the peer address and limiting amplification. |
-| `http3RetryKey` | `?[32]u8` | `null` | HMAC key for Retry tokens; a fresh random key per connection is used when null. |
-| `http3MaxIdleTimeoutMs` | `u64` | `30000` | QUIC idle timeout; effective value is the minimum of this and the peer's advertised timeout. Zero disables enforcement. |
-| `http3InitialMaxData` | `u64` | `1048576` | Connection-level QUIC receive window. |
-| `http3InitialMaxStreamDataBidiLocal` | `u64` | `65535` | Receive window for locally initiated bidirectional streams. |
-| `http3InitialMaxStreamDataBidiRemote` | `u64` | `65535` | Receive window for peer-initiated bidirectional streams. |
-| `http3InitialMaxStreamDataUni` | `u64` | `65535` | Receive window for peer-initiated unidirectional streams. |
-| `http3MaxStreamsBidi` | `u64` | `128` | Concurrent bidirectional streams a client may open. |
-| `http3MaxStreamsUni` | `u64` | `128` | Concurrent unidirectional streams a client may open. |
-| `http3MaxUdpPayload` | `usize` | `1472` | Advertised QUIC max UDP payload (validated 1200–65527 bytes). |
+| `protocols.preferred` | `?HttpVersion` | `null` | Preferred HTTP version enforcement. |
+| `protocols.http10` | `bool` | `true` | Enable HTTP/1.0 handling. |
+| `protocols.http11` | `bool` | `true` | Enable HTTP/1.1 handling. |
+| `protocols.http2` | `bool` | `true` | HTTP/2 cleartext/TLS server runtime path. |
+| `protocols.http3` | `bool` | `false` | HTTP/3 server runtime path. |
+| `http3Options.retry` | `bool` | `false` | Require a Retry token before accepting the QUIC Initial, validating the peer address and limiting amplification. |
+| `http3Options.retryKey` | `?[32]u8` | `null` | HMAC key for Retry tokens; a fresh random key per connection is used when null. |
+| `http3Options.maxIdleTimeoutMs` | `u64` | `30000` | QUIC idle timeout; effective value is the minimum of this and the peer's advertised timeout. Zero disables enforcement. |
+| `http3Options.initialMaxData` | `u64` | `1048576` | Connection-level QUIC receive window. |
+| `http3Options.initialMaxStreamDataBidiLocal` | `u64` | `65535` | Receive window for locally initiated bidirectional streams. |
+| `http3Options.initialMaxStreamDataBidiRemote` | `u64` | `65535` | Receive window for peer-initiated bidirectional streams. |
+| `http3Options.initialMaxStreamDataUni` | `u64` | `65535` | Receive window for peer-initiated unidirectional streams. |
+| `http3Options.maxStreamsBidi` | `u64` | `128` | Concurrent bidirectional streams a client may open. |
+| `http3Options.maxStreamsUni` | `u64` | `128` | Concurrent unidirectional streams a client may open. |
+| `http3Options.maxUdpPayload` | `usize` | `1472` | Advertised QUIC max UDP payload (validated 1200–65527 bytes). |
 | `logging` | `LoggingOptions` | `{}` | Event callback + level (silent by default). |
-| `enableDocs` | `bool` | `true` | Mount `/openapi.json`, `/docs`, `/redoc` by default. |
-| `docs` | `?docs.Config` | `null` | Overrides for docs routes when enabled; `docs.title` names the document. |
-| `watch` | `bool` | `false` | Watch a directory and broadcast changes. |
-| `watchDir` | `[]const u8` | `"."` | Directory to watch when `watch` is enabled. |
-| `liveReload` | `bool` | `false` | Enable the SSE live-reload endpoint and script injection. |
-| `liveReloadPath` | `[]const u8` | `"/__httpx_liveReload"` | Mount path for the live-reload endpoint. |
-| `templates` | `?TemplateConfig` | `null` | Template engine config (auto-discovers `templates/` when null). |
+| `liveReload.watch` | `bool` | `false` | Watch a directory and broadcast changes. |
+| `liveReload.watchDir` | `[]const u8` | `"."` | Directory to watch when `liveReload.watch` is enabled. |
+| `liveReload.enabled` | `bool` | `false` | Enable the SSE live-reload endpoint and script injection. |
+| `liveReload.path` | `[]const u8` | `"/__httpx_liveReload"` | Mount path for the live-reload endpoint. |
+| `templates` | `?templates.Config` | `null` | Template engine config (auto-discovers `templates/` when null). |
 | `tls` | `?tls.Server.Config` | `null` | TLS/HTTPS config (certificate + private key). |
 
 All server settings are passed inline as the final `.{}` argument to `httpx.Server.init`. Omitted fields use the built-in defaults; `.{}` is the safe default.
+
+Documentation UIs are an explicit optional feature and are not mounted by
+`Server`. To include them, mount them on the server router after registering
+application routes and release their state before `server.deinit()`:
+
+```zig
+try httpx.docs.mount(&server, .{
+    .title = "Inventory API",
+    .openapi = .{ .enabled = true, .route = "/openapi.json" },
+    .swagger = .{ .enabled = true, .route = "/docs" },
+});
+defer httpx.docs.unmount(&server);
+```
+
+See [Documentation UI](/api/ui) for the available interfaces and options.
 
 ### Operational Deployment Environment Configuration
 
@@ -114,7 +127,7 @@ Server configuration remains pure explicit Zig options via `.{}`. If an applicat
 var server = try httpx.Server.init(allocator, io, .{
     .host = httpx.env.get("HOST") orelse "0.0.0.0",
     .port = httpx.env.getInt(u16, "PORT") orelse 8080,
-    .workerCount = httpx.env.getInt(u16, "WORKERS") orelse 0,
+    .limits = .{ .workerCount = httpx.env.getInt(u16, "WORKERS") orelse 0 },
 });
 defer server.deinit();
 
@@ -135,10 +148,10 @@ Application routes, middleware composition, handler logic, and internal buffers 
 
 The accept loop submits connections to a fixed worker pool. The server tracks
 active and queued connections together and admits no more than
-`maxConcurrentConnections`; the worker queue independently holds at most
-`maxQueuedConnectionTasks`. A full queue or connection limit closes the newly
+`limits.maxConcurrentConnections`; the worker queue independently holds at most
+`limits.maxQueuedConnectionTasks`. A full queue or connection limit closes the newly
 accepted socket, so the effective queued capacity is bounded by both settings.
-`maxConnections` is a separate lifetime limit and counts successfully queued
+`limits.maxConnections` is a separate lifetime limit and counts successfully queued
 connections.
 
 The timeout fields are absolute deadlines for each I/O phase, not inactivity
@@ -174,8 +187,7 @@ const port = server.localPort(); // actual bound port (useful with .port = 0)
 var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 8080,
-    .http2 = true,
-    .http3 = false,
+    .protocols = .{ .http2 = true, .http3 = false },
 });
 defer server.deinit();
 ```
@@ -495,11 +507,11 @@ fn listUsers(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
 
 ### SSE Responses
 
-Server-Sent Events use `httpx.sse.Event.Writer` over a normal handler response
+Server-Sent Events use `httpx.sse.Writer` over a normal handler response
 (see `examples/sseServer.zig` and [SSE](/api/sse)). The router buffers each
 response, so a handler emits a finite batch of events; long-lived SSE needs a
 custom HTTP/1.1 connection loop. There is no `ctx.sse(...)` helper; parse
-inbound streams with `httpx.sse.Event.Parser` (`eventType`, `data`, `id`,
+inbound streams with `httpx.sse.Parser` (`eventType`, `data`, `id`,
 `retryMs` fields on parsed events).
 
 ### Route Groups
@@ -639,12 +651,12 @@ fn riskyHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
 
 ## Static Files
 
-Serve directories with `server.static(mount, dir)` (filesystem, with embedded-asset
+Serve directories with `server.static(.{ .mount = mount, .root = dir })` (filesystem, with embedded-asset
 fallback) instead of hand-rolled file handlers:
 
 ```zig
 // Serves ./public/* under /static with ETag + conditional GET.
-try server.static("/static", "./public");
+try server.static(.{ .mount = "/static", .root = "./public" });
 ```
 
 For runnable demos see `examples/staticFiles.zig`, `examples/staticSite.zig`,

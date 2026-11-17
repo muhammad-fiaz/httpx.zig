@@ -12,20 +12,19 @@ assets beneath the configured route.
 ## Configure ReDoc
 
 ```zig
-var server = try httpx.Server.init(allocator, io, .{
-    .enableDocs = true,
-    .docs = .{
-        .redoc = .{
-            .enabled = true,
-            .route = "/reference",
-            .title = "Users API Reference",
-            .hideDownloadButton = true,
-            .requiredPropsFirst = true,
-            .sortPropsAlphabetically = true,
-            .expandResponses = "200,201",
-        },
+var server = try httpx.Server.init(allocator, io, .{});
+try httpx.docs.mount(&server, .{
+    .redoc = .{
+        .enabled = true,
+        .route = "/reference",
+        .title = "Users API Reference",
+        .hideDownloadButton = true,
+        .requiredPropsFirst = true,
+        .sortPropsAlphabetically = true,
+        .expandResponses = "200,201",
     },
 });
+defer httpx.docs.unmount(&server);
 defer server.deinit();
 ```
 

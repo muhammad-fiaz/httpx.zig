@@ -12,23 +12,22 @@ assets beneath `/docs`.
 ## Configure Swagger UI
 
 ```zig
-var server = try httpx.Server.init(allocator, io, .{
-    .enableDocs = true,
-    .docs = .{
-        .swagger = .{
-            .enabled = true,
-            .route = "/api/docs",
-            .title = "Users API - Swagger",
-            .docExpansion = .full,
-            .deepLinking = true,
-            .displayRequestDuration = true,
-            .filter = true,
-            .persistAuthorization = true,
-            .tryItOutEnabled = true,
-            .defaultModelsExpandDepth = 2,
-        },
+var server = try httpx.Server.init(allocator, io, .{});
+try httpx.docs.mount(&server, .{
+    .swagger = .{
+        .enabled = true,
+        .route = "/api/docs",
+        .title = "Users API - Swagger",
+        .docExpansion = .full,
+        .deepLinking = true,
+        .displayRequestDuration = true,
+        .filter = true,
+        .persistAuthorization = true,
+        .tryItOutEnabled = true,
+        .defaultModelsExpandDepth = 2,
     },
 });
+defer httpx.docs.unmount(&server);
 defer server.deinit();
 ```
 

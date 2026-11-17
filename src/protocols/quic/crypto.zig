@@ -8,10 +8,18 @@
 //! Constants follow RFC 9001 and RFC 9369.
 
 const std = @import("std");
+const z = @import("zigantic");
 const hmac = std.crypto.auth.hmac;
 const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
 
 pub const Error = error{UnsupportedVersion};
+
+/// AEAD key length for AES-128-GCM.
+pub const keyLen128 = 16;
+/// AEAD key length for AES-256-GCM and ChaCha20-Poly1305.
+pub const keyLen256 = 32;
+/// Nonce construction IV length in bytes.
+pub const ivLen = 12;
 
 /// QUIC v1 initial salt.
 pub const initialSaltV1 = [_]u8{
@@ -90,21 +98,18 @@ pub fn deriveSecretWithContext(prk: [32]u8, comptime label: []const u8, contextH
 pub const Cipher = enum { aes128Gcm, aes256Gcm, chacha20Poly1305 };
 
 /// Packet-protection keys for one direction at one encryption level.
-pub const ProtectionKeys = struct {
-    /// AEAD key (16 bytes for AES-128-GCM, 32 for AES-256-GCM/ChaCha20-Poly1305).
-    key: [32]u8 = (@as([32]u8, @splat(0))),
-    keyLen: usize = 16,
-    /// Nonce construction IV (12 bytes).
-    iv: [12]u8,
-    /// Header-protection key (16 bytes for AES, 32 for ChaCha20).
-    hp: [32]u8 = (@as([32]u8, @splat(0))),
-    hpLen: usize = 16,
-    cipher: Cipher = .aes128Gcm,
-
-    pub const keyLen128 = 16;
-    pub const keyLen256 = 32;
-    pub const ivLen = 12;
-};
+const ProtectionKeysSchema = z.objectOf(.{
+    // AEAD key (16 bytes for AES-128-GCM, 32 for AES-256-GCM/ChaCha20-Poly1305).
+    .key = z.withDefault(z.fixedArray(z.integer(u8, .{}), 32, .{}), @as([32]u8, @splat(0))),
+    .keyLen = z.withDefault(z.positiveInt(usize, .{ .max = 32 }), keyLen128),
+    // Nonce construction IV (12 bytes).
+    .iv = z.fixedArray(z.integer(u8, .{}), ivLen, .{}),
+    // Header-protection key (16 bytes for AES, 32 for ChaCha20).
+    .hp = z.withDefault(z.fixedArray(z.integer(u8, .{}), 32, .{}), @as([32]u8, @splat(0))),
+    .hpLen = z.withDefault(z.positiveInt(usize, .{ .max = 32 }), keyLen128),
+    .cipher = z.withDefault(z.enumType(Cipher, .{}), .aes128Gcm),
+}, .{});
+pub const ProtectionKeys = ProtectionKeysSchema.Value;
 
 /// Derives {key, iv, hp} from a secret using QUIC labels (AES-128-GCM, 16-byte key).
 pub fn deriveProtectionKeys(secret: [32]u8) ProtectionKeys {

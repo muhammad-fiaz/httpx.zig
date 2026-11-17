@@ -23,18 +23,25 @@ hero:
 
 features:
   - title: All HTTP Versions
+    link: https://muhammad-fiaz.github.io/httpx.zig/guide/http3.html
     details: HTTP/1.0, HTTP/1.1, and HTTP/2 runtimes; HTTP/3 client/server runtime over QUIC with loss recovery, NewReno congestion control, flow control, and 0-RTT resumption.
   - title: Robust Client
+    link: https://muhammad-fiaz.github.io/httpx.zig/guide/client-basics.html
     details: Connection pooling, automatic retries, a typed API, and default-safe chainable config/option overrides.
   - title: Powerful Server
+    link: https://muhammad-fiaz.github.io/httpx.zig/guide/routing.html
     details: Pattern-based routing, middleware support, context-based handling, ETag-aware static file helpers, and explicit port conflict startup strategies.
   - title: Concurrent
+    link: https://muhammad-fiaz.github.io/httpx.zig/guide/concurrency.html
     details: Async task executor and parallel request patterns (all, any, race).
   - title: TLS Security
+    link: https://muhammad-fiaz.github.io/httpx.zig/guide/tls.html
     details: Native TLS 1.3 server and client paths, TLS 1.2 client interoperability, custom CAs, and verification policies.
   - title: Advanced Protocol Access
+    link: https://muhammad-fiaz.github.io/httpx.zig/api/protocol.html
     details: Optional standalone HTTP/1, HTTP/2, HTTP/3, QUIC, and TLS types for protocol work; ordinary client and server code never needs to construct frames or packets.
   - title: MIME Ready
+    link: https://muhammad-fiaz.github.io/httpx.zig/api/content-types.html
     details: Case-insensitive MIME detection for common web/document/media/font/archive formats with explicit fallback override.
 ---
 

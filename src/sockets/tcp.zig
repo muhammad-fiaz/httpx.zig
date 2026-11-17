@@ -28,8 +28,19 @@ const std = @import("std");
 const net = std.Io.net;
 const Allocator = std.mem.Allocator;
 const addressMod = @import("../net/address.zig");
-const configCoerce = @import("../common/configCoerce.zig");
 const sysMod = @import("sys.zig");
+const z = @import("zigantic");
+
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
+
 const clock = @import("../common/clock.zig");
 const posix = std.posix;
 const builtin = @import("builtin");
@@ -749,10 +760,11 @@ pub const Listener = struct {
     /// Listener configuration. `address` binds an explicit address (its
     /// family selects IPv4/IPv6); null binds the `port` on all interfaces.
     /// `port = 0` lets the OS choose an ephemeral port.
-    pub const Config = struct {
-        address: ?addressMod.Address = null,
-        port: u16 = 0,
-    };
+    const ConfigSchema = z.objectOf(.{
+        .address = z.optional(typedSchema(addressMod.Address)),
+        .port = z.withDefault(z.integer(u16, .{}), 0),
+    }, .{});
+    pub const Config = ConfigSchema.Value;
 
     inner: union(enum) {
         winsock: if (isWindows) ws.SOCKET else void,
@@ -770,8 +782,7 @@ pub const Listener = struct {
     /// Creates a listener from an explicit allocator, `std.Io`, and one
     /// inline `.{}`. `.{}` binds an ephemeral port on all interfaces;
     /// `.port` picks a fixed port; `.address` binds that address.
-    pub fn init(allocator: Allocator, io: std.Io, cfg_in: anytype) !Listener {
-        const cfg = configCoerce.to(Config, cfg_in);
+    pub fn init(allocator: Allocator, io: std.Io, cfg: Config) !Listener {
         var listener = if (cfg.address) |addr| blk: {
             var a = addr;
             break :blk try bindAddress(io, &a);
@@ -1080,18 +1091,18 @@ test "deadline ticks stay 32-bit safe and expire only in the past" {
 }
 
 test "listener binds and reports port" {
-    var ctx = IoContext.init(std.testing.allocator) catch return;
+    var ctx = try IoContext.init(std.testing.allocator);
     defer ctx.deinit();
-    var l = Listener.bind(ctx.io, 0) catch return;
+    var l = Listener.bind(ctx.io, 0) catch |err| return err;
     defer l.close(ctx.io);
     try std.testing.expect(l.localPort() > 0);
 }
 
 test "ipv4 echo through listener" {
-    var ctx = IoContext.init(std.testing.allocator) catch return;
+    var ctx = try IoContext.init(std.testing.allocator);
     defer ctx.deinit();
 
-    var l = Listener.bind(ctx.io, 0) catch return;
+    var l = Listener.bind(ctx.io, 0) catch |err| return err;
     defer l.close(ctx.io);
     const port = l.localPort();
 
@@ -1105,10 +1116,10 @@ test "ipv4 echo through listener" {
             _ = sock.write(buf[0..n]) catch {};
         }
     };
-    const t = Thread.spawn(.{}, Echo.run, .{ &l, ctx.io }) catch return;
+    const t = Thread.spawn(.{}, Echo.run, .{ &l, ctx.io }) catch |err| return err;
     defer t.join();
 
-    var s = connect(ctx.io, "127.0.0.1", port) catch return;
+    var s = connect(ctx.io, "127.0.0.1", port) catch |err| return err;
     defer s.close();
     try s.writeAll("ping");
     var buf: [16]u8 = undefined;
@@ -1118,11 +1129,11 @@ test "ipv4 echo through listener" {
 }
 
 test "ipv6 loopback echo" {
-    var ctx = IoContext.init(std.testing.allocator) catch return;
+    var ctx = try IoContext.init(std.testing.allocator);
     defer ctx.deinit();
 
     var a = addressMod.Address.loopback6(0);
-    var l = Listener.bindAddress(ctx.io, &a) catch return; // skips on no-IPv6 hosts
+    var l = try Listener.bindAddress(ctx.io, &a);
     defer l.close(ctx.io);
     const port = l.localPort();
     try std.testing.expectEqual(addressMod.Family.ip6, l.family);
@@ -1137,13 +1148,13 @@ test "ipv6 loopback echo" {
             _ = sock.write(buf[0..n]) catch {};
         }
     };
-    const t = Thread.spawn(.{}, Echo6.run, .{ &l, ctx.io }) catch return;
+    const t = Thread.spawn(.{}, Echo6.run, .{ &l, ctx.io }) catch |err| return err;
     defer t.join();
 
-    var dst = addressMod.Address.parseIp("::1") catch return;
+    var dst = addressMod.Address.parseIp("::1") catch |err| return err;
     dst.port = port;
 
-    var s = connectAddress(ctx.io, &dst) catch return;
+    var s = connectAddress(ctx.io, &dst) catch |err| return err;
     defer s.close();
     try s.writeAll("v6");
     var buf: [16]u8 = undefined;
@@ -1152,10 +1163,10 @@ test "ipv6 loopback echo" {
 }
 
 test "accepted sockets capture the peer IP" {
-    var ctx = IoContext.init(std.testing.allocator) catch return;
+    var ctx = try IoContext.init(std.testing.allocator);
     defer ctx.deinit();
 
-    var l = Listener.bind(ctx.io, 0) catch return;
+    var l = Listener.bind(ctx.io, 0) catch |err| return err;
     defer l.close(ctx.io);
     const port = l.localPort();
 
@@ -1165,7 +1176,7 @@ test "accepted sockets capture the peer IP" {
             s.close();
         }
     };
-    const t = std.Thread.spawn(.{}, Client.run, .{ ctx.io, port }) catch return;
+    const t = std.Thread.spawn(.{}, Client.run, .{ ctx.io, port }) catch |err| return err;
 
     var conn = l.accept(ctx.io) catch {
         t.join();

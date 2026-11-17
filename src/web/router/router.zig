@@ -9,7 +9,18 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const configCoerce = @import("../../common/configCoerce.zig");
+const z = @import("zigantic");
+
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
+
 const mimeMod = @import("../../common/mime.zig");
 const mediaTypeMod = @import("../../common/mediaType.zig");
 const Method = @import("../../common/method.zig").Method;
@@ -37,7 +48,7 @@ pub fn contextNext(ctx: *Context) anyerror!Response {
 }
 
 /// A single extra response header (name excludes the trailing colon).
-pub const Header = struct { name: []const u8, value: []const u8 };
+pub const Header = headersMod.Header;
 
 pub const Context = struct {
     /// Per-request scratch allocator. Dynamic response content (bodies,
@@ -679,6 +690,7 @@ pub const ParamError = error{
 };
 
 const metaMod = @import("routeMetadata.zig");
+const headersMod = @import("../../common/headers.zig");
 
 /// A statically declared route definition for compile-time or declarative route tables.
 pub const RouteDecl = struct {
@@ -860,32 +872,28 @@ const RouteEntry = struct {
 
 /// Per-route options. Everything configurable about one registration lives
 /// here; `path` + `handler` stay positional as the fundamental inputs.
-pub const RouteOptions = struct {
-    /// OpenAPI documentation source.
-    meta: metaMod.Metadata = .{},
-    /// Route name for `url()` reversing. Must be unique per router.
-    name: ?[]const u8 = null,
-    /// Route-level middleware (router middleware runs first).
-    middleware: []const MiddlewareFn = &.{},
-    /// Handler-private state pointer (borrowed; see `deinitData`).
-    userData: ?*anyopaque = null,
-    /// Optional destructor for `userData`, run once at router deinit.
-    deinitData: ?*const fn (?*anyopaque) void = null,
-};
+const RouteOptionsSchema = z.objectOf(.{
+    .meta = z.withDefault(metaMod.MetadataSchema, .{}),
+    .name = z.optional(z.string(.{ .min = 1 })),
+    .middleware = z.withDefault(typedSchema([]const MiddlewareFn), &.{}),
+    .userData = z.withDefault(typedSchema(?*anyopaque), null),
+    .deinitData = z.withDefault(typedSchema(?*const fn (?*anyopaque) void), null),
+}, .{});
+pub const RouteOptions = RouteOptionsSchema.Value;
 
 pub const ErrorHandlerFn = *const fn (*Context, anyerror) anyerror!Response;
 
 /// Options shared by every route in a group.
-pub const GroupOptions = struct {
-    /// Middleware prepended (outer groups first) to each route's own list.
-    middleware: []const MiddlewareFn = &.{},
-};
+const GroupOptionsSchema = z.objectOf(.{
+    .middleware = z.withDefault(typedSchema([]const MiddlewareFn), &.{}),
+}, .{});
+pub const GroupOptions = GroupOptionsSchema.Value;
 
 /// Options for `mount()`.
-pub const MountOptions = struct {
-    /// Middleware prepended to every mounted route's own list.
-    middleware: []const MiddlewareFn = &.{},
-};
+const MountOptionsSchema = z.objectOf(.{
+    .middleware = z.withDefault(typedSchema([]const MiddlewareFn), &.{}),
+}, .{});
+pub const MountOptions = MountOptionsSchema.Value;
 
 /// A prefixed view over a router. Groups compose (`group.group(...)`)
 /// without allocating: prefixes and middleware chain-borrow caller memory
@@ -1001,9 +1009,10 @@ pub const TrailingSlash = enum {
     strict,
 };
 
-pub const RouterConfig = struct {
-    trailingSlash: TrailingSlash = .serveBoth,
-};
+const RouterConfigSchema = z.objectOf(.{
+    .trailingSlash = z.withDefault(z.enumType(TrailingSlash, .{}), .serveBoth),
+}, .{});
+pub const RouterConfig = RouterConfigSchema.Value;
 
 pub const Router = struct {
     allocator: Allocator,
@@ -1016,8 +1025,7 @@ pub const Router = struct {
     trailingSlash: TrailingSlash = .serveBoth,
 
     /// Creates a router from an explicit allocator and one inline `.{}`.
-    pub fn init(allocator: Allocator, cfg_in: anytype) Router {
-        const config = configCoerce.to(RouterConfig, cfg_in);
+    pub fn init(allocator: Allocator, config: RouterConfig) Router {
         return .{
             .allocator = allocator,
             .statusHandlers = std.AutoHashMap(u16, HandlerFn).init(allocator),

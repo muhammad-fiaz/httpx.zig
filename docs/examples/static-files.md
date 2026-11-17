@@ -19,8 +19,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 1,
+        .limits = .{ .maxConnections = 1 },
     });
     defer server.deinit();
 
@@ -33,7 +32,7 @@ pub fn main() !void {
     defer httpx.static.files.unregister();
 
     // ...or the shorthand, equivalent for the common case:
-    // try server.static("/static", "examples/static");
+    // try server.static(.{ .mount = "/static", .root = "examples/static" });
 
     const thread = try server.start();
     defer thread.join();

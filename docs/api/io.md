@@ -26,8 +26,8 @@ httpx.clock.sleepMillis(ctx.io, 10);
 `httpx.uri` provides RFC 3986 URI parsing and percent-encoding helpers:
 
 - `parse(input)` — parse into a `Uri` whose fields reference `input`
-- `Uri.authority(buf)` — format `host[:port]`, with IPv6 brackets
-- `Uri.effectivePort()` / `defaultPort(scheme)` — resolve the default service port
+- `httpx.uri.authority(uri, buf)` — format `host[:port]`, with IPv6 brackets
+- `httpx.uri.effectivePort(uri)` / `httpx.uri.defaultPort(scheme)` — resolve the default service port
 - `percentDecode(buf, input)` — decode into a caller buffer; malformed escapes are copied verbatim
 - `percentEncode(buf, input)` — encode into a caller buffer, keeping RFC 3986 unreserved bytes
 - `hasPathTraversal(decodedPath)` — reject `.`/`..`, NUL, and drive/UNC prefixes

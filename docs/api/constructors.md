@@ -4,16 +4,23 @@ Httpx.zig uses explicit allocators and `std.Io`. Configuration is passed as a
 Zig struct literal. Use `.{}` when the type's documented defaults are wanted;
 set only the fields that need to change.
 
-Every initializer accepts a partial literal directly and completes it into
-the full config type: omitted fields take their declared defaults, nested
-`.{}` configs are expanded recursively, an unknown field is a compile error,
-and omitting a required field (one with no default) is a compile error:
+Every configuration type is a [zigantic](https://github.com/DonIsaac/zigantic)
+schema: the field defaults, the value ranges, and the required/optional
+distinction all live in the schema, and the struct you write is that schema's
+value type. Omitted fields take their schema defaults, nested `.{}` configs
+are expanded recursively, an unknown field is a compile error, and omitting a
+required field (one with no default) is a compile error. Configurations that
+own resources are validated against their schema when the owner is created, so
+an out-of-range value fails loudly instead of silently degrading:
 
 ```zig
 var server = try httpx.Server.init(allocator, io, .{
     .port = 0,
-    .docs = .{ .swagger = .{ .route = "/api-docs" } },
 });
+try httpx.docs.mount(&server, .{
+    .swagger = .{ .route = "/api-docs" },
+});
+defer httpx.docs.unmount(&server);
 defer server.deinit();
 ```
 
@@ -25,7 +32,7 @@ defer server.deinit();
 | HTTP server | `httpx.Server.init(allocator, io, options)` | `httpx.Server.init(allocator, io, .{})` |
 | Document parser | `httpx.parsing.init(allocator, io, options)` | `httpx.parsing.init(allocator, io, .{})` |
 | Connection pool | `httpx.client.pool.init(allocator, io, options)` | `...init(allocator, io, .{})` |
-| Cookie jar | `httpx.client.jar.init(allocator, io)` | no options |
+| Cookie jar | `httpx.client.jar.init(allocator, io, .{})` | `.{}` keeps the defaults |
 | Worker pool | `httpx.concurrency.Pool.init(allocator, io, options)` | pass the pool config |
 | Bounded queue | `httpx.concurrency.Queue.init(allocator, io, capacity)` | capacity is required |
 
@@ -75,13 +82,15 @@ See the [Client API](/api/client), [Request API](/api/request), and
 var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 8080,
-    .enableDocs = true,
 });
+try httpx.docs.mount(&server, .{});
+defer httpx.docs.unmount(&server);
 defer server.deinit();
 ```
 
-Server routes, middleware, TLS, limits, templates, static files, and
-documentation UIs are configured through the same final struct literal. See
+Server routes, middleware, TLS, limits, templates, and static files are
+configured through the final struct literal and server methods. Documentation
+UIs are mounted explicitly on the router. See
 the [Server API](/api/server) and [Router API](/api/router).
 
 ## Feature entry points

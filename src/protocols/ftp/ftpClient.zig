@@ -20,24 +20,21 @@ const addressMod = @import("../../net/address.zig");
 const netResolve = @import("../../net/resolve.zig");
 const tlsClientMod = @import("../tls/tlsClient.zig");
 const tlsTransport = @import("../tls/tlsTransport.zig");
+const z = @import("zigantic");
 
-pub const Options = struct {
-    host: []const u8,
-    port: u16 = 21,
-    user: []const u8 = "anonymous",
-    password: []const u8 = "anonymous@",
-    /// Explicit FTPS (AUTH TLS). See module docs.
-    secure: bool = false,
-    /// How the server certificate is verified for FTPS control/data.
-    tlsVerify: tlsTransport.VerifyMode = .caBundle,
-    /// Extra/custom CA PEM trusted for the FTPS server chain (in addition
-    /// to system trust when `tlsVerify == .caBundle`).
-    tlsCaPem: ?[]const u8 = null,
-    /// `true` (default) negotiates `PROT P`: data connections are
-    /// TLS-protected. `false` negotiates `PROT C`: only the control
-    /// connection is protected and data flows in cleartext.
-    protPrivate: bool = true,
-};
+const cHostMax = 256;
+
+const OptionsSchema = z.objectOf(.{
+    .host = z.string(.{ .min = 1, .max = cHostMax }),
+    .port = z.withDefault(z.integer(u16, .{}), 21),
+    .user = z.withDefault(z.string(.{}), "anonymous"),
+    .password = z.withDefault(z.string(.{}), "anonymous@"),
+    .secure = z.withDefault(z.boolean(.{}), false),
+    .tlsVerify = z.withDefault(z.enumType(tlsTransport.VerifyMode, .{}), .caBundle),
+    .tlsCaPem = z.optional(z.string(.{})),
+    .protPrivate = z.withDefault(z.boolean(.{}), true),
+}, .{});
+pub const Options = OptionsSchema.Value;
 
 pub const Reply = struct {
     code: u16,
@@ -245,7 +242,10 @@ pub const Client = struct {
 
     /// Initialize an FTP client connected using the provided allocator and IO engine.
     pub fn init(allocator: Allocator, io: std.Io, opts: Options) FtpError!Client {
-        if (opts.host.len == 0 or opts.host.len > cHostMax) return FtpError.ProtocolError;
+        var scratch: [4096]u8 = undefined;
+        const issue = z.checkFirst(OptionsSchema, opts, &scratch, .{}) catch
+            return FtpError.ProtocolError;
+        if (issue != null) return FtpError.ProtocolError;
 
         // Connect by attempting IP literal parsing first, then falling back to hostname resolution
         var sock: ?tcp.Socket = null;
@@ -349,8 +349,6 @@ pub const Client = struct {
         self.allocator.free(pr.text);
         self.protPrivate = opts.protPrivate;
     }
-
-    const cHostMax = 256;
 
     pub fn deinit(self: *Client) void {
         if (self.tlsClient) |*owner| {

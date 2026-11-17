@@ -241,7 +241,7 @@ pub const Stream = struct {
     fn compactConsumed(self: *Stream) void {
         if (self.off == 0) return;
         const remaining = self.buf.items.len - self.off;
-        if (remaining > 0) std.mem.copyForwards(u8, self.buf.items[0..remaining], self.buf.items[self.off..]);
+        if (remaining > 0) @memmove(self.buf.items[0..remaining], self.buf.items[self.off..]);
         self.buf.items.len = remaining;
         self.off = 0;
     }
@@ -599,9 +599,7 @@ pub const Stream = struct {
 
     /// RFC 9110 token; the shared table in `common/parse.zig` is the
     /// single authoritative definition used by every protocol layer.
-    fn isTokenChar(c: u8) bool {
-        return parseMod.isTokenChar(c);
-    }
+    const isTokenChar = parseMod.isTokenChar;
 
     /// RFC 9110 token; HTTP/3 also requires field names to be lowercase.
     fn isFieldName(name: []const u8) bool {
@@ -616,28 +614,10 @@ pub const Stream = struct {
     /// Field values may not contain CR/LF/NUL or other controls other
     /// than HTAB, and must not start or end with SP/HTAB (RFC 9114
     /// Section 4.1.2). obs-text is preserved.
-    fn isFieldValue(value: []const u8) bool {
-        if (value.len > 0) {
-            const first = value[0];
-            const last = value[value.len - 1];
-            if (first == ' ' or first == '\t' or last == ' ' or last == '\t') return false;
-        }
-        for (value) |c| {
-            if (c == 0 or c == '\r' or c == '\n' or c == 0x7F) return false;
-            if (c < 0x20 and c != '\t') return false;
-        }
-        return true;
-    }
+    const isFieldValue = parseMod.isValidFieldValue;
 
     /// URI scheme syntax: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ).
-    fn isScheme(value: []const u8) bool {
-        if (value.len == 0) return false;
-        if (!std.ascii.isAlphabetic(value[0])) return false;
-        for (value[1..]) |c| {
-            if (!std.ascii.isAlphanumeric(c) and c != '+' and c != '-' and c != '.') return false;
-        }
-        return true;
-    }
+    const isScheme = parseMod.isValidScheme;
 
     /// Pseudo-header payloads are URI/authority syntax, where spaces and
     /// controls are never legal.
@@ -792,15 +772,10 @@ pub const Stream = struct {
 
     fn checkRegularHeader(_: *Stream, name: []const u8, value: []const u8) ?H3Error {
         if (!isFieldValue(value)) return .messageError;
-        if (std.mem.eql(u8, name, "connection") or
-            std.mem.eql(u8, name, "keep-alive") or
-            std.mem.eql(u8, name, "proxy-connection") or
-            std.mem.eql(u8, name, "transfer-encoding") or
-            std.mem.eql(u8, name, "upgrade"))
-        {
+        if (parseMod.isConnectionSpecific(name)) {
             return .messageError;
         }
-        if (std.mem.eql(u8, name, "te") and !std.mem.eql(u8, value, "trailers")) {
+        if (std.mem.eql(u8, name, "te") and !parseMod.isTeTrailers(value)) {
             return .messageError;
         }
         return null;

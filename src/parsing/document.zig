@@ -8,7 +8,6 @@ const std = @import("std");
 const jsonMedia = @import("../common/json.zig");
 const Allocator = std.mem.Allocator;
 const dom = @import("dom.zig");
-const configCoerce = @import("../common/configCoerce.zig");
 const Tree = dom.Tree;
 const Node = dom.Node;
 const NO_NODE = dom.NO_NODE;
@@ -21,6 +20,7 @@ const robots = @import("robots.zig");
 const sitemap = @import("sitemap.zig");
 const ts = @import("treesitter");
 const regexMod = @import("regex");
+const z = @import("zigantic");
 
 pub const Point = struct {
     row: u32 = 0,
@@ -91,10 +91,11 @@ pub const ContentKind = enum {
     unknown,
 };
 
-pub const ParserConfig = struct {
-    limits: html.Limits = .{},
-    detectContentType: bool = true,
-};
+const ParserConfigSchema = z.objectOf(.{
+    .limits = z.withDefault(html.LimitsSchema, .{}),
+    .detectContentType = z.withDefault(z.boolean(.{}), true),
+}, .{});
+pub const ParserConfig = ParserConfigSchema.Value;
 
 pub const NodeList = struct {
     allocator: Allocator,
@@ -404,11 +405,11 @@ pub const Parser = struct {
 
     /// Creates a stateless parser. The parser itself allocates nothing;
     /// returned documents own an arena backed by `allocator`.
-    pub fn init(allocator: Allocator, io: std.Io, cfg_in: anytype) Parser {
+    pub fn init(allocator: Allocator, io: std.Io, cfg: ParserConfig) Parser {
         return .{
             .allocator = allocator,
             .io = io,
-            .config = configCoerce.to(ParserConfig, cfg_in),
+            .config = cfg,
         };
     }
 

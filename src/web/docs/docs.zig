@@ -2,9 +2,9 @@
 //!
 //! Quick start (every UI explicitly enabled):
 //! ```zig
-//! var router = httpx.Router.init(allocator, .{});
-//! try router.get("/hello", hello, .{});
-//! try httpx.docs.mount(allocator, &router, .{
+//! var server = try httpx.Server.init(allocator, io, .{});
+//! try server.get("/hello", hello, .{});
+//! try httpx.docs.mount(&server, .{
 //!     .enabled = true,
 //!     .title = "My API",
 //!     .version = httpx.version,
@@ -13,7 +13,8 @@
 //!     .redoc = .{ .enabled = true, .route = "/redoc", .title = "ReDoc" },
 //!     .scalar = .{ .enabled = true, .route = "/scalar", .title = "Scalar API Reference" },
 //!     .graphiql = .{ .enabled = true, .route = "/graphiql", .graphqlEndpoint = "/graphql", .title = "GraphiQL IDE" },
-//! }, .{ .title = "My API" });
+//! });
+//! defer httpx.docs.unmount(&server);
 //! // GET /openapi.json  -> OpenAPI 3.1 document
 //! // GET /docs          -> Swagger UI (local assets, no CDN)
 //! // GET /redoc         -> ReDoc (local assets, ES module)
@@ -21,18 +22,17 @@
 //! // GET /graphiql      -> GraphiQL IDE (local Monaco assets)
 //! ```
 
-pub const openapi = @import("../openApi/openApiSpec.zig");
-pub const ui = @import("ui.zig");
-pub const assets = @import("assets.zig");
+pub const openapi = @import("../openApi/spec.zig");
+const ui = @import("ui.zig");
 
 pub const Config = ui.Config;
-pub const Info = openapi.Info;
+pub const ConfigSchema = ui.ConfigSchema;
 pub const mount = ui.mount;
 pub const unmount = ui.unmount;
-pub const unmountRouter = ui.unmountRouter;
+pub const unmountAll = ui.unmountAll;
 
 test {
-    _ = assets;
+    _ = @import("assets.zig");
     _ = openapi;
     _ = ui;
 }

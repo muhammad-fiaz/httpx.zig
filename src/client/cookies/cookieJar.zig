@@ -19,19 +19,21 @@ const clock = @import("../../common/clock.zig");
 const Allocator = std.mem.Allocator;
 const sync = @import("../../common/sync.zig");
 const parseMod = @import("../../common/parse.zig");
+const z = @import("zigantic");
 
-pub const Cookie = struct {
-    name: []const u8,
-    value: []const u8,
-    domain: ?[]const u8 = null,
-    path: ?[]const u8 = null,
-    expiresMs: ?i64 = null,
-    secure: bool = false,
-    httpOnly: bool = false,
-    sameSite: SameSite = .lax,
+pub const SameSite = enum { strict, lax, none };
 
-    pub const SameSite = enum { strict, lax, none };
-};
+const CookieSchema = z.objectOf(.{
+    .name = z.string(.{ .min = 1 }),
+    .value = z.string(.{}),
+    .domain = z.optional(z.string(.{ .min = 1 })),
+    .path = z.optional(z.string(.{ .min = 1 })),
+    .expiresMs = z.optional(z.integer(i64, .{})),
+    .secure = z.withDefault(z.boolean(.{}), false),
+    .httpOnly = z.withDefault(z.boolean(.{}), false),
+    .sameSite = z.withDefault(z.enumType(SameSite, .{}), .lax),
+}, .{});
+pub const Cookie = CookieSchema.Value;
 
 pub const Jar = struct {
     allocator: Allocator,
@@ -53,19 +55,23 @@ pub const Jar = struct {
         hostOnly: bool,
         secure: bool,
         httpOnly: bool,
-        sameSite: Cookie.SameSite,
+        sameSite: SameSite,
     };
 
-    pub const Config = struct {
-        maxCookies: usize = 4096,
-        domainPolicy: ?*const fn (requestHost: []const u8, cookieDomain: []const u8) bool = null,
-    };
+    const ConfigSchema = z.objectOf(.{
+        .maxCookies = z.withDefault(z.positiveInt(usize, .{}), 4096),
+        .domainPolicy = z.withDefault(z.custom(?*const fn (requestHost: []const u8, cookieDomain: []const u8) bool, .{
+            .check = struct {
+                fn accept(_: ?*const fn (requestHost: []const u8, cookieDomain: []const u8) bool) bool {
+                    return true;
+                }
+            }.accept,
+        }), null),
+    }, .{});
+    pub const Config = ConfigSchema.Value;
 
-    pub fn init(allocator: Allocator, io: std.Io) Jar {
-        return initWithConfig(allocator, io, .{});
-    }
-
-    pub fn initWithConfig(allocator: Allocator, io: std.Io, cfg: Config) Jar {
+    /// Creates a jar with the given configuration. `.{}` keeps the defaults.
+    pub fn init(allocator: Allocator, io: std.Io, cfg: Config) Jar {
         return .{
             .allocator = allocator,
             .io = io,
@@ -103,7 +109,7 @@ pub const Jar = struct {
         var maxAgeExpiresMs: ?i64 = null;
         var secure = false;
         var httpOnly = false;
-        var sameSite: Cookie.SameSite = .lax;
+        var sameSite: SameSite = .lax;
         const now = clock.millisNow(self.io);
 
         var it = parseMod.ParamIterator.init(header);
@@ -366,7 +372,7 @@ fn pathMatches(requestPath: []const u8, cookiePath: []const u8) bool {
 }
 
 test "cookie jar set and get" {
-    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io());
+    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io(), .{});
     defer jar.deinit();
     jar.setFromHeader("session=abc123; Path=/; HttpOnly; SameSite=Lax", "example.com");
     var buf: [1024]u8 = undefined;
@@ -376,7 +382,7 @@ test "cookie jar set and get" {
 }
 
 test "cookie jar rejects values outside cookie-octet grammar" {
-    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io());
+    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io(), .{});
     defer jar.deinit();
     jar.setFromHeader("space=not allowed", "example.com");
     jar.setFromHeader("comma=a,b", "example.com");
@@ -387,7 +393,7 @@ test "cookie jar rejects values outside cookie-octet grammar" {
 }
 
 test "cookie jar domain matching" {
-    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io());
+    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io(), .{});
     defer jar.deinit();
     jar.domainPolicy = allowTestDomain;
     jar.setFromHeader("a=1; Domain=.example.com; Path=/", "example.com");
@@ -405,7 +411,7 @@ fn allowTestDomain(_: []const u8, _: []const u8) bool {
 }
 
 test "cookie jar rejects domain cookies without public suffix policy" {
-    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io());
+    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io(), .{});
     defer jar.deinit();
     jar.setFromHeader("a=1; Domain=com; Path=/", "com");
     jar.setFromHeader("b=1; Domain=example.com; Path=/", "example.com");
@@ -413,7 +419,7 @@ test "cookie jar rejects domain cookies without public suffix policy" {
 }
 
 test "cookie jar expiry" {
-    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io());
+    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io(), .{});
     defer jar.deinit();
     jar.setFromHeader("t=1; Max-Age=0", "example.com");
     // Max-Age=0 means expires immediately (now - 0 = now).
@@ -424,7 +430,7 @@ test "cookie jar expiry" {
 }
 
 test "cookie max-age overrides expires and accepts negative deletion values" {
-    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io());
+    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io(), .{});
     defer jar.deinit();
     jar.setFromHeader("session=old", "example.com");
     jar.setFromHeader("session=present; Expires=Sun, 01 Jan 2147483647 00:00:00 GMT; Max-Age=-1", "example.com");
@@ -439,7 +445,7 @@ test "cookie max-age overrides expires and accepts negative deletion values" {
 }
 
 test "cookie allocation failure preserves an existing replacement" {
-    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io());
+    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io(), .{});
     defer jar.deinit();
     jar.setFromHeader("session=old", "example.com");
 
@@ -452,7 +458,7 @@ test "cookie allocation failure preserves an existing replacement" {
 }
 
 test "secure cookies require TLS transport" {
-    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io());
+    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io(), .{});
     defer jar.deinit();
     jar.setFromHeader("s=topsecret; Path=/; Secure", "example.com");
     var buf: [1024]u8 = undefined;
@@ -465,7 +471,7 @@ test "secure cookies require TLS transport" {
 }
 
 test "empty Domain and Path attributes cannot widen cookie scope" {
-    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io());
+    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io(), .{});
     defer jar.deinit();
 
     // An empty Domain is ignored (host-only), not a domain cookie for "".
@@ -491,7 +497,7 @@ test "empty Domain and Path attributes cannot widen cookie scope" {
 }
 
 test "longer cookie paths are emitted first and domain dots are normalized" {
-    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io());
+    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io(), .{});
     defer jar.deinit();
     jar.domainPolicy = allowTestDomain;
 
@@ -511,7 +517,7 @@ test "longer cookie paths are emitted first and domain dots are normalized" {
 }
 
 test "malformed Set-Cookie without a cookie-pair is ignored" {
-    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io());
+    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io(), .{});
     defer jar.deinit();
     jar.setFromHeader("; Secure; Path=/", "example.com");
     jar.setFromHeader("   ", "example.com");
@@ -519,7 +525,7 @@ test "malformed Set-Cookie without a cookie-pair is ignored" {
 }
 
 test "SameSite=None requires Secure" {
-    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io());
+    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io(), .{});
     defer jar.deinit();
     jar.setFromHeader("insecure=1; SameSite=None; Path=/", "example.com");
     try std.testing.expectEqual(@as(usize, 0), jar.cookies.items.len);

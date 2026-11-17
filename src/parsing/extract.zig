@@ -4,32 +4,34 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const mediaTypeMod = @import("../common/mediaType.zig");
 const dom = @import("dom.zig");
+const z = @import("zigantic");
 const Tree = dom.Tree;
 const NO_NODE = dom.NO_NODE;
 
-pub const Metadata = struct {
-    title: []const u8 = "",
-    description: []const u8 = "",
-    keywords: []const u8 = "",
-    author: []const u8 = "",
-    canonical: []const u8 = "",
-    ogTitle: []const u8 = "",
-    ogDescription: []const u8 = "",
-    ogImage: []const u8 = "",
-    ogUrl: []const u8 = "",
-    ogType: []const u8 = "",
-    ogSiteName: []const u8 = "",
-    twitterCard: []const u8 = "",
-    twitterTitle: []const u8 = "",
-    twitterDescription: []const u8 = "",
-    twitterImage: []const u8 = "",
-    twitterSite: []const u8 = "",
-    charset: []const u8 = "",
-    viewport: []const u8 = "",
-    robots: []const u8 = "",
-    language: []const u8 = "",
-    generator: []const u8 = "",
-};
+const MetadataSchema = z.objectOf(.{
+    .title = z.withDefault(z.string(.{}), ""),
+    .description = z.withDefault(z.string(.{}), ""),
+    .keywords = z.withDefault(z.string(.{}), ""),
+    .author = z.withDefault(z.string(.{}), ""),
+    .canonical = z.withDefault(z.string(.{}), ""),
+    .ogTitle = z.withDefault(z.string(.{}), ""),
+    .ogDescription = z.withDefault(z.string(.{}), ""),
+    .ogImage = z.withDefault(z.string(.{}), ""),
+    .ogUrl = z.withDefault(z.string(.{}), ""),
+    .ogType = z.withDefault(z.string(.{}), ""),
+    .ogSiteName = z.withDefault(z.string(.{}), ""),
+    .twitterCard = z.withDefault(z.string(.{}), ""),
+    .twitterTitle = z.withDefault(z.string(.{}), ""),
+    .twitterDescription = z.withDefault(z.string(.{}), ""),
+    .twitterImage = z.withDefault(z.string(.{}), ""),
+    .twitterSite = z.withDefault(z.string(.{}), ""),
+    .charset = z.withDefault(z.string(.{}), ""),
+    .viewport = z.withDefault(z.string(.{}), ""),
+    .robots = z.withDefault(z.string(.{}), ""),
+    .language = z.withDefault(z.string(.{}), ""),
+    .generator = z.withDefault(z.string(.{}), ""),
+}, .{});
+pub const Metadata = MetadataSchema.Value;
 
 pub fn extractMetadata(tree: *const Tree, allocator: Allocator) !Metadata {
     var meta = Metadata{};
@@ -96,13 +98,14 @@ pub fn extractMetadata(tree: *const Tree, allocator: Allocator) !Metadata {
     return meta;
 }
 
-pub const Link = struct {
-    href: []const u8,
-    text: []const u8 = "",
-    rel: []const u8 = "",
-    title: []const u8 = "",
-    source: []const u8 = "a",
-};
+const LinkSchema = z.objectOf(.{
+    .href = z.string(.{ .min = 1 }),
+    .text = z.withDefault(z.string(.{}), ""),
+    .rel = z.withDefault(z.string(.{}), ""),
+    .title = z.withDefault(z.string(.{}), ""),
+    .source = z.withDefault(z.string(.{ .min = 1 }), "a"),
+}, .{});
+pub const Link = LinkSchema.Value;
 
 pub fn extractLinks(tree: *const Tree, allocator: Allocator) ![]Link {
     var links: std.ArrayList(Link) = .empty;
@@ -151,22 +154,24 @@ pub fn extractLinks(tree: *const Tree, allocator: Allocator) ![]Link {
     return links.toOwnedSlice(allocator);
 }
 
-pub const FormField = struct {
-    name: []const u8,
-    kind: []const u8 = "text",
-    value: []const u8 = "",
-    placeholder: []const u8 = "",
-    required: bool = false,
-    disabled: bool = false,
-    options: []const []const u8 = &.{},
-};
+const FormFieldSchema = z.objectOf(.{
+    .name = z.string(.{ .min = 1 }),
+    .kind = z.withDefault(z.string(.{ .min = 1 }), "text"),
+    .value = z.withDefault(z.string(.{}), ""),
+    .placeholder = z.withDefault(z.string(.{}), ""),
+    .required = z.withDefault(z.boolean(.{}), false),
+    .disabled = z.withDefault(z.boolean(.{}), false),
+    .options = z.withDefault(z.array(z.string(.{}), .{}), &.{}),
+}, .{});
+pub const FormField = FormFieldSchema.Value;
 
-pub const Form = struct {
-    action: []const u8 = "",
-    method: []const u8 = "get",
-    enctype: []const u8 = mediaTypeMod.formUrlEncoded,
-    fields: []const FormField = &.{},
-};
+const FormSchema = z.objectOf(.{
+    .action = z.withDefault(z.string(.{}), ""),
+    .method = z.withDefault(z.string(.{ .min = 1 }), "get"),
+    .enctype = z.withDefault(z.string(.{ .min = 1 }), mediaTypeMod.formUrlEncoded),
+    .fields = z.withDefault(z.array(FormFieldSchema, .{}), &.{}),
+}, .{});
+pub const Form = FormSchema.Value;
 
 pub fn extractForms(tree: *const Tree, allocator: Allocator) ![]Form {
     var forms: std.ArrayList(Form) = .empty;
@@ -248,14 +253,15 @@ fn extractFormFields(
     }
 }
 
-pub const Image = struct {
-    src: []const u8,
-    alt: []const u8 = "",
-    title: []const u8 = "",
-    width: []const u8 = "",
-    height: []const u8 = "",
-    loading: []const u8 = "",
-};
+const ImageSchema = z.objectOf(.{
+    .src = z.string(.{ .min = 1 }),
+    .alt = z.withDefault(z.string(.{}), ""),
+    .title = z.withDefault(z.string(.{}), ""),
+    .width = z.withDefault(z.string(.{}), ""),
+    .height = z.withDefault(z.string(.{}), ""),
+    .loading = z.withDefault(z.string(.{}), ""),
+}, .{});
+pub const Image = ImageSchema.Value;
 
 pub fn extractImages(tree: *const Tree, allocator: Allocator) ![]Image {
     var images: std.ArrayList(Image) = .empty;
@@ -281,13 +287,14 @@ pub fn extractImages(tree: *const Tree, allocator: Allocator) ![]Image {
     return images.toOwnedSlice(allocator);
 }
 
-pub const ScriptRef = struct {
-    src: []const u8,
-    asyncAttr: bool = false,
-    deferAttr: bool = false,
-    typeAttr: []const u8 = "",
-    integrity: []const u8 = "",
-};
+const ScriptRefSchema = z.objectOf(.{
+    .src = z.string(.{ .min = 1 }),
+    .asyncAttr = z.withDefault(z.boolean(.{}), false),
+    .deferAttr = z.withDefault(z.boolean(.{}), false),
+    .typeAttr = z.withDefault(z.string(.{}), ""),
+    .integrity = z.withDefault(z.string(.{}), ""),
+}, .{});
+pub const ScriptRef = ScriptRefSchema.Value;
 
 pub fn extractScripts(tree: *const Tree, allocator: Allocator) ![]ScriptRef {
     var scripts: std.ArrayList(ScriptRef) = .empty;
@@ -312,11 +319,12 @@ pub fn extractScripts(tree: *const Tree, allocator: Allocator) ![]ScriptRef {
     return scripts.toOwnedSlice(allocator);
 }
 
-pub const StyleRef = struct {
-    href: []const u8,
-    media: []const u8 = "",
-    integrity: []const u8 = "",
-};
+const StyleRefSchema = z.objectOf(.{
+    .href = z.string(.{ .min = 1 }),
+    .media = z.withDefault(z.string(.{}), ""),
+    .integrity = z.withDefault(z.string(.{}), ""),
+}, .{});
+pub const StyleRef = StyleRefSchema.Value;
 
 pub fn extractStylesheets(tree: *const Tree, allocator: Allocator) ![]StyleRef {
     var styles: std.ArrayList(StyleRef) = .empty;

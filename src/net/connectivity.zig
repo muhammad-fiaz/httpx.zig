@@ -17,18 +17,14 @@
 
 const std = @import("std");
 const addressMod = @import("address.zig");
+const z = @import("zigantic");
 
 /// Options controlling the connectivity probe.
-pub const ConnectivityOptions = struct {
-    /// Milliseconds to wait for each TCP connect attempt.
-    /// Default is 3 000 ms — fast enough for interactive use, long enough for
-    /// slow mobile links.
-    timeoutMs: u32 = 3_000,
-
-    /// Maximum number of probe targets to attempt before returning false.
-    /// Stops as soon as one succeeds.  Setting 1 is fastest but less reliable.
-    maxProbes: u8 = 4,
-};
+const ConnectivityOptionsSchema = z.objectOf(.{
+    .timeoutMs = z.withDefault(z.integer(u32, .{}), 3_000),
+    .maxProbes = z.withDefault(z.integer(u8, .{}), 4),
+}, .{});
+pub const ConnectivityOptions = ConnectivityOptionsSchema.Value;
 
 /// Result returned by `checkConnectivity`.
 pub const ConnectivityResult = struct {

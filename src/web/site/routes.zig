@@ -9,6 +9,7 @@ const Allocator = std.mem.Allocator;
 const uri = @import("../../common/uri.zig");
 const parseMod = @import("../../common/parse.zig");
 const patternMod = @import("../router/routePattern.zig");
+const z = @import("zigantic");
 
 pub const UrlStyle = enum { clean, extension, both };
 
@@ -38,18 +39,20 @@ pub const Collision = struct {
     loser: []const u8,
 };
 
-pub const CustomRoute = struct {
-    file: []const u8,
-    route: []const u8,
-    name: ?[]const u8 = null,
-};
+const CustomRouteSchema = z.objectOf(.{
+    .file = z.string(.{ .min = 1 }),
+    .route = z.string(.{ .min = 1 }),
+    .name = z.optional(z.string(.{})),
+}, .{});
+pub const CustomRoute = CustomRouteSchema.Value;
 
-pub const Options = struct {
-    base: []const u8 = "/",
-    urls: UrlStyle = .both,
-    indexBase: []const u8 = "index",
-    custom: []const CustomRoute = &.{},
-};
+const OptionsSchema = z.objectOf(.{
+    .base = z.withDefault(z.string(.{ .min = 1, .prefix = "/" }), "/"),
+    .urls = z.withDefault(z.enumType(UrlStyle, .{}), .both),
+    .indexBase = z.withDefault(z.string(.{ .min = 1 }), "index"),
+    .custom = z.withDefault(z.array(CustomRouteSchema, .{}), &.{}),
+}, .{});
+pub const Options = OptionsSchema.Value;
 
 const ShapeEntry = struct { shape: []u8, idx: usize };
 const ShapeList = std.ArrayList(ShapeEntry);
@@ -402,6 +405,10 @@ fn beats(rankA: u8, fileA: []const u8, rankB: u8, fileB: []const u8) bool {
 /// Builds a deterministic route table from logical file paths.
 /// `files` may be in any order; output is sorted by route.
 pub fn buildRoutes(allocator: Allocator, files: []const []const u8, options: Options) !BuildResult {
+    var scratch: [4096]u8 = undefined;
+    const issue = z.checkFirst(OptionsSchema, options, &scratch, .{}) catch
+        return error.InvalidFilePath;
+    if (issue != null) return error.InvalidFilePath;
     const sorted = try allocator.dupe([]const u8, files);
     defer allocator.free(sorted);
     std.mem.sort([]const u8, sorted, {}, struct {

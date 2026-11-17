@@ -1,14 +1,14 @@
 # HTTP/2 Server Runtime Example
 
 End-to-end HTTP/2 server routes with the high-level server runtime
-(`.http2 = true`). See `examples/http11Server.zig` for the HTTP/1.x shape
+(`.protocols = .{ .http2 = true }`). See `examples/http11Server.zig` for the HTTP/1.x shape
 and `examples/http2Client.zig` for h2c verification.
 
 ```zig
 var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 0,
-    .http2 = true,
+    .protocols = .{ .http2 = true },
 });
 defer server.deinit();
 

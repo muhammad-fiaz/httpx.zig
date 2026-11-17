@@ -96,9 +96,7 @@ pub const Stream = struct {
     /// Bytes received but not yet credited back via WINDOW_UPDATE.
     recvPending: i64 = 0,
 
-    endHeaders: bool = false,
     endStreamSent: bool = false,
-    endStreamRecv: bool = false,
     /// Number of HEADERS blocks sent/received on this stream (initial or trailers).
     headersSent: u8 = 0,
     headersRecv: u8 = 0,
@@ -133,13 +131,9 @@ pub const Stream = struct {
     discardHeaders: bool = false,
     /// This stream holds one of the connection's concurrency slots.
     countedSlot: bool = false,
-    resetByUs: bool = false,
-    resetCode: u32 = 0,
 
     /// Assembled header block fragments (HEADERS + CONTINUATION chain).
     headerBlock: ?std.ArrayList(u8) = null,
-    /// Reassembled DATA payload for buffered consumers.
-    dataBuf: ?std.ArrayList(u8) = null,
 
     pub fn init(allocator: Allocator, id: u31) Stream {
         return .{ .id = id, .allocator = allocator };
@@ -147,7 +141,6 @@ pub const Stream = struct {
 
     pub fn deinit(self: *Stream) void {
         if (self.headerBlock) |*b| b.deinit(self.allocator);
-        if (self.dataBuf) |*b| b.deinit(self.allocator);
     }
 
     pub fn onSendHeaders(self: *Stream, endStream: bool) error{InvalidState}!void {
@@ -182,7 +175,6 @@ pub const Stream = struct {
     }
 
     pub fn onSendRst(self: *Stream) void {
-        self.resetByUs = true;
         self.state = .closed;
     }
 
@@ -195,22 +187,18 @@ pub const Stream = struct {
         switch (self.state) {
             .idle => {
                 self.state = if (endStream) .halfClosedRemote else .open;
-                self.endStreamRecv = endStream;
             },
             .reservedRemote => {
                 self.state = if (endStream) .closed else .halfClosedLocal;
-                self.endStreamRecv = endStream;
             },
             .open => {
                 if (endStream) {
                     self.state = .halfClosedRemote;
-                    self.endStreamRecv = true;
                 }
             },
             .halfClosedLocal => {
                 if (endStream) {
                     self.state = .closed;
-                    self.endStreamRecv = true;
                 }
                 // Trailers without END_STREAM on a half-closed(local) stream:
                 // legal (we may still be sending).
@@ -224,13 +212,11 @@ pub const Stream = struct {
             .open => {
                 if (endStream) {
                     self.state = .halfClosedRemote;
-                    self.endStreamRecv = true;
                 }
             },
             .halfClosedLocal => {
                 if (endStream) {
                     self.state = .closed;
-                    self.endStreamRecv = true;
                 }
             },
             .idle, .reservedLocal, .reservedRemote => return RecvError.ProtocolError,

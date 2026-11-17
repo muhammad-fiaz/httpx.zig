@@ -51,7 +51,7 @@ pub const ProxyKind = enum {
     direct,
 };
 
-pub const ProxyInfo = struct {
+pub const ProxyUrl = struct {
     kind: ProxyKind,
     host: []const u8,
     port: u16,
@@ -60,13 +60,13 @@ pub const ProxyInfo = struct {
     remoteDns: bool = false,
 };
 
-pub fn parseProxyUrl(urlStr: []const u8) ?ProxyInfo;
+pub fn parseProxyUrl(urlStr: []const u8) ?ProxyUrl;
 ```
 
 ## Functions
 
-### `httpx.proxy.parseProxyUrl(urlStr) ?ProxyInfo`
-Parses proxy URI strings into a structured `ProxyInfo` struct. Extracts protocol kind, host, port, credentials, and remote DNS flags. Returns `null` if malformed.
+### `httpx.proxy.parseProxyUrl(urlStr) ?ProxyUrl`
+Parses proxy URI strings into a structured `ProxyUrl` struct. Extracts protocol kind, host, port, credentials, and remote DNS flags. Returns `null` if malformed.
 
 ## SOCKS5 Negotiation Sequence
 

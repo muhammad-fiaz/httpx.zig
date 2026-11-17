@@ -36,7 +36,7 @@ const framing = try httpx.http1.parser.decideFraming(
 );
 
 // Incremental chunked decoding.
-var dec = httpx.http1.parser.ChunkedDecoder.init();
+var dec = httpx.http1.parser.ChunkedDecoder.init(.{});
 while (!dec.isDone()) {
     _ = try dec.decode(chunk);
 }

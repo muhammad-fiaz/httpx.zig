@@ -33,6 +33,17 @@ const Client = clientNs.Client;
 const ftpClientMod = @import("../../protocols/ftp/ftpClient.zig");
 const fsMod = @import("../../utils/fs.zig");
 const cFs = fsMod.cFs;
+const z = @import("zigantic");
+
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
 
 pub const DownloadError = error{
     DestinationExists,
@@ -202,83 +213,88 @@ pub const ChecksumAlgorithm = enum {
     sha1,
 };
 
-pub const VerifyOptions = struct {
-    sha256: ?[]const u8 = null,
-    sha384: ?[]const u8 = null,
-    sha512: ?[]const u8 = null,
-    md5: ?[]const u8 = null,
-    sha1: ?[]const u8 = null,
-    expectedSize: ?u64 = null,
-    minSize: ?u64 = null,
-    maxSize: ?u64 = null,
-    etag: ?[]const u8 = null,
-    lastModified: ?[]const u8 = null,
-    checksumFileUrl: ?[]const u8 = null,
-};
+const VerifyOptionsSchema = z.objectOf(.{
+    .sha256 = z.optional(z.string(.{ .min = 1 })),
+    .sha384 = z.optional(z.string(.{ .min = 1 })),
+    .sha512 = z.optional(z.string(.{ .min = 1 })),
+    .md5 = z.optional(z.string(.{ .min = 1 })),
+    .sha1 = z.optional(z.string(.{ .min = 1 })),
+    .expectedSize = z.optional(z.integer(u64, .{})),
+    .minSize = z.optional(z.integer(u64, .{})),
+    .maxSize = z.optional(z.integer(u64, .{})),
+    .etag = z.optional(z.string(.{ .min = 1 })),
+    .lastModified = z.optional(z.string(.{ .min = 1 })),
+    .checksumFileUrl = z.optional(z.string(.{ .min = 1 })),
+}, .{});
+pub const VerifyOptions = VerifyOptionsSchema.Value;
 
-pub const DownloadOptions = struct {
-    /// Destination file path. Empty derives a filename from the URL
-    /// (or Content-Disposition), so `.path` may be omitted deliberately.
-    path: []const u8 = "",
-    headers: []const Header = &.{},
-    timeoutMs: ?u64 = null,
-    maxRetries: u32 = 3,
-    retryDelayMs: u64 = 500,
-    followRedirects: bool = true,
-    maxRedirects: u8 = 10,
-    existing: ExistingFilePolicy = .overwrite,
-    verify: VerifyOptions = .{},
-    progress: ProgressMode = .auto,
-    onProgress: ?*const fn (info: ProgressInfo, userData: ?*const anyopaque) void = null,
-    userData: ?*const anyopaque = null,
-    /// Atomically download to a temporary file first, then rename on success and verification pass.
-    atomic: bool = true,
-    tempSuffix: []const u8 = ".httpx-part",
-    /// Automatically create missing parent directories for the destination path.
-    createDirs: bool = true,
-    /// Flag for cooperative cancellation.
-    cancel: ?*const std.atomic.Value(bool) = null,
-    /// Authentication helpers
-    bearerAuth: ?[]const u8 = null,
-    basicAuth: ?[]const u8 = null,
-    apiKeyHeader: ?[]const u8 = null,
-    apiKeyValue: ?[]const u8 = null,
-    cookie: ?[]const u8 = null,
-};
+const DownloadOptionsSchema = z.objectOf(.{
+    .path = z.withDefault(z.string(.{}), ""),
+    .headers = z.withDefault(z.array(req.HeaderSchema, .{}), &.{}),
+    .timeoutMs = z.optional(z.integer(u64, .{})),
+    .maxRetries = z.withDefault(z.integer(u32, .{}), 3),
+    .retryDelayMs = z.withDefault(z.integer(u64, .{}), 500),
+    .followRedirects = z.withDefault(z.boolean(.{}), true),
+    .maxRedirects = z.withDefault(z.integer(u8, .{}), 10),
+    .existing = z.withDefault(z.enumType(ExistingFilePolicy, .{}), .overwrite),
+    .verify = z.withDefault(VerifyOptionsSchema, .{}),
+    .progress = z.withDefault(z.enumType(ProgressMode, .{}), .auto),
+    .onProgress = z.withDefault(typedSchema(?*const fn (info: ProgressInfo, userData: ?*const anyopaque) void), null),
+    .userData = z.withDefault(typedSchema(?*const anyopaque), null),
+    .atomic = z.withDefault(z.boolean(.{}), true),
+    .tempSuffix = z.withDefault(z.string(.{ .min = 1 }), ".httpx-part"),
+    .createDirs = z.withDefault(z.boolean(.{}), true),
+    .cancel = z.optional(typedSchema(*const std.atomic.Value(bool))),
+    .bearerAuth = z.optional(z.string(.{})),
+    .basicAuth = z.optional(z.string(.{})),
+    .apiKeyHeader = z.optional(z.string(.{ .min = 1 })),
+    .apiKeyValue = z.optional(z.string(.{})),
+    .cookie = z.optional(z.string(.{})),
+}, .{});
+pub const DownloadOptions = DownloadOptionsSchema.Value;
 
-pub const DownloadResult = struct {
-    destinationBuf: [1024]u8 = (@as([1024]u8, @splat(0))),
-    destinationLen: usize = 0,
-    destination: []const u8 = "",
-    downloadedBytes: u64,
-    totalBytes: ?u64,
-    elapsedMs: u64,
-    statusCode: u16,
-    resumed: bool = false,
-    skipped: bool = false,
-    overwritten: bool = false,
-    verified: bool = false,
-    sha256Hex: ?[64]u8 = null,
+const DownloadResultSchema = z.objectOf(.{
+    .destinationBuf = z.withDefault(z.fixedArray(z.integer(u8, .{}), 1024, .{}), @splat(0)),
+    .destinationLen = z.withDefault(z.integer(usize, .{}), 0),
+    .destination = z.withDefault(z.string(.{}), ""),
+    .downloadedBytes = z.withDefault(z.integer(u64, .{}), 0),
+    .totalBytes = z.optional(z.integer(u64, .{})),
+    .elapsedMs = z.withDefault(z.integer(u64, .{}), 0),
+    .statusCode = z.withDefault(z.integer(u16, .{}), 0),
+    .resumed = z.withDefault(z.boolean(.{}), false),
+    .skipped = z.withDefault(z.boolean(.{}), false),
+    .overwritten = z.withDefault(z.boolean(.{}), false),
+    .verified = z.withDefault(z.boolean(.{}), false),
+    .sha256Hex = z.optional(z.fixedArray(z.integer(u8, .{}), 64, .{})),
+}, .{});
+pub const DownloadResult = DownloadResultSchema.Value;
 
-    pub fn make(destPath: []const u8, downloaded: u64, total: ?u64, elapsed: u64, status: u16) DownloadResult {
-        var res = DownloadResult{
-            .downloadedBytes = downloaded,
-            .totalBytes = total,
-            .elapsedMs = elapsed,
-            .statusCode = status,
-        };
-        const len = @min(destPath.len, res.destinationBuf.len);
-        @memcpy(res.destinationBuf[0..len], destPath[0..len]);
-        res.destinationLen = len;
-        res.destination = res.destinationBuf[0..len];
-        return res;
-    }
+/// Builds a download result for `destPath`.
+pub fn makeDownloadResult(
+    destPath: []const u8,
+    downloaded: u64,
+    total: ?u64,
+    elapsed: u64,
+    status: u16,
+) DownloadResult {
+    var res = DownloadResult{
+        .downloadedBytes = downloaded,
+        .totalBytes = total,
+        .elapsedMs = elapsed,
+        .statusCode = status,
+    };
+    const len = @min(destPath.len, res.destinationBuf.len);
+    @memcpy(res.destinationBuf[0..len], destPath[0..len]);
+    res.destinationLen = len;
+    res.destination = res.destinationBuf[0..len];
+    return res;
+}
 
-    pub fn destinationPath(self: *const DownloadResult) []const u8 {
-        if (self.destinationLen > 0) return self.destinationBuf[0..self.destinationLen];
-        return self.destination;
-    }
-};
+/// The destination path of a completed download.
+pub fn destinationPath(result: *const DownloadResult) []const u8 {
+    if (result.destinationLen > 0) return result.destinationBuf[0..result.destinationLen];
+    return result.destination;
+}
 
 // Checksum Helpers
 
@@ -769,13 +785,13 @@ pub const Downloader = struct {
             switch (options.existing) {
                 .fail => return DownloadError.DestinationExists,
                 .skip => {
-                    var res = DownloadResult.make(dest, 0, meta.size, @intCast(clock.monotonicMillis(self.client.io) - startTime), 200);
+                    var res = makeDownloadResult(dest, 0, meta.size, @intCast(clock.monotonicMillis(self.client.io) - startTime), 200);
                     res.skipped = true;
                     return res;
                 },
                 .verifyExisting => {
                     if (verifyFile(dest, options.verify)) |_| {
-                        var res = DownloadResult.make(dest, 0, meta.size, @intCast(clock.monotonicMillis(self.client.io) - startTime), 200);
+                        var res = makeDownloadResult(dest, 0, meta.size, @intCast(clock.monotonicMillis(self.client.io) - startTime), 200);
                         res.skipped = true;
                         res.verified = true;
                         return res;
@@ -970,7 +986,7 @@ pub const Downloader = struct {
                 if (resp.header("content-range")) |cr| {
                     if (parseUnsatisfiedRange(cr)) |complete| {
                         if (complete == resumeOffset) {
-                            var r = DownloadResult.make(destPath, 0, complete, 0, 200);
+                            var r = makeDownloadResult(destPath, 0, complete, 0, 200);
                             r.resumed = true;
                             r.skipped = true;
                             return r;
@@ -1079,7 +1095,7 @@ pub const Downloader = struct {
 
         tracker.finish();
 
-        var res = DownloadResult.make(destPath, writtenBytes, totalSize, 0, resp.status);
+        var res = makeDownloadResult(destPath, writtenBytes, totalSize, 0, resp.status);
         res.resumed = resuming;
         res.overwritten = true;
         res.verified = true;
@@ -1293,16 +1309,15 @@ pub const ProgressTracker = struct {
 
 // Updater
 
-pub const UpdateOptions = struct {
-    /// Target file to update in place (with rollback). Empty derives a
-    /// filename from the URL, like downloads.
-    path: []const u8 = "",
-    verify: VerifyOptions = .{},
-    progress: ProgressMode = .auto,
-    backupExisting: bool = true,
-    backupSuffix: []const u8 = ".bak",
-    cancel: ?*const std.atomic.Value(bool) = null,
-};
+const UpdateOptionsSchema = z.objectOf(.{
+    .path = z.withDefault(z.string(.{}), ""),
+    .verify = z.withDefault(VerifyOptionsSchema, .{}),
+    .progress = z.withDefault(z.enumType(ProgressMode, .{}), .auto),
+    .backupExisting = z.withDefault(z.boolean(.{}), true),
+    .backupSuffix = z.withDefault(z.string(.{ .min = 1 }), ".bak"),
+    .cancel = z.optional(typedSchema(*const std.atomic.Value(bool))),
+}, .{});
+pub const UpdateOptions = UpdateOptionsSchema.Value;
 
 /// Safely updates an existing executable or asset on disk with rollback preservation.
 pub fn updateFile(
@@ -1355,17 +1370,16 @@ pub fn updateFile(
 /// Connection settings for `httpx.client.ftp.Client`. Passed to `init` once;
 /// the allocator and I/O engine live on that owner and are reused by every
 /// download.
-pub const FtpConfig = struct {
-    host: []const u8,
-    port: u16 = 21,
-    user: []const u8 = "anonymous",
-    password: []const u8 = "anonymous@",
-    /// Explicit FTPS (AUTH TLS + PROT P). Fails closed when the server
-    /// refuses the upgrade; never downloads in plaintext.
-    secure: bool = false,
-    tlsVerify: ftpClientMod.TlsVerifyMode = .caBundle,
-    tlsCaPem: ?[]const u8 = null,
-};
+const FtpConfigSchema = z.objectOf(.{
+    .host = z.string(.{ .min = 1 }),
+    .port = z.withDefault(z.integer(u16, .{}), 21),
+    .user = z.withDefault(z.string(.{}), "anonymous"),
+    .password = z.withDefault(z.string(.{}), "anonymous@"),
+    .secure = z.withDefault(z.boolean(.{}), false),
+    .tlsVerify = z.withDefault(z.enumType(ftpClientMod.TlsVerifyMode, .{}), .caBundle),
+    .tlsCaPem = z.optional(z.string(.{ .min = 1 })),
+}, .{});
+pub const FtpConfig = FtpConfigSchema.Value;
 
 /// Per-transfer options for `httpx.client.ftp.Client.download`.
 pub const FtpRequest = struct {
@@ -1773,15 +1787,15 @@ test "resolveDestination handles direct file and directories" {
 test "custom progress callback receives events" {
     const CustomState = struct {
         called: std.atomic.Value(bool) = .init(false),
-        total: std.atomic.Value(u64) = .init(0),
-        downloaded: std.atomic.Value(u64) = .init(0),
+        total: std.atomic.Value(usize) = .init(0),
+        downloaded: std.atomic.Value(usize) = .init(0),
         completed: std.atomic.Value(bool) = .init(false),
 
         fn onProgress(info: ProgressInfo, userData: ?*const anyopaque) void {
             const self = @constCast(@as(*const @This(), @ptrCast(@alignCast(userData.?))));
             self.called.store(true, .release);
-            self.total.store(info.totalBytes orelse 0, .release);
-            self.downloaded.store(info.downloadedBytes, .release);
+            self.total.store(@intCast(info.totalBytes orelse 0), .release);
+            self.downloaded.store(@intCast(info.downloadedBytes), .release);
             if (info.state == .completed) {
                 self.completed.store(true, .release);
             }
@@ -1799,10 +1813,10 @@ test "custom progress callback receives events" {
 
     tracker.start(1024);
     try std.testing.expect(state.called.load(.acquire));
-    try std.testing.expectEqual(@as(u64, 1024), state.total.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1024), state.total.load(.acquire));
 
     tracker.update(512);
-    try std.testing.expectEqual(@as(u64, 512), state.downloaded.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 512), state.downloaded.load(.acquire));
 
     tracker.finish();
     try std.testing.expect(state.completed.load(.acquire));
