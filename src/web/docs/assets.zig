@@ -1,94 +1,41 @@
-//! Vendored documentation UI assets, embedded at compile time.
-//!
-//! One library, offline by default: the Swagger UI / ReDoc / Scalar bundles
-//! live in `src/assets/` and are linked into every binary that references
-//! them. Nothing is fetched from a CDN at runtime.
-//!
-//! Provenance + update process for each vendor is documented in
-//! `src/assets/<vendor>/VERSION.txt`.
+//! Test and inspection facade over the independently imported UI bundles.
+//! Production mounting imports each bundle only in its enabled code path.
 
 const std = @import("std");
-const mimeMod = @import("../../common/mime.zig");
+const assets = @import("assetFile.zig");
+const File = assets.File;
+const swagger = @import("swaggerAssets.zig");
+const redoc = @import("redocAssets.zig");
+const scalar = @import("scalarAssets.zig");
+const graphiql = @import("graphiqlAssets.zig");
 
-fn manifestVersion(comptime manifest: []const u8) []const u8 {
-    const end = std.mem.indexOfScalar(u8, manifest, '\n') orelse manifest.len;
-    const line = std.mem.trim(u8, manifest[0..end], " \t\r");
-    const separator = std.mem.lastIndexOfScalar(u8, line, ' ') orelse
-        @compileError("vendor VERSION.txt must start with a package name and version");
-    return line[separator + 1 ..];
-}
+pub const swaggerUiVersion = swagger.version;
+pub const redocVersion = redoc.version;
+pub const scalarVersion = scalar.version;
+pub const graphiqlVersion = graphiql.version;
 
-pub const swaggerUiVersion = manifestVersion(@embedFile("../../assets/swagger-ui/VERSION.txt"));
-pub const redocVersion = manifestVersion(@embedFile("../../assets/redoc/VERSION.txt"));
-pub const scalarVersion = manifestVersion(@embedFile("../../assets/scalar/VERSION.txt"));
-pub const graphiqlVersion = manifestVersion(@embedFile("../../assets/graphiql/VERSION.txt"));
+pub const Kind = enum { swaggerUi, redoc, scalar, graphiql };
 
-/// A single embedded asset file.
-pub const File = struct {
-    /// URL path segment, e.g. "swagger-ui-bundle.js".
-    name: []const u8,
-    contentType: []const u8,
-    data: []const u8,
-};
+pub const swaggerFiles = swagger.files;
+pub const redocFiles = redoc.files;
+pub const scalarFiles = scalar.files;
+pub const graphiqlFiles = graphiql.files;
 
-pub const Kind = enum {
-    swaggerUi,
-    redoc,
-    scalar,
-    graphiql,
+pub const swaggerUiBundleJs = swaggerFiles[0].data;
+pub const swaggerUiStandalonePresetJs = swaggerFiles[1].data;
+pub const swaggerUiCss = swaggerFiles[2].data;
+pub const oauth2RedirectHtml = swaggerFiles[3].data;
+pub const oauth2RedirectJs = swaggerFiles[4].data;
+pub const favicon16Png = swaggerFiles[5].data;
+pub const favicon32Png = swaggerFiles[6].data;
+pub const redocStandaloneJs = redocFiles[0].data;
+pub const scalarStandaloneJs = scalarFiles[0].data;
+pub const graphiqlJs = graphiqlFiles[0].data;
+pub const graphiqlCss = graphiqlFiles[1].data;
+pub const graphiqlEditorWorkerJs = graphiqlFiles[2].data;
+pub const graphiqlJsonWorkerJs = graphiqlFiles[3].data;
+pub const graphiqlCodiconTtf = graphiqlFiles[4].data;
 
-    pub fn label(self: Kind) []const u8 {
-        return switch (self) {
-            .swaggerUi => "swagger-ui",
-            .redoc => "redoc",
-            .scalar => "scalar",
-            .graphiql => "graphiql",
-        };
-    }
-};
-
-pub const swaggerFiles = [_]File{
-    .{ .name = "swagger-ui-bundle.js", .contentType = "text/javascript; charset=utf-8", .data = swaggerUiBundleJs },
-    .{ .name = "swagger-ui-standalone-preset.js", .contentType = "text/javascript; charset=utf-8", .data = swaggerUiStandalonePresetJs },
-    .{ .name = "swagger-ui.css", .contentType = "text/css; charset=utf-8", .data = swaggerUiCss },
-    .{ .name = "oauth2-redirect.html", .contentType = mimeMod.textHtmlUtf8, .data = oauth2RedirectHtml },
-    .{ .name = "oauth2-redirect.js", .contentType = "text/javascript; charset=utf-8", .data = oauth2RedirectJs },
-    .{ .name = "favicon-16x16.png", .contentType = "image/png", .data = favicon16Png },
-    .{ .name = "favicon-32x32.png", .contentType = "image/png", .data = favicon32Png },
-};
-
-pub const redocFiles = [_]File{
-    .{ .name = "redoc.standalone.js", .contentType = "text/javascript; charset=utf-8", .data = redocStandaloneJs },
-};
-
-pub const scalarFiles = [_]File{
-    .{ .name = "standalone.js", .contentType = "text/javascript; charset=utf-8", .data = scalarStandaloneJs },
-};
-
-pub const graphiqlFiles = [_]File{
-    .{ .name = "graphiql.js", .contentType = "text/javascript; charset=utf-8", .data = graphiqlJs },
-    .{ .name = "graphiql.css", .contentType = "text/css; charset=utf-8", .data = graphiqlCss },
-    .{ .name = "editor.worker.js", .contentType = "text/javascript; charset=utf-8", .data = graphiqlEditorWorkerJs },
-    .{ .name = "json.worker.js", .contentType = "text/javascript; charset=utf-8", .data = graphiqlJsonWorkerJs },
-    .{ .name = "codicon-mxdk0fnd.ttf", .contentType = "font/ttf", .data = graphiqlCodiconTtf },
-};
-
-pub const swaggerUiBundleJs = @embedFile("../../assets/swagger-ui/swagger-ui-bundle.js");
-pub const swaggerUiStandalonePresetJs = @embedFile("../../assets/swagger-ui/swagger-ui-standalone-preset.js");
-pub const swaggerUiCss = @embedFile("../../assets/swagger-ui/swagger-ui.css");
-pub const oauth2RedirectHtml = @embedFile("../../assets/swagger-ui/oauth2-redirect.html");
-pub const oauth2RedirectJs = @embedFile("../../assets/swagger-ui/oauth2-redirect.js");
-pub const favicon16Png = @embedFile("../../assets/swagger-ui/favicon-16x16.png");
-pub const favicon32Png = @embedFile("../../assets/swagger-ui/favicon-32x32.png");
-pub const redocStandaloneJs = @embedFile("../../assets/redoc/redoc.standalone.js");
-pub const scalarStandaloneJs = @embedFile("../../assets/scalar/standalone.js");
-pub const graphiqlJs = @embedFile("../../assets/graphiql/graphiql.js");
-pub const graphiqlCss = @embedFile("../../assets/graphiql/graphiql.css");
-pub const graphiqlEditorWorkerJs = @embedFile("../../assets/graphiql/editor.worker.js");
-pub const graphiqlJsonWorkerJs = @embedFile("../../assets/graphiql/json.worker.js");
-pub const graphiqlCodiconTtf = @embedFile("../../assets/graphiql/codicon-mxdk0fnd.ttf");
-
-/// All files belonging to a vendor bundle.
 pub fn files(kind: Kind) []const File {
     return switch (kind) {
         .swaggerUi => &swaggerFiles,
@@ -98,31 +45,23 @@ pub fn files(kind: Kind) []const File {
     };
 }
 
-/// Exact-name lookup within one vendor bundle.
 pub fn find(kind: Kind, name: []const u8) ?*const File {
-    for (files(kind)) |*f| {
-        if (std.mem.eql(u8, f.name, name)) return f;
-    }
-    return null;
+    return assets.find(files(kind), name);
 }
 
-// Tests
-
 test "finds every vendored swagger ui file" {
-    for (swaggerFiles) |f| {
-        const hit = find(.swaggerUi, f.name);
-        try std.testing.expect(hit != null);
-        try std.testing.expect(hit.?.data.len > 0);
-        try std.testing.expectEqualStrings(f.contentType, hit.?.contentType);
+    for (swaggerFiles) |file| {
+        const found = find(.swaggerUi, file.name).?;
+        try std.testing.expect(found.data.len > 0);
+        try std.testing.expectEqualStrings(file.contentType, found.contentType);
     }
 }
 
 test "finds every vendored graphiql file" {
-    for (graphiqlFiles) |f| {
-        const hit = find(.graphiql, f.name);
-        try std.testing.expect(hit != null);
-        try std.testing.expect(hit.?.data.len > 0);
-        try std.testing.expectEqualStrings(f.contentType, hit.?.contentType);
+    for (graphiqlFiles) |file| {
+        const found = find(.graphiql, file.name).?;
+        try std.testing.expect(found.data.len > 0);
+        try std.testing.expectEqualStrings(file.contentType, found.contentType);
     }
 }
 
@@ -132,17 +71,16 @@ test "lookup miss returns null" {
     try std.testing.expect(find(.graphiql, "unknown.wasm") == null);
 }
 
-test "vendored versions are the pinned releases" {
-    try std.testing.expect(std.mem.indexOf(u8, swaggerUiBundleJs, swaggerUiVersion) != null);
-    try std.testing.expect(std.mem.indexOf(u8, redocStandaloneJs, redocVersion) != null);
-    try std.testing.expect(std.mem.indexOf(u8, scalarStandaloneJs, scalarVersion) != null);
+test "vendored versions are pinned releases" {
+    try std.testing.expectEqualStrings("5.35.0", swaggerUiVersion);
+    try std.testing.expectEqualStrings("3.1.0", redocVersion);
+    try std.testing.expectEqualStrings("1.80.0", scalarVersion);
     try std.testing.expect(graphiqlVersion.len > 0);
 }
 
 test "bundles carry their version markers" {
-    // Guards against silently re-vendoring the wrong release.
-    try std.testing.expect(std.mem.indexOf(u8, swaggerUiBundleJs, "5.34.1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, redocStandaloneJs, "3.0.1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, scalarStandaloneJs, "1.76.4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, swaggerUiBundleJs, swaggerUiVersion) != null);
+    try std.testing.expect(std.mem.indexOf(u8, redocStandaloneJs, redocVersion) != null);
+    try std.testing.expect(std.mem.indexOf(u8, scalarStandaloneJs, scalarVersion) != null);
     try std.testing.expect(graphiqlJs.len > 1000);
 }

@@ -1,7 +1,7 @@
-//! Built-in API documentation UIs: Swagger UI, ReDoc, Scalar.
+//! Built-in API documentation UIs: Swagger UI, ReDoc, Scalar, GraphiQL.
 //!
-//! All vendor assets are embedded (see `assets.zig`) and served locally —
-//! never from a CDN. Mounting registers:
+//! All vendor assets are embedded (see the isolated `*Assets.zig` modules) and
+//! served locally — never from a CDN. Mounting registers:
 //!
 //!   GET {openapiRoute}              -> OpenAPI 3.1 JSON of current routes
 //!   GET {swaggerRoute}              -> Swagger UI page
@@ -10,12 +10,14 @@
 //!   GET {redocRoute}/<asset>        -> ReDoc bundle
 //!   GET {scalarRoute}               -> Scalar page
 //!   GET {scalarRoute}/standalone.js -> Scalar bundle
+//!   GET {graphiqlRoute}             -> GraphiQL page
+//!   GET {graphiqlRoute}/<asset>     -> GraphiQL bundle, workers, and font
 //!
 //! Route conflicts are surfaced as Router errors, never silently overwritten.
 //!
 //! Handlers are capture-less fn pointers, so mounted state is carried in
 //! `Context.userData`. Each server mount owns its own state; `unmount`
-//! releases one mount and `unmount` releases every remaining mount.
+//! releases one mount and `unmountAll` releases every remaining mount.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -26,11 +28,24 @@ const Context = routerMod.Context;
 const Method = @import("../../common/method.zig").Method;
 const mediaTypeMod = @import("../../common/mediaType.zig");
 const openapi = @import("../openApi/spec.zig");
-const assets = @import("assets.zig");
+const assetFile = @import("assetFile.zig");
+const testAssets = @import("assets.zig");
 const metaMod = @import("../router/routeMetadata.zig");
 const versionInfo = @import("../../common/version.zig");
 const z = @import("zigantic");
 const headersMod = @import("../../common/headers.zig");
+
+// Route teardown needs only stable file names, never asset payloads.
+const swaggerAssetNames = [_][]const u8{
+    "swagger-ui-bundle.js", "swagger-ui-standalone-preset.js", "swagger-ui.css",
+    "oauth2-redirect.html", "oauth2-redirect.js",              "favicon-16x16.png",
+    "favicon-32x32.png",
+};
+const redocAssetNames = [_][]const u8{"redoc.standalone.js"};
+const scalarAssetNames = [_][]const u8{"standalone.js"};
+const graphiqlAssetNames = [_][]const u8{
+    "graphiql.js", "graphiql.css", "editor.worker.js", "json.worker.js", "codicon-mxdk0fnd.ttf",
+};
 
 /// Operation expansion for Swagger UI: `list`, `full`, or `none`.
 pub const DocExpansion = enum { list, full, none };
@@ -205,16 +220,16 @@ fn removeRoutes(st: *DocsState) void {
     if (st.openapiRoute.len > 0) _ = router.remove(.GET, st.openapiRoute);
     if (st.swaggerRoute) |route| {
         _ = router.remove(.GET, route);
-        for (assets.swaggerFiles) |f| {
-            const full = joinRoute(a, route, f.name) catch continue;
+        for (swaggerAssetNames) |name| {
+            const full = joinRoute(a, route, name) catch continue;
             defer a.free(full);
             _ = router.remove(.GET, full);
         }
     }
     if (st.redocRoute) |route| {
         _ = router.remove(.GET, route);
-        for (assets.redocFiles) |f| {
-            const full = joinRoute(a, route, f.name) catch continue;
+        for (redocAssetNames) |name| {
+            const full = joinRoute(a, route, name) catch continue;
             defer a.free(full);
             _ = router.remove(.GET, full);
         }
@@ -229,8 +244,8 @@ fn removeRoutes(st: *DocsState) void {
     }
     if (st.graphiqlRoute) |route| {
         _ = router.remove(.GET, route);
-        for (assets.graphiqlFiles) |f| {
-            const full = joinRoute(a, route, f.name) catch continue;
+        for (graphiqlAssetNames) |name| {
+            const full = joinRoute(a, route, name) catch continue;
             defer a.free(full);
             _ = router.remove(.GET, full);
         }
@@ -269,7 +284,7 @@ fn mountRouter(
     router: *Router,
     comptime cfg: Config,
 ) !void {
-    if (!cfg.enabled) return;
+    if (comptime (!cfg.enabled or !(cfg.openapi.enabled or cfg.swagger.enabled or cfg.redoc.enabled or cfg.scalar.enabled or cfg.graphiql.enabled))) return;
     {
         var scratch: [4096]u8 = undefined;
         const issue = z.checkFirst(ConfigSchema, cfg, &scratch, .{}) catch
@@ -283,33 +298,39 @@ fn mountRouter(
         .description = cfg.description,
     };
 
-    if (cfg.openapi.enabled and router.hasConflict(.GET, cfg.openapi.route)) return error.DuplicateRoute;
-    if (cfg.swagger.enabled and router.hasConflict(.GET, cfg.swagger.route)) return error.DuplicateRoute;
-    if (cfg.redoc.enabled and router.hasConflict(.GET, cfg.redoc.route)) return error.DuplicateRoute;
-    if (cfg.scalar.enabled and router.hasConflict(.GET, cfg.scalar.route)) return error.DuplicateRoute;
-    if (cfg.graphiql.enabled and router.hasConflict(.GET, cfg.graphiql.route)) return error.DuplicateRoute;
-    if (cfg.swagger.enabled) {
-        for (assets.swaggerFiles) |f| {
-            const full = try joinRoute(allocator, cfg.swagger.route, f.name);
+    if (comptime cfg.openapi.enabled) if (router.hasConflict(.GET, cfg.openapi.route)) return error.DuplicateRoute;
+    if (comptime cfg.swagger.enabled) if (router.hasConflict(.GET, cfg.swagger.route)) return error.DuplicateRoute;
+    if (comptime cfg.redoc.enabled) if (router.hasConflict(.GET, cfg.redoc.route)) return error.DuplicateRoute;
+    if (comptime cfg.scalar.enabled) if (router.hasConflict(.GET, cfg.scalar.route)) return error.DuplicateRoute;
+    if (comptime cfg.graphiql.enabled) if (router.hasConflict(.GET, cfg.graphiql.route)) return error.DuplicateRoute;
+    if (comptime cfg.swagger.enabled) {
+        const swaggerAssets = @import("swaggerAssets.zig");
+        for (swaggerAssets.names) |name| {
+            const full = try joinRoute(allocator, cfg.swagger.route, name);
             defer allocator.free(full);
             if (router.hasConflict(.GET, full)) return error.DuplicateRoute;
         }
     }
-    if (cfg.redoc.enabled) {
-        for (assets.redocFiles) |f| {
-            const full = try joinRoute(allocator, cfg.redoc.route, f.name);
+    if (comptime cfg.redoc.enabled) {
+        const redocAssets = @import("redocAssets.zig");
+        for (redocAssets.names) |name| {
+            const full = try joinRoute(allocator, cfg.redoc.route, name);
             defer allocator.free(full);
             if (router.hasConflict(.GET, full)) return error.DuplicateRoute;
         }
     }
-    if (cfg.scalar.enabled) {
-        const full = try joinRoute(allocator, cfg.scalar.route, "standalone.js");
-        defer allocator.free(full);
-        if (router.hasConflict(.GET, full)) return error.DuplicateRoute;
+    if (comptime cfg.scalar.enabled) {
+        const scalarAssets = @import("scalarAssets.zig");
+        for (scalarAssets.names) |name| {
+            const full = try joinRoute(allocator, cfg.scalar.route, name);
+            defer allocator.free(full);
+            if (router.hasConflict(.GET, full)) return error.DuplicateRoute;
+        }
     }
-    if (cfg.graphiql.enabled) {
-        for (assets.graphiqlFiles) |f| {
-            const full = try joinRoute(allocator, cfg.graphiql.route, f.name);
+    if (comptime cfg.graphiql.enabled) {
+        const graphiqlAssets = @import("graphiqlAssets.zig");
+        for (graphiqlAssets.names) |name| {
+            const full = try joinRoute(allocator, cfg.graphiql.route, name);
             defer allocator.free(full);
             if (router.hasConflict(.GET, full)) return error.DuplicateRoute;
         }
@@ -336,18 +357,20 @@ fn mountRouter(
 
     st.openapiRoute = try normalizeRoute(allocator, cfg.openapi.route);
     st.title = try allocator.dupe(u8, cfg.title);
-    if (cfg.swagger.enabled and cfg.swagger.route.len > 0)
+    if (comptime cfg.swagger.enabled and cfg.swagger.route.len > 0)
         st.swaggerRoute = try normalizeRoute(allocator, cfg.swagger.route);
-    if (cfg.redoc.enabled and cfg.redoc.route.len > 0)
+    if (comptime cfg.redoc.enabled and cfg.redoc.route.len > 0)
         st.redocRoute = try normalizeRoute(allocator, cfg.redoc.route);
-    if (cfg.scalar.enabled and cfg.scalar.route.len > 0)
+    if (comptime cfg.scalar.enabled and cfg.scalar.route.len > 0)
         st.scalarRoute = try normalizeRoute(allocator, cfg.scalar.route);
-    if (cfg.graphiql.enabled and cfg.graphiql.route.len > 0) {
+    if (comptime cfg.graphiql.enabled and cfg.graphiql.route.len > 0) {
         st.graphiqlRoute = try normalizeRoute(allocator, cfg.graphiql.route);
         st.graphqlEndpoint = try normalizeRoute(allocator, cfg.graphiql.graphqlEndpoint);
     }
 
-    st.spec = try openapi.generate(router, actualInfo);
+    if (comptime cfg.openapi.enabled) {
+        st.spec = try openapi.generate(router, actualInfo);
+    }
 
     // Pre-render enabled UI pages once; handlers only borrow.
     if (st.swaggerRoute) |route| {
@@ -371,37 +394,53 @@ fn mountRouter(
     // stray docs routes behind (pre-checks make this rare, e.g. OOM only).
     errdefer removeRoutes(st);
 
-    if (cfg.openapi.enabled and st.openapiRoute.len > 0) {
-        try router.add(.GET, st.openapiRoute, openApiHandler, .{ .meta = internalMeta, .userData = st });
-    }
-    if (st.swaggerRoute) |route| {
-        try router.add(.GET, route, swaggerPageHandler, .{ .meta = internalMeta, .userData = st });
-        for (assets.swaggerFiles) |f| {
-            const full = try joinRoute(allocator, route, f.name);
-            defer allocator.free(full);
-            try router.add(.GET, full, swaggerAssetHandler, .{ .meta = internalMeta });
+    if (comptime cfg.openapi.enabled) {
+        if (st.openapiRoute.len > 0) {
+            try router.add(.GET, st.openapiRoute, openApiHandler, .{ .meta = internalMeta, .userData = st });
         }
     }
-    if (st.redocRoute) |route| {
-        try router.add(.GET, route, redocPageHandler, .{ .meta = internalMeta, .userData = st });
-        for (assets.redocFiles) |f| {
-            const full = try joinRoute(allocator, route, f.name);
-            defer allocator.free(full);
-            try router.add(.GET, full, redocAssetHandler, .{ .meta = internalMeta });
+    if (comptime cfg.swagger.enabled) {
+        if (st.swaggerRoute) |route| {
+            const swaggerAssets = @import("swaggerAssets.zig");
+            try router.add(.GET, route, swaggerPageHandler, .{ .meta = internalMeta, .userData = st });
+            for (swaggerAssets.names) |name| {
+                const full = try joinRoute(allocator, route, name);
+                defer allocator.free(full);
+                try router.add(.GET, full, swaggerAssetHandler, .{ .meta = internalMeta });
+            }
         }
     }
-    if (st.scalarRoute) |route| {
-        try router.add(.GET, route, scalarPageHandler, .{ .meta = internalMeta, .userData = st });
-        const full = try joinRoute(allocator, route, "standalone.js");
-        defer allocator.free(full);
-        try router.add(.GET, full, scalarAssetHandler, .{ .meta = internalMeta });
+    if (comptime cfg.redoc.enabled) {
+        if (st.redocRoute) |route| {
+            const redocAssets = @import("redocAssets.zig");
+            try router.add(.GET, route, redocPageHandler, .{ .meta = internalMeta, .userData = st });
+            for (redocAssets.names) |name| {
+                const full = try joinRoute(allocator, route, name);
+                defer allocator.free(full);
+                try router.add(.GET, full, redocAssetHandler, .{ .meta = internalMeta });
+            }
+        }
     }
-    if (st.graphiqlRoute) |route| {
-        try router.add(.GET, route, graphiqlPageHandler, .{ .meta = internalMeta, .userData = st });
-        for (assets.graphiqlFiles) |f| {
-            const full = try joinRoute(allocator, route, f.name);
-            defer allocator.free(full);
-            try router.add(.GET, full, graphiqlAssetHandler, .{ .meta = internalMeta });
+    if (comptime cfg.scalar.enabled) {
+        if (st.scalarRoute) |route| {
+            const scalarAssets = @import("scalarAssets.zig");
+            try router.add(.GET, route, scalarPageHandler, .{ .meta = internalMeta, .userData = st });
+            for (scalarAssets.names) |name| {
+                const full = try joinRoute(allocator, route, name);
+                defer allocator.free(full);
+                try router.add(.GET, full, scalarAssetHandler, .{ .meta = internalMeta });
+            }
+        }
+    }
+    if (comptime cfg.graphiql.enabled) {
+        if (st.graphiqlRoute) |route| {
+            const graphiqlAssets = @import("graphiqlAssets.zig");
+            try router.add(.GET, route, graphiqlPageHandler, .{ .meta = internalMeta, .userData = st });
+            for (graphiqlAssets.names) |name| {
+                const full = try joinRoute(allocator, route, name);
+                defer allocator.free(full);
+                try router.add(.GET, full, graphiqlAssetHandler, .{ .meta = internalMeta });
+            }
         }
     }
     st.next = gMounts;
@@ -478,28 +517,33 @@ fn graphiqlPageHandler(ctx: *Context) anyerror!Response {
 }
 
 fn swaggerAssetHandler(ctx: *Context) anyerror!Response {
-    return serveAsset(ctx, .swaggerUi, ctx.path);
+    const vendorAssets = @import("swaggerAssets.zig");
+    return serveAsset(ctx, vendorAssets.find(assetName(ctx.path)));
 }
 
 fn redocAssetHandler(ctx: *Context) anyerror!Response {
-    return serveAsset(ctx, .redoc, ctx.path);
+    const vendorAssets = @import("redocAssets.zig");
+    return serveAsset(ctx, vendorAssets.find(assetName(ctx.path)));
 }
 
 fn scalarAssetHandler(ctx: *Context) anyerror!Response {
-    return serveAsset(ctx, .scalar, ctx.path);
+    const vendorAssets = @import("scalarAssets.zig");
+    return serveAsset(ctx, vendorAssets.find(assetName(ctx.path)));
 }
 
 fn graphiqlAssetHandler(ctx: *Context) anyerror!Response {
-    return serveAsset(ctx, .graphiql, ctx.path);
+    const vendorAssets = @import("graphiqlAssets.zig");
+    return serveAsset(ctx, vendorAssets.find(assetName(ctx.path)));
 }
 
-/// Extracts the filename after the mount prefix and serves the embedded file.
-fn serveAsset(ctx: *Context, kind: assets.Kind, path: []const u8) anyerror!Response {
-    const name = blk: {
-        const idx = std.mem.lastIndexOfScalar(u8, path, '/') orelse break :blk path;
-        break :blk path[idx + 1 ..];
-    };
-    const f = assets.find(kind, name) orelse
+fn assetName(path: []const u8) []const u8 {
+    const idx = std.mem.lastIndexOfScalar(u8, path, '/') orelse return path;
+    return path[idx + 1 ..];
+}
+
+/// Serves a vendor asset found by that vendor's isolated asset module.
+fn serveAsset(ctx: *Context, maybeFile: ?*const assetFile.File) anyerror!Response {
+    const f = maybeFile orelse
         return .{ .status = 404, .contentType = mediaTypeMod.textPlainUtf8, .body = "not found" };
     _ = ctx;
     return .{ .status = 200, .contentType = f.contentType, .body = f.data };
@@ -775,7 +819,7 @@ test "mount registers spec, pages, and local assets" {
 
     // Bundle served from embedded bytes.
     const bundle = (try invoke(&router, .GET, "/docs/swagger-ui-bundle.js", a)).?;
-    try std.testing.expect(bundle.body.len == assets.swaggerUiBundleJs.len);
+    try std.testing.expect(bundle.body.len == testAssets.swaggerUiBundleJs.len);
     try std.testing.expect(std.mem.startsWith(u8, bundle.body, "/*!"));
 
     // Unknown asset name does not fall through to any catch-all route.
@@ -789,13 +833,13 @@ test "mount registers spec, pages, and local assets" {
     try std.testing.expect(std.mem.indexOf(u8, redocPage.body, "import { init }") != null);
     try std.testing.expect(std.mem.indexOf(u8, redocPage.body, "fonts.googleapis.com") == null);
     const redocJs = (try invoke(&router, .GET, "/redoc/redoc.standalone.js", a)).?;
-    try std.testing.expect(redocJs.body.len == assets.redocStandaloneJs.len);
+    try std.testing.expect(redocJs.body.len == testAssets.redocStandaloneJs.len);
 
     // Scalar page + bundle (enabled by default).
     const scalarPage = (try invoke(&router, .GET, "/scalar", a)).?;
     try std.testing.expect(std.mem.indexOf(u8, scalarPage.body, "id=\"api-reference\"") != null);
     const scalarJs = (try invoke(&router, .GET, "/scalar/standalone.js", a)).?;
-    try std.testing.expectEqual(assets.scalarStandaloneJs.len, scalarJs.body.len);
+    try std.testing.expectEqual(testAssets.scalarStandaloneJs.len, scalarJs.body.len);
 }
 
 test "scalar opt-in mounts its page and bundle" {
@@ -810,7 +854,7 @@ test "scalar opt-in mounts its page and bundle" {
     const page = (try invoke(&router, .GET, "/scalar", a)).?;
     try std.testing.expect(std.mem.indexOf(u8, page.body, "id=\"api-reference\"") != null);
     const js = (try invoke(&router, .GET, "/scalar/standalone.js", a)).?;
-    try std.testing.expectEqual(assets.scalarStandaloneJs.len, js.body.len);
+    try std.testing.expectEqual(testAssets.scalarStandaloneJs.len, js.body.len);
 
     const res = (try invoke(&router, .GET, "/openapi.json", a)).?;
     const parsed = try std.json.parseFromSlice(std.json.Value, a, res.body, .{});
@@ -825,6 +869,25 @@ test "disabled config registers nothing" {
 
     try mountRouter(a, &router, .{ .enabled = false });
     try std.testing.expect((try invoke(&router, .GET, "/openapi.json", a)) == null);
+}
+
+test "all docs endpoints disabled skips mounting" {
+    const a = std.testing.allocator;
+    var router = Router.init(a, .{});
+    defer router.deinit();
+
+    try mountRouter(a, &router, .{
+        .openapi = .{ .enabled = false },
+        .swagger = .{ .enabled = false },
+        .redoc = .{ .enabled = false },
+        .scalar = .{ .enabled = false },
+        .graphiql = .{ .enabled = false },
+    });
+    try std.testing.expect((try invoke(&router, .GET, "/openapi.json", a)) == null);
+    try std.testing.expect((try invoke(&router, .GET, "/docs", a)) == null);
+    try std.testing.expect((try invoke(&router, .GET, "/redoc", a)) == null);
+    try std.testing.expect((try invoke(&router, .GET, "/scalar", a)) == null);
+    try std.testing.expect((try invoke(&router, .GET, "/graphiql", a)) == null);
 }
 
 test "disabled docs releases routes to the application" {
@@ -849,6 +912,7 @@ test "openapi disabled option suppresses /openapi.json only" {
     try mountRouter(a, &router, .{ .openapi = .{ .enabled = false }, .swagger = .{ .enabled = true } });
     defer unmountAll();
 
+    try std.testing.expect(gMounts.?.spec == null);
     try std.testing.expect((try invoke(&router, .GET, "/openapi.json", a)) == null);
     try std.testing.expect((try invoke(&router, .GET, "/docs", a)) != null);
 }
@@ -879,10 +943,10 @@ test "graphiql opt-in mounts its page and all worker assets" {
     try std.testing.expect(std.mem.indexOf(u8, page.body, "<base href=\"/graphiql/\">") != null);
 
     const js = (try invoke(&router, .GET, "/graphiql/graphiql.js", a)).?;
-    try std.testing.expectEqual(assets.graphiqlJs.len, js.body.len);
+    try std.testing.expectEqual(testAssets.graphiqlJs.len, js.body.len);
 
     const css = (try invoke(&router, .GET, "/graphiql/graphiql.css", a)).?;
-    try std.testing.expectEqual(assets.graphiqlCss.len, css.body.len);
+    try std.testing.expectEqual(testAssets.graphiqlCss.len, css.body.len);
     try std.testing.expect(std.mem.indexOf(u8, css.body, "codicon-mxdk0fnd.ttf") != null);
 
     const font = (try invoke(&router, .GET, "/graphiql/codicon-mxdk0fnd.ttf", a)).?;

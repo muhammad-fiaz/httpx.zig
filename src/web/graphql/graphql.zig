@@ -5,7 +5,7 @@
 //! - Lexer & Parser (parser.zig)
 //! - Schema, Type System, Resolvers, and Introspection (schema.zig)
 //! - HTTP Endpoint & Handler (server.zig)
-//! - GraphiQL 6.0.0 UI integration via `httpx.docs` or `httpx.graphql.mount`
+//! - GraphiQL 6.0.1 UI integration via `httpx.docs` or `httpx.graphql.mount`
 //!
 //! Types are spec-driven: list every field explicitly with a scalar kind
 //! (`Scalar.id`, `Scalar.string`, …) or a declared object, enum, interface, or

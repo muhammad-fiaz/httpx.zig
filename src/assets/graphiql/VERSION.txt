@@ -1,25 +1,29 @@
-graphiql 6.0.0
-Source: https://registry.npmjs.org/graphiql/-/graphiql-6.0.0.tgz
-Release: https://github.com/graphql/graphiql/releases/tag/graphiql%406.0.0
+graphiql 6.0.1
+Source: https://registry.npmjs.org/graphiql/-/graphiql-6.0.1.tgz
+Release: https://github.com/graphql/graphiql/releases/tag/graphiql%406.0.1
 Project: https://github.com/graphql/graphiql
-Package: graphiql 6.0.0
-Runtime: react 19.3.1, react-dom 19.3.1, graphql 16.11.x, @graphiql/react ^1.0.0, monaco-editor 0.57.0
+Package: graphiql 6.0.1
+Runtime: react 19.3.1, react-dom 19.3.1, graphql 16.11.x, @graphiql/react 1.0.2, monaco-editor 0.57.0
 License: MIT
 Built with bun (esbuild IIFE):
   bun build entry.js --outdir=out --minify --target browser --format iife
-  cp out/entry.js graphiql.js   (bun names the output after entry.js)
+  cp out/entry.js graphiql.js
+  cp out/entry.css graphiql.css
+  cp out/codicon-mxdk0fnd.ttf codicon-mxdk0fnd.ttf
   bun build node_modules/monaco-editor/esm/vs/editor/editor.worker.js --outfile=editor.worker.js --minify --target browser
   bun build node_modules/monaco-editor/esm/vs/language/json/json.worker.js --outfile=json.worker.js --minify --target browser
 Files vendored:
 - graphiql.js (IIFE bundle; sets window.renderGraphiQL(element, options) where options are
   { endpoint, defaultQuery?, editorTheme?, headers? }; headers is a JSON object merged over
   Content-Type: application/json for every request)
-- graphiql.css (bundle CSS; no Monaco fonts inline)
+- graphiql.css (bundle CSS; GraphiQL, plugin, and Monaco styles; no fonts inlined)
 - codicon-mxdk0fnd.ttf (Monaco icon font referenced by graphiql.css)
 - editor.worker.js (Monaco editor worker)
 - json.worker.js (Monaco JSON language worker)
 Notes:
-- graphiql 6 no longer depends on monaco-graphql, so graphql.worker.js was dropped.
+- entry.js imports graphiql plus the @graphiql/react, plugin, and graphiql stylesheets so the
+  UI is fully styled; Monaco's component CSS is collected from graphiql's module imports.
 - Monaco resolves worker scripts relative to document.baseURI; the served page pins <base>
   to the GraphiQL route so the workers load from the mounted asset paths.
-Rebuild: install graphiql/react/react-dom/graphql with bun, then run the three bun commands above.
+Rebuild: install graphiql/react/react-dom/graphql/monaco-editor with bun, then run the
+         commands above.

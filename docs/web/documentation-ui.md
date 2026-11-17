@@ -22,6 +22,28 @@ use them. Each interface has `enabled`, `route`, and `title` fields plus
 explicit, typed vendor options. Every option is a typed field with a declared
 default; there is no string-based passthrough.
 
+Each UI bundle is imported only in the compile-time branch that mounts that
+interface. A ReleaseSmall measurement with Zig 0.17.0 on Windows x86_64 built
+consumers that initialize `Server` and mount one docs configuration:
+
+| Configuration | Executable size |
+|---|---:|
+| Documentation disabled | 680,448 bytes |
+| OpenAPI JSON only | 766,464 bytes |
+| Swagger UI only | 2,945,536 bytes |
+| ReDoc only | 3,111,424 bytes |
+| Scalar only | 5,797,888 bytes |
+| GraphiQL only | 8,241,152 bytes |
+
+Binary scans found the unique JavaScript bundle marker only in its matching
+single-UI build; the OpenAPI-only and docs-disabled builds contained none of
+the four bundle markers. These are representative executable sizes, not a
+stable ABI or a promise about other targets or optimization modes.
+
+OpenAPI generation and its JSON route can also be disabled independently. If
+a UI remains enabled in that configuration, provide its configured OpenAPI
+route from the application; Httpx skips generating an unused spec.
+
 ## Options
 
 ```zig

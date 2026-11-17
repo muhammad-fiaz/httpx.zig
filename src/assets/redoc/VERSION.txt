@@ -1,5 +1,5 @@
-redoc 3.0.1
-Source: https://registry.npmjs.org/redoc/-/redoc-3.0.1.tgz
+redoc 3.1.0
+Source: https://registry.npmjs.org/redoc/-/redoc-3.1.0.tgz
 File:   bundles/redoc.standalone.js
 Project: https://github.com/Redocly/redoc
 License: MIT
