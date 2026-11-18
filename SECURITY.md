@@ -4,14 +4,12 @@
 
 | Version | Supported |
 | ------- | --------- |
-| 0.2.x   | :white_check_mark: |
-| 0.1.x   | :warning: migrate to 0.2.x |
-| < 0.1.5 | :x: |
+| 0.2.4+  | :white_check_mark: |
+| < 0.2.4 | :x: Deprecated (please upgrade to latest) |
 
-v0.2.4 (and the 0.2.x series) brings major new improvements. Versions in the
-0.1.x line are legacy: please migrate to 0.2.x for better performance,
-stronger security defaults, and ongoing fixes. Versions below 0.1.5 are
-considered end-of-life and will not receive security fixes or updates.
+Versions 0.2.4 and newer receive active security patches and updates.
+Versions below 0.2.4 are deprecated and will not receive security fixes.
+Users running versions earlier than 0.2.4 should upgrade to the latest release.
 
 ---
 
@@ -102,7 +100,7 @@ When reporting a vulnerability, please include:
 - Credit will be given upon request
 
 **Declined:**
-- Issues affecting unsupported versions (< 0.1.5)
+- Issues affecting unsupported or deprecated versions (< 0.2.4)
 - Expected or documented behavior
 - Issues already fixed in a newer release
 - Reports without sufficient detail to reproduce
