@@ -29,7 +29,7 @@
 
 
 > [!TIP]
-> If you build with httpx.zig, make sure to give it a star.
+> If you build with httpx.zig, make sure to give it a ⭐ star.
 
 ---
 
