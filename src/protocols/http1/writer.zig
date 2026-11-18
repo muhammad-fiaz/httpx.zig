@@ -193,8 +193,8 @@ pub fn buildRequest(
             if (opts.minorVersion == 0) return Error.UnsupportedForVersion;
             try appendHeader(&out, allocator, headerName.transferEncoding, "chunked");
         } else if (!declared and !opts.streamingBody) {
-            var numBuf: [20]u8 = undefined;
-            const n = std.fmt.bufPrint(&numBuf, "{d}", .{body.?.len}) catch unreachable;
+            var numBuf: [24]u8 = undefined;
+            const n = std.fmt.bufPrint(&numBuf, "{d}", .{body.?.len}) catch return Error.OutOfMemory;
             try appendHeader(&out, allocator, headerName.contentLength, n);
         }
     }
@@ -345,8 +345,8 @@ pub fn buildResponse(
                 if (std.ascii.eqlIgnoreCase(h.name, "content-length")) declared = true;
             }
             if (!declared) {
-                var numBuf: [20]u8 = undefined;
-                const n = std.fmt.bufPrint(&numBuf, "{d}", .{if (wantsBody) body.?.len else 0}) catch unreachable;
+                var numBuf: [24]u8 = undefined;
+                const n = std.fmt.bufPrint(&numBuf, "{d}", .{if (wantsBody) body.?.len else 0}) catch return Error.OutOfMemory;
                 try appendHeader(&out, allocator, headerName.contentLength, n);
             }
         }
@@ -407,8 +407,8 @@ pub const TrailerField = Header;
 
 /// Emits one complete chunk (size line + data + CRLF) into `out`.
 pub fn writeChunk(out: *std.ArrayList(u8), gpa: Allocator, data: []const u8) Error!void {
-    var sizeBuf: [18]u8 = undefined;
-    const hex = std.fmt.bufPrint(&sizeBuf, "{x}\r\n", .{data.len}) catch unreachable;
+    var sizeBuf: [24]u8 = undefined;
+    const hex = std.fmt.bufPrint(&sizeBuf, "{x}\r\n", .{data.len}) catch return Error.OutOfMemory;
     out.appendSlice(gpa, hex) catch return Error.OutOfMemory;
     out.appendSlice(gpa, data) catch return Error.OutOfMemory;
     out.appendSlice(gpa, "\r\n") catch return Error.OutOfMemory;

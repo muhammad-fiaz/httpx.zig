@@ -885,7 +885,7 @@ fn benchClientServerLoopback() void {
 
 // Group 12: HTTP/2 pooled loopback (h2c prior knowledge, one server conn)
 
-var h2BenchListener: httpx.socket.tcp.Listener = undefined;
+var h2BenchListener: httpx.tcp.Listener = undefined;
 var h2BenchThread: std.Thread = undefined;
 var h2BenchClient: httpx.Client = undefined;
 var h2BenchUrl: [64]u8 = undefined;
@@ -1084,7 +1084,7 @@ const benchKeyPem =
     \\-----END PRIVATE KEY-----
 ;
 
-var tlsBenchListener: httpx.socket.tcp.Listener = undefined;
+var tlsBenchListener: httpx.tcp.Listener = undefined;
 var tlsBenchThread: std.Thread = undefined;
 var tlsBenchPort: u16 = 0;
 var tlsBenchStop: std.atomic.Value(bool) = .init(false);
@@ -1113,7 +1113,7 @@ fn tlsBenchServe() void {
 }
 
 fn tlsBenchDial(session: ?*const httpx.protocols.tls.Session) void {
-    var sock = httpx.socket.tcp.connect(tlsBenchIo, "127.0.0.1", tlsBenchPort) catch {
+    var sock = httpx.tcp.connect(tlsBenchIo, "127.0.0.1", tlsBenchPort) catch {
         noteFailure();
         return;
     };
@@ -1269,7 +1269,7 @@ pub fn main() !void {
     // Each teardown defer is registered only after its setup succeeds,
     // so a fatal setup error exits without joining garbage threads.
     h2BenchIo = io;
-    h2BenchListener = try httpx.socket.tcp.init(benchAllocator, io, .{});
+    h2BenchListener = try httpx.tcp.listen(benchAllocator, io, .{});
     const h2port = h2BenchListener.localPort();
     h2BenchThread = try std.Thread.spawn(.{}, h2BenchServe, .{});
     h2BenchUrlSlice = try std.fmt.bufPrint(&h2BenchUrl, "http://127.0.0.1:{d}/ping", .{h2port});
@@ -1281,7 +1281,7 @@ pub fn main() !void {
     defer {
         // Stop server, wake listener, join thread, then close and deinit.
         h2BenchStop.store(true, .release);
-        httpx.socket.tcp.wakeListenerPort(h2port);
+        httpx.tcp.wakeListenerPort(h2port);
         h2BenchClient.deinit();
         h2BenchThread.join();
         h2BenchListener.close(io);
@@ -1309,7 +1309,7 @@ pub fn main() !void {
 
     // 9. TLS loopback server (tickets enabled) + one captured session
     tlsBenchIo = io;
-    tlsBenchListener = try httpx.socket.tcp.init(benchAllocator, io, .{});
+    tlsBenchListener = try httpx.tcp.listen(benchAllocator, io, .{});
     tlsBenchPort = tlsBenchListener.localPort();
     tlsBenchThread = try std.Thread.spawn(.{}, tlsBenchServe, .{});
     defer {
@@ -1319,7 +1319,7 @@ pub fn main() !void {
     }
     {
         // Prime the resumption session (full handshake + read captures NST).
-        var sock = try httpx.socket.tcp.connect(io, "127.0.0.1", tlsBenchPort);
+        var sock = try httpx.tcp.connect(io, "127.0.0.1", tlsBenchPort);
         defer sock.close();
         var cli = httpx.protocols.tls.Client.init(benchAllocator, io, .{}) catch return error.NoSessionCaptured;
         defer cli.deinit();
@@ -1475,7 +1475,7 @@ pub fn main() !void {
                 m.unit,
             });
         } else if (m.avgNs < 1_000_000.0) {
-            std.debug.print("| `{s}` | {s} | {d:.2} µs/op | **{d} {s}** |\n", .{
+            std.debug.print("| `{s}` | {s} | {d:.2} us/op | **{d} {s}** |\n", .{
                 m.name,
                 m.category,
                 m.avgNs / 1000.0,

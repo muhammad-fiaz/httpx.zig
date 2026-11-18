@@ -255,7 +255,7 @@ fn toJsonValue(allocator: Allocator, val: anytype) anyerror!std.json.Value {
         },
         .@"struct" => blk: {
             if (@TypeOf(val) == std.json.Value) break :blk val;
-            var obj = std.json.ObjectMap.init(allocator, &.{}, &.{}) catch return error.OutOfMemory;
+            var obj: std.json.ObjectMap = .{};
             inline for (info.@"struct".field_names) |fname| {
                 try obj.put(allocator, fname, try toJsonValue(allocator, @field(val, fname)));
             }
@@ -623,7 +623,7 @@ pub const Schema = struct {
             .subscription => return self.formatError(arena, "Subscriptions are not supported over standard HTTP POST"),
         };
 
-        var rootData = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+        var rootData: std.json.ObjectMap = .{};
 
         for (op.selectionSet) |sel| {
             switch (sel) {
@@ -657,7 +657,7 @@ pub const Schema = struct {
             }
         }
 
-        var responseObj = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+        var responseObj: std.json.ObjectMap = .{};
         try responseObj.put(arena, "data", std.json.Value{ .object = rootData });
 
         var out: std.Io.Writer.Allocating = .init(arena);
@@ -715,7 +715,7 @@ pub const Schema = struct {
         const fd = fieldDef.?;
 
         // Evaluate arguments
-        var argsObj = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+        var argsObj: std.json.ObjectMap = .{};
         for (field.arguments) |arg| {
             const argVal = self.evaluateValue(arena, arg.value, variables);
             try argsObj.put(arena, arg.name, argVal);
@@ -746,7 +746,7 @@ pub const Schema = struct {
             const nestedType = self.findType(fd.typeName) orelse ObjectTypeDef{ .name = fd.typeName, .fields = &.{} };
             switch (resolvedValue) {
                 .object => |subObj| {
-                    var outObj = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+                    var outObj: std.json.ObjectMap = .{};
                     for (field.selectionSet) |sel| {
                         switch (sel) {
                             .field => |sf| {
@@ -784,7 +784,7 @@ pub const Schema = struct {
                     var outArr = std.json.Array.init(arena);
                     for (arr.items) |elem| {
                         if (elem == .object) {
-                            var elemObj = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+                            var elemObj: std.json.ObjectMap = .{};
                             for (field.selectionSet) |sel| {
                                 if (sel == .field) {
                                     const sf = sel.field;
@@ -874,7 +874,7 @@ pub const Schema = struct {
                 return .{ .array = arr };
             },
             .object => |o| {
-                var map = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+                var map: std.json.ObjectMap = .{};
                 for (o) |field| {
                     map.put(arena, field.name, self.evaluateValue(arena, field.value, variables)) catch {};
                 }
@@ -885,13 +885,13 @@ pub const Schema = struct {
 
     fn resolveSchemaIntrospection(self: *const Schema, arena: Allocator, field: ast.Field) !std.json.Value {
         _ = field;
-        var sObj = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
-        var qType = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+        var sObj: std.json.ObjectMap = .{};
+        var qType: std.json.ObjectMap = .{};
         try qType.put(arena, "name", std.json.Value{ .string = self.config.query.name });
         try sObj.put(arena, "queryType", std.json.Value{ .object = qType });
 
         if (self.config.mutation) |m| {
-            var mType = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+            var mType: std.json.ObjectMap = .{};
             try mType.put(arena, "name", std.json.Value{ .string = m.name });
             try sObj.put(arena, "mutationType", std.json.Value{ .object = mType });
         } else {
@@ -973,7 +973,7 @@ pub const Schema = struct {
     /// Bare named-type reference: `kind` reflects the real declared kind, so
     /// GraphiQL / Scalar / ReDoc render links to the correct type.
     fn introspectNamedType(self: *const Schema, arena: Allocator, typeName: []const u8) !std.json.Value {
-        var ref = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+        var ref: std.json.ObjectMap = .{};
         try ref.put(arena, "kind", std.json.Value{ .string = self.kindOf(typeName) });
         try ref.put(arena, "name", std.json.Value{ .string = typeName });
         try ref.put(arena, "ofType", .null);
@@ -985,14 +985,14 @@ pub const Schema = struct {
     fn introspectTypeRef(self: *const Schema, arena: Allocator, typeName: []const u8, isList: bool, isNonNull: bool) !std.json.Value {
         var ref = try self.introspectNamedType(arena, typeName);
         if (isList) {
-            var listObj = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+            var listObj: std.json.ObjectMap = .{};
             try listObj.put(arena, "kind", std.json.Value{ .string = "LIST" });
             try listObj.put(arena, "name", .null);
             try listObj.put(arena, "ofType", ref);
             ref = std.json.Value{ .object = listObj };
         }
         if (isNonNull) {
-            var nnObj = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+            var nnObj: std.json.ObjectMap = .{};
             try nnObj.put(arena, "kind", std.json.Value{ .string = "NON_NULL" });
             try nnObj.put(arena, "name", .null);
             try nnObj.put(arena, "ofType", ref);
@@ -1004,7 +1004,7 @@ pub const Schema = struct {
     fn formatFieldList(self: *const Schema, arena: Allocator, fields: []const FieldDef) !std.json.Value {
         var fieldsList = std.json.Array.init(arena);
         for (fields) |f| {
-            var fMap = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+            var fMap: std.json.ObjectMap = .{};
             try fMap.put(arena, "name", std.json.Value{ .string = f.name });
             const description: std.json.Value = if (f.description) |d| .{ .string = d } else .null;
             try fMap.put(arena, "description", description);
@@ -1014,7 +1014,7 @@ pub const Schema = struct {
 
             var argsList = std.json.Array.init(arena);
             for (f.args) |a| {
-                var aMap = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+                var aMap: std.json.ObjectMap = .{};
                 try aMap.put(arena, "name", std.json.Value{ .string = a.name });
                 const argDescription: std.json.Value = if (a.description) |d| .{ .string = d } else .null;
                 try aMap.put(arena, "description", argDescription);
@@ -1032,7 +1032,7 @@ pub const Schema = struct {
     fn formatInputFieldList(self: *const Schema, arena: Allocator, fields: []const InputFieldDef) !std.json.Value {
         var list = std.json.Array.init(arena);
         for (fields) |f| {
-            var fMap = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+            var fMap: std.json.ObjectMap = .{};
             try fMap.put(arena, "name", std.json.Value{ .string = f.name });
             const description: std.json.Value = if (f.description) |d| .{ .string = d } else .null;
             try fMap.put(arena, "description", description);
@@ -1048,7 +1048,7 @@ pub const Schema = struct {
         _ = self;
         var list = std.json.Array.init(arena);
         for (values) |value| {
-            var vMap = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+            var vMap: std.json.ObjectMap = .{};
             try vMap.put(arena, "name", std.json.Value{ .string = value });
             try vMap.put(arena, "description", .null);
             try vMap.put(arena, "isDeprecated", std.json.Value{ .bool = false });
@@ -1081,7 +1081,7 @@ pub const Schema = struct {
     fn formatIntrospectionType(self: *const Schema, arena: Allocator, typeName: []const u8) !std.json.Value {
         const kind = self.kindOf(typeName);
 
-        var tObj = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+        var tObj: std.json.ObjectMap = .{};
         try tObj.put(arena, "kind", std.json.Value{ .string = kind });
         try tObj.put(arena, "name", std.json.Value{ .string = typeName });
         const description: std.json.Value = if (self.descriptionOf(typeName)) |d| .{ .string = d } else .null;
@@ -1118,13 +1118,13 @@ pub const Schema = struct {
 
     fn formatError(self: *const Schema, arena: Allocator, msg: []const u8) ![]u8 {
         _ = self;
-        var errObj = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+        var errObj: std.json.ObjectMap = .{};
         try errObj.put(arena, "message", std.json.Value{ .string = msg });
 
         var errsList = std.json.Array.init(arena);
         try errsList.append(std.json.Value{ .object = errObj });
 
-        var resObj = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+        var resObj: std.json.ObjectMap = .{};
         try resObj.put(arena, "errors", std.json.Value{ .array = errsList });
 
         var out: std.Io.Writer.Allocating = .init(arena);

@@ -240,7 +240,7 @@ pub fn safeJoin(alloc: Allocator, urlPath: []const u8, root: []const u8) !?[]u8 
     defer alloc.free(decoded);
 
     for (decoded) |c| {
-        if (c == 0 or c == '\\') return null;
+        if (c == 0 or c == '\\' or c == ':') return null;
     }
 
     var parts: std.ArrayList([]const u8) = .empty;
@@ -734,6 +734,11 @@ test "safeJoin rejects traversal, encoding tricks, and windows separators" {
     const dots = (try safeJoin(a, "/css/./x.css", root)).?;
     defer a.free(dots);
     try std.testing.expectEqualStrings("/srv/public/css/x.css", dots);
+
+    // NTFS Alternate Data Streams and drive letters
+    try std.testing.expect((try safeJoin(a, "/app.css::$DATA", root)) == null);
+    try std.testing.expect((try safeJoin(a, "/C:/windows", root)) == null);
+    try std.testing.expect((try safeJoin(a, "/file.txt:stream", root)) == null);
 }
 
 test "normalizedRelativePath decodes once and rejects malformed or rooted input" {

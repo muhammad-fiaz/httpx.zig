@@ -554,7 +554,7 @@ pub fn percentEncodeAlloc(allocator: Allocator, input: []const u8) Allocator.Err
     const totalLen = encodedLength(input);
     const out = try allocator.alloc(u8, totalLen);
     errdefer allocator.free(out);
-    _ = percentEncode(out, input) catch unreachable;
+    _ = percentEncode(out, input) catch return Allocator.Error.OutOfMemory;
     return out;
 }
 
@@ -622,7 +622,7 @@ pub fn formatHttpDate(buf: []u8, epochSecs: i64) []const u8 {
         ds.getHoursIntoDay(),
         ds.getMinutesIntoHour(),
         ds.getSecondsIntoMinute(),
-    }) catch unreachable;
+    }) catch buf[0..0];
 }
 
 fn daysInMonth(year: i32, month: u4) u16 {

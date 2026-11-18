@@ -56,6 +56,8 @@ pub const DEFAULT_MAX_HEADER_BLOCK_BYTES: usize = 256 * 1024;
 /// The connection-level flow-control window is fixed at 65535 and is not
 /// affected by SETTINGS_INITIAL_WINDOW_SIZE (RFC 9113 Section 6.9.2).
 pub const DEFAULT_CONNECTION_WINDOW: i64 = 65535;
+/// Maximum rapid resets (CVE-2023-44487) allowed before closing the connection.
+pub const DEFAULT_MAX_RAPID_RESETS: usize = 1000;
 
 /// One direction of SETTINGS.
 pub const Settings = struct {
@@ -147,6 +149,8 @@ pub const Session = struct {
     maxHeaderBlock: usize = DEFAULT_MAX_HEADER_BLOCK_BYTES,
     /// Last stream ID accepted by the peer's most recent GOAWAY.
     goawayLastStream: ?u31 = null,
+    /// Rapid Reset mitigation (CVE-2023-44487).
+    rapidResetBudget: usize = DEFAULT_MAX_RAPID_RESETS,
 
     outbound: std.ArrayList(u8) = .empty,
 
@@ -346,6 +350,10 @@ pub const Session = struct {
             .data => |d| try self.handleData(hdr.streamId, d.flowLen, d.data, d.endStream),
             .rstStream => |r| {
                 if (self.streamPtr(hdr.streamId)) |st| {
+                    if (self.rapidResetBudget == 0) {
+                        return self.connError(.enhanceYourCalm);
+                    }
+                    self.rapidResetBudget -= 1;
                     st.onRecvRst();
                     if (self.cbs.onReset) |cb| cb(self.cbs.ctx, hdr.streamId, r.errorCode);
                     // A reset stream pending CONTINUATIONs must not leave
@@ -741,6 +749,7 @@ pub const Session = struct {
             };
         }
         if (endStream) {
+            if (self.rapidResetBudget < DEFAULT_MAX_RAPID_RESETS) self.rapidResetBudget += 1;
             if (self.cbs.onStreamEnd) |cb| {
                 cb(self.cbs.ctx, st.id) catch {
                     try self.resetStream(st.id, .internalError);
@@ -1070,6 +1079,7 @@ pub const Session = struct {
             },
         };
         if (endStream) {
+            if (self.rapidResetBudget < DEFAULT_MAX_RAPID_RESETS) self.rapidResetBudget += 1;
             if (self.cbs.onStreamEnd) |cb| {
                 cb(self.cbs.ctx, sid) catch {
                     try self.resetStream(sid, .internalError);
@@ -1519,10 +1529,12 @@ pub const Session = struct {
     fn connError(self: *Session, code: ErrorCode) Error {
         if (!self.closed) {
             self.closed = true;
+            self.goawaySent = true;
             const candidate: u31 = if (self.role == .server) self.largestPeerStream else 0;
             // A fatal GOAWAY sent after a graceful GOAWAY must not
             // increase the advertised last-stream-id (RFC 9113 6.8).
             const lastSid = @min(candidate, self.goawayLastSidSent);
+            self.goawayLastSidSent = lastSid;
             frameMod.writeGoaway(
                 &self.outbound,
                 self.allocator,
@@ -2993,4 +3005,55 @@ test "regression: http2 session feed mutation and frame sequences" {
         helper.feed(.server, streamBuf[0..copyLen]);
         helper.feed(.client, streamBuf[0..copyLen]);
     }
+}
+
+test "rapid reset mitigation terminates connection with ENHANCE_YOUR_CALM" {
+    const a = std.testing.allocator;
+    var s = try Session.init(a, .server, .{});
+    defer s.deinit();
+    try s.startHandshake();
+
+    // Set tight budget for testing
+    s.rapidResetBudget = 2;
+
+    var in: std.ArrayList(u8) = .empty;
+    defer in.deinit(a);
+
+    try in.appendSlice(a, frameMod.CONNECTION_PREFACE);
+    try frameMod.writeSettings(&in, a, &.{});
+    _ = try s.feed(in.items);
+    in.clearRetainingCapacity();
+
+    // Encode a minimal headers frame for streams
+    var enc = hpackMod.Encoder.init(a);
+    defer enc.deinit();
+    var hBlock: std.ArrayList(u8) = .empty;
+    defer hBlock.deinit(a);
+    try enc.encode(&hBlock, ":method", "GET", .incremental, false);
+    try enc.encode(&hBlock, ":scheme", "http", .incremental, false);
+    try enc.encode(&hBlock, ":path", "/", .incremental, false);
+
+    // Stream 1: HEADERS followed by RST_STREAM (budget 2 -> 1)
+    try frameMod.writeHeader(&in, a, hBlock.items.len, .headers, Flags.END_HEADERS, 1);
+    try in.appendSlice(a, hBlock.items);
+    try frameMod.writeRstStream(&in, a, 1, 0x8);
+    _ = try s.feed(in.items);
+    try std.testing.expectEqual(@as(usize, 1), s.rapidResetBudget);
+    in.clearRetainingCapacity();
+
+    // Stream 3: HEADERS followed by RST_STREAM (budget 1 -> 0)
+    try frameMod.writeHeader(&in, a, hBlock.items.len, .headers, Flags.END_HEADERS, 3);
+    try in.appendSlice(a, hBlock.items);
+    try frameMod.writeRstStream(&in, a, 3, 0x8);
+    _ = try s.feed(in.items);
+    try std.testing.expectEqual(@as(usize, 0), s.rapidResetBudget);
+    in.clearRetainingCapacity();
+
+    // Stream 5: HEADERS followed by RST_STREAM when budget is 0 -> connection error
+    try frameMod.writeHeader(&in, a, hBlock.items.len, .headers, Flags.END_HEADERS, 5);
+    try in.appendSlice(a, hBlock.items);
+    try frameMod.writeRstStream(&in, a, 5, 0x8);
+    try std.testing.expectError(Error.ProtocolViolation, s.feed(in.items));
+    try std.testing.expect(s.closed);
+    try std.testing.expect(s.goawaySent);
 }
