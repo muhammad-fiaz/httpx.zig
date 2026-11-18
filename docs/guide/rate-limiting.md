@@ -10,7 +10,7 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 fn limitedHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{ .status = "ok", .data = "sensitive information" });
+    return ctx.json(.{ .status = "ok", .data = "sensitive information" });
 }
 
 pub fn main() !void {
@@ -40,9 +40,9 @@ limited) or `checkDetailed` for full `RateLimitResult` metadata
 dimension (`RateLimitDimension`: `.global`, `.clientIp`, `.userId`,
 `.apiKey`, `.route`, `.userAndRoute`, `.ipAndRoute`, `.custom`).
 
-Configure windows with `RateLimitPolicy` (`.limit`, `.windowMs`, `.burst`,
-`.ttlMs`) via `init(allocator, io, .{ .policy, .maxEntries })`. The limiter
-uses this I/O context for its initial sweep timestamp.
+Configure windows inline: `init(allocator, io, .{ .policy = .{ .limit = 100,
+.windowMs = 60_000, .burst = 0, .ttlMs = 300_000 }, .maxEntries = 10_000 })`.
+The limiter uses this I/O context for its initial sweep timestamp.
 
 ## Rate Limiting Headers
 

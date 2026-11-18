@@ -18,8 +18,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 1,
+        .limits = .{ .maxConnections = 1 },
     });
     defer server.deinit();
     try server.router.add(.GET, "/get", getHandler, .{});
@@ -33,10 +32,9 @@ pub fn main() !void {
     var urlBuf: [64]u8 = undefined;
     const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/get", .{port});
 
-    // GET with compression (struct-literal headers use camelCase names,
-    // normalized to wire names: acceptEncoding -> Accept-Encoding).
+    // GET with compression (explicit header pairs).
     var response = client.get(url, .{
-        .headers = .{ .acceptEncoding = "gzip, deflate, br" },
+        .headers = &.{.{ .name = "Accept-Encoding", .value = "gzip, deflate, br" }},
     }) catch |err| {
         std.debug.print("Compression request failed: {s}\n", .{@errorName(err)});
         return;

@@ -8,24 +8,45 @@ This example demonstrates sending a dedicated HTTP/1.1 client request with custo
 const std = @import("std");
 const httpx = @import("httpx");
 
+fn getHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
+    return .{
+        .status = 200,
+        .body = try std.fmt.allocPrint(ctx.allocator, "{{\"query\":\"{s}\",\"status\":\"ok\"}}", .{ctx.query}),
+        .contentType = "application/json",
+    };
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    // Initialize client once with reusable allocator and I/O
+    var server = try httpx.Server.init(allocator, io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .limits = .{ .maxConnections = 1 },
+    });
+    defer server.deinit();
+    try server.router.add(.GET, "/get", getHandler, .{});
+    const port = server.localPort();
+    const thread = try server.start();
+    defer thread.join();
+
     var client = httpx.Client.init(allocator, io, .{
         .allowLfLineEndings = true,
     });
     defer client.deinit();
 
-    // Dedicated HTTP/1.1 request
-    var response = try client.get("https://httpbun.com/get", .{
+    var urlBuf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/get", .{port});
+
+    // Dedicated HTTP/1.1 request with headers and query parameters
+    var response = try client.get(url, .{
         .httpVersion = .http11,
         .headers = &.{
             .{ .name = "Accept", .value = "application/json" },
-            .{ .name = "User-Agent", .value = "httpx-http11-client/0.2.0" },
+            .{ .name = "User-Agent", .value = "httpx-http11-client/" ++ httpx.version },
         },
         .query = &.{
             .{ .name = "protocol", .value = "http11" },

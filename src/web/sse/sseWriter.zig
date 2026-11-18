@@ -10,6 +10,17 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const z = @import("zigantic");
+
+const ConfigSchema = z.objectOf(.{}, .{});
+pub const Config = ConfigSchema.Value;
+
+const EventConfigSchema = z.objectOf(.{
+    .event = z.optional(z.string(.{})),
+    .id = z.optional(z.nonNegativeInt(u64, .{})),
+    .retryMs = z.optional(z.nonNegativeInt(u32, .{})),
+}, .{});
+pub const EventConfig = EventConfigSchema.Value;
 
 pub const Error = error{
     OutOfMemory,
@@ -19,80 +30,93 @@ pub const Error = error{
 /// Serializes SSE events into an output list.
 pub const EventWriter = struct {
     allocator: Allocator,
+    io: std.Io,
+    out: std.ArrayList(u8) = .empty,
 
-    pub fn init(allocator: Allocator) EventWriter {
-        return .{ .allocator = allocator };
+    pub fn init(allocator: Allocator, io: std.Io, comptime cfg: Config) EventWriter {
+        comptime {
+            _ = cfg;
+        }
+        return .{ .allocator = allocator, .io = io };
+    }
+
+    pub fn deinit(self: *EventWriter) void {
+        self.out.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    pub fn buffered(self: *const EventWriter) []const u8 {
+        return self.out.items;
     }
 
     /// Serializes one event block.
     pub fn writeEvent(
         self: *EventWriter,
-        out: *std.ArrayList(u8),
         dataLines: []const []const u8,
-        eventType: ?[]const u8,
-        lastEventId: ?u64,
-        retryMs: ?u32,
+        cfg: EventConfig,
     ) Error!void {
-        if (retryMs) |r| {
+        var scratch: [1024]u8 = undefined;
+        if (z.checkFirst(EventConfigSchema, cfg, &scratch, .{}) catch return error.InvalidField) |issue| {
+            _ = issue;
+            return error.InvalidField;
+        }
+        if (cfg.retryMs) |r| {
             var buf: [16]u8 = undefined;
             const s = std.fmt.bufPrint(&buf, "retry:{d}\n", .{r}) catch return;
-            try out.appendSlice(self.allocator, s);
+            try self.out.appendSlice(self.allocator, s);
         }
-        if (lastEventId) |id| {
+        if (cfg.id) |id| {
             var buf: [24]u8 = undefined;
             const s = std.fmt.bufPrint(&buf, "id:{d}\n", .{id}) catch return;
-            try out.appendSlice(self.allocator, s);
+            try self.out.appendSlice(self.allocator, s);
         }
-        if (eventType) |t| {
+        if (cfg.event) |t| {
             // Event type must not contain newline (would forge fields)
             if (std.mem.indexOfAny(u8, t, "\r\n") != null) return error.InvalidField;
-            try out.appendSlice(self.allocator, "event:");
-            try out.appendSlice(self.allocator, t);
-            try out.appendSlice(self.allocator, "\n");
+            try self.out.appendSlice(self.allocator, "event:");
+            try self.out.appendSlice(self.allocator, t);
+            try self.out.appendSlice(self.allocator, "\n");
         }
         for (dataLines) |line| {
-            try out.appendSlice(self.allocator, "data:");
-            try out.appendSlice(self.allocator, line);
-            try out.appendSlice(self.allocator, "\n");
+            try self.out.appendSlice(self.allocator, "data:");
+            try self.out.appendSlice(self.allocator, line);
+            try self.out.appendSlice(self.allocator, "\n");
         }
-        try out.appendSlice(self.allocator, "\n");
+        try self.out.appendSlice(self.allocator, "\n");
     }
 
     /// Comment keep-alive frame (":" prefix). Clients ignore payload.
-    pub fn writeComment(self: *EventWriter, out: *std.ArrayList(u8), comment: []const u8) !void {
-        try out.appendSlice(self.allocator, ":");
-        try out.appendSlice(self.allocator, comment);
-        try out.appendSlice(self.allocator, "\n\n");
+    pub fn writeComment(self: *EventWriter, comment: []const u8) !void {
+        try self.out.appendSlice(self.allocator, ":");
+        try self.out.appendSlice(self.allocator, comment);
+        try self.out.appendSlice(self.allocator, "\n\n");
     }
 };
 
 test "writer produces canonical output" {
     const a = std.testing.allocator;
-    var w = EventWriter.init(a);
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(a);
+    var w = EventWriter.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
+    defer w.deinit();
 
-    try w.writeEvent(&out, &.{ "hello", "world" }, "greeting", 42, 3000);
+    try w.writeEvent(&.{ "hello", "world" }, .{ .event = "greeting", .id = 42, .retryMs = 3000 });
 
     const expected = "retry:3000\nid:42\nevent:greeting\ndata:hello\ndata:world\n\n";
-    try std.testing.expectEqualStrings(expected, out.items);
+    try std.testing.expectEqualStrings(expected, w.buffered());
 }
 
 test "writer rejects newline in event type" {
     const a = std.testing.allocator;
-    var w = EventWriter.init(a);
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(a);
+    var w = EventWriter.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
+    defer w.deinit();
 
-    try std.testing.expectError(Error.InvalidField, w.writeEvent(&out, &.{"x"}, "bad\ntype", null, null));
+    try std.testing.expectError(Error.InvalidField, w.writeEvent(&.{"x"}, .{ .event = "bad\ntype" }));
 }
 
 test "comment keepalive format" {
     const a = std.testing.allocator;
-    var w = EventWriter.init(a);
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit(a);
+    var w = EventWriter.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
+    defer w.deinit();
 
-    try w.writeComment(&out, "keep-alive");
-    try std.testing.expectEqualStrings(":keep-alive\n\n", out.items);
+    try w.writeComment("keep-alive");
+    try std.testing.expectEqualStrings(":keep-alive\n\n", w.buffered());
 }

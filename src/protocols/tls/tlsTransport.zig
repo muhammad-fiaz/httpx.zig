@@ -12,6 +12,17 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const z = @import("zigantic");
+
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
 
 pub const tls = std.crypto.tls;
 const maxCipher = tls.max_ciphertext_record_len;
@@ -26,12 +37,13 @@ pub const VerifyMode = enum {
     none,
 };
 
-pub const ConnectionOptions = struct {
-    /// Allow peer FIN without TLS closeNotify to end the stream. INSECURE
-    /// unless the application layer verifies completeness itself (HTTP
-    /// Content-Length / chunked framing does). Default: false.
-    allowTruncation: bool = false,
-};
+const ConnectionOptionsSchema = z.objectOf(.{
+    // Allow peer FIN without TLS closeNotify to end the stream. INSECURE
+    // unless the application layer verifies completeness itself (HTTP
+    // Content-Length / chunked framing does). Default: false.
+    .allowTruncation = z.withDefault(z.boolean(.{}), false),
+}, .{});
+pub const ConnectionOptions = ConnectionOptionsSchema.Value;
 
 pub const InitError = error{
     IoRequired,
@@ -66,23 +78,16 @@ pub const Connection = struct {
     pub const ReadError = error{ ReadFailed, OutOfMemory };
     pub const WriteError = error{WriteFailed};
 
-    pub const Config = struct {
-        /// Borrowed socket handle. The caller remains responsible for closing
-        /// it after destroying the TLS connection.
-        socketHandle: std.Io.net.Socket.Handle,
-        host: []const u8 = "",
-        verify: VerifyMode = .caBundle,
-        /// Borrowed trust bundle. The TLS client should pass its retained
-        /// allocator-owned store here so system trust is scanned once per
-        /// client. If omitted, roots are scanned into a temporary bundle
-        /// allocated by the caller for this handshake.
-        caBundle: ?*std.crypto.Certificate.Bundle = null,
-        /// Synchronizes access to `caBundle` when it is shared. If omitted,
-        /// the lock protects this synchronous handshake only.
-        caBundleLock: ?*std.Io.RwLock = null,
-        allowTruncation: bool = false,
-        io: std.Io,
-    };
+    pub const ConfigSchema = z.objectOf(.{
+        .socketHandle = typedSchema(std.Io.net.Socket.Handle),
+        .host = z.withDefault(z.string(.{}), ""),
+        .verify = z.withDefault(z.enumType(VerifyMode, .{}), .caBundle),
+        .caBundle = z.optional(typedSchema(*std.crypto.Certificate.Bundle)),
+        .caBundleLock = z.optional(typedSchema(*std.Io.RwLock)),
+        .allowTruncation = z.withDefault(z.boolean(.{}), false),
+        .io = typedSchema(std.Io),
+    }, .{});
+    pub const Config = ConfigSchema.Value;
 
     /// Handshakes synchronously. Returns a HEAP pointer because tls.Client
     /// captures addresses of our reader/writer interfaces — this struct must

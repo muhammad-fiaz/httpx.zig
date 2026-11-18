@@ -23,7 +23,7 @@ pub fn main() !void {
     try server.get("/api/status", statusHandler);
 
     // SPA fallback: serves existing files from ./dist, or falls back to index.html
-    try server.spa("/", "./dist");
+    try server.spa(.{ .mount = "/", .root = "./dist" });
 
     server.run();
 }
@@ -50,7 +50,7 @@ HTTPX uses an explicit, controlled SPA fallback policy rather than returning `in
 ## Configuration Options
 
 ```zig
-try httpx.web.spa.register(&server.router, .{
+try httpx.static.spa.register(&server.router, .{
     .root = "./dist",
     .fallback = "index.html",
     .mount = "/",

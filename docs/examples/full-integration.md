@@ -67,8 +67,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 2,
+        .limits = .{ .maxConnections = 2 },
     });
     defer server.deinit();
 
@@ -112,7 +111,7 @@ pub fn main() !void {
 
     std.debug.print("[integration] Client sending POST {s} with JSON...\n", .{usersUrl});
     var res2 = try client.post(usersUrl, .{
-        .json = UserPayload{
+        .json = .{
             .name = "Alice",
             .role = "Administrator",
         },

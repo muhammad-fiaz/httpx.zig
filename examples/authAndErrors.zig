@@ -32,7 +32,7 @@ fn customNotFound(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
 
 // 2. Custom 500 / Exception handler
 fn customErrorHandler(ctx: *httpx.router.Context, err: anyerror) anyerror!httpx.router.Response {
-    return try ctx.renderJsonStatus(500, .{
+    return try ctx.jsonStatus(500, .{
         .status = 500,
         .errorName = @errorName(err),
         .message = "An unhandled server exception occurred.",
@@ -54,7 +54,7 @@ fn handleRestrictedBearer(ctx: *httpx.router.Context) anyerror!httpx.router.Resp
         return ctx.htmlStatus(403, "<h1>403 Forbidden</h1><p>Invalid credentials provided.</p>");
     }
 
-    return try ctx.renderJson(SecretData{
+    return try ctx.json(SecretData{
         .role = "admin",
         .secretCode = "ALPHA-OMEGA-99",
     });
@@ -70,7 +70,7 @@ fn handleRestrictedBasic(ctx: *httpx.router.Context) anyerror!httpx.router.Respo
         return ctx.htmlStatus(403, "<h1>403 Forbidden</h1><p>Invalid username or password.</p>");
     }
 
-    return try ctx.renderJson(SecretData{
+    return try ctx.json(SecretData{
         .role = "manager",
         .secretCode = "BETA-KAPPA-42",
     });
@@ -94,7 +94,6 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
     });
     defer server.deinit();
 

@@ -15,8 +15,9 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    std.debug.print("==> HTTPX HTML Extraction Subsystem Demo\n\n", .{});
+    std.debug.print("Extracted metadata:\n", .{});
 
     const htmlContent =
         \\<!DOCTYPE html>
@@ -46,8 +47,7 @@ pub fn main() !void {
         \\</html>
     ;
 
-    var p = httpx.parsing.Parser.init(allocator, .{});
-    var doc = try p.parseHtml(htmlContent);
+    var doc = try httpx.parsing.init(allocator, io, .{}).parseHtml(htmlContent);
     defer doc.deinit();
 
     // 1. Metadata
@@ -57,11 +57,11 @@ pub fn main() !void {
     std.debug.print("  Description: {s}\n", .{meta.description});
     std.debug.print("  OG Title: {s}\n", .{meta.ogTitle});
     std.debug.print("  OG URL: {s}\n", .{meta.ogUrl});
-    std.debug.print("  Canonical: {s}\n\n", .{meta.canonical});
+    std.debug.print("  Canonical: {s}\n", .{meta.canonical});
 
     // 2. Images
     const imgs = try doc.images();
-    std.debug.print("Images ({d}):\n", .{imgs.len});
+    std.debug.print("\nImages ({d}):\n", .{imgs.len});
     for (imgs) |img| {
         std.debug.print("  - src={s}, alt='{s}', dims={s}x{s}\n", .{ img.src, img.alt, img.width, img.height });
     }
@@ -75,6 +75,4 @@ pub fn main() !void {
             std.debug.print("    - name='{s}', kind='{s}'\n", .{ fld.name, fld.kind });
         }
     }
-
-    std.debug.print("\nExtraction verification successful.\n", .{});
 }

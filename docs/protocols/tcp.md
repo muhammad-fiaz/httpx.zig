@@ -8,7 +8,7 @@ HTTPX provides zero-allocation abstractions over native OS Transmission Control 
 * **Linux**: POSIX stream sockets.
 * **macOS**: BSD sockets.
 
-## Socket Operations (`httpx.tcp.Socket`)
+## Socket Operations (`httpx.tcp`)
 
 ```zig
 var socket = try httpx.tcp.connect(io, "93.184.216.34", 80);
@@ -29,10 +29,10 @@ const n = try socket.read(&buf);
 | `isAlive()` | Local close-guard state |
 | `netSocketHandle()` | Raw handle for tuning |
 
-## Listener (`httpx.tcp.Listener`)
+## Listening (`httpx.tcp.listen`)
 
 ```zig
-var listener = try httpx.tcp.Listener.bind(io, 0);
+var listener = try httpx.tcp.listen(allocator, io, .{});
 defer listener.close(io);
 const port = listener.localPort();
 var conn = try listener.accept(io);

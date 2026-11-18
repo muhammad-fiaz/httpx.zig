@@ -42,8 +42,3 @@ Encoded byte counts vary with header values; stream IDs follow QUIC client-initi
 ```bash
 zig build run-http3-quic
 ```
-
-## What to Verify
-
-- Control-stream SETTINGS exchange validates.
-- Request streams build valid HEADERS + DATA.

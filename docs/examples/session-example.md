@@ -45,8 +45,3 @@ Statuses, bodies, URLs, and ports vary with the request and the ephemeral port s
 ```bash
 zig build run-session-server
 ```
-
-## What to Verify
-
-- `GET /login` returns 200.
-- `GET /dashboard` without a session returns 401.

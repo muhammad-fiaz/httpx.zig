@@ -2,7 +2,7 @@
 
 Send JSON request bodies and inspect structured responses.
 
-## Demo Program
+## Example
 
 ```zig
 const std = @import("std");
@@ -13,18 +13,40 @@ const CreateUser = struct {
     role: []const u8,
 };
 
+fn postHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
+    return .{
+        .status = 200,
+        .body = try std.fmt.allocPrint(ctx.allocator, "{{\"status\":\"created\",\"received\":{s}}}", .{ctx.body}),
+        .contentType = "application/json",
+    };
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
+    var server = try httpx.Server.init(allocator, io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .limits = .{ .maxConnections = 1 },
+    });
+    defer server.deinit();
+    try server.router.add(.POST, "/post", postHandler, .{});
+    const port = server.localPort();
+    const thread = try server.start();
+    defer thread.join();
+
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var response = try client.fetch("https://httpbun.com/post", .{
-        .method = .POST,
-        .json = CreateUser{ .name = "Alice", .role = "developer" },
+    var urlBuf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/post", .{port});
+
+    // POST with typed JSON struct
+    var response = try client.post(url, .{
+        .json = .{ .name = "Alice", .role = "developer" },
     });
     defer response.deinit();
 
@@ -47,8 +69,3 @@ The status code and echoed body depend on the remote server's response; the body
 ```bash
 zig build run-post-json
 ```
-
-## What to Verify
-
-- Response status is successful.
-- Echoed body includes sent JSON payload.

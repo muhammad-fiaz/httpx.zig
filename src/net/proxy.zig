@@ -14,26 +14,7 @@
 
 const std = @import("std");
 const parseMod = @import("../common/parse.zig");
-
-pub const Scheme = enum {
-    http,
-    https,
-    ws,
-    wss,
-    ftp,
-    ftps,
-
-    pub fn defaultPort(self: Scheme) u16 {
-        return switch (self) {
-            .http => 80,
-            .https => 443,
-            .ws => 80,
-            .wss => 443,
-            .ftp => 21,
-            .ftps => 990,
-        };
-    }
-};
+const z = @import("zigantic");
 
 pub const ProxyKind = enum {
     direct,
@@ -44,31 +25,42 @@ pub const ProxyKind = enum {
     socks4,
 };
 
-pub const DialStrategy = struct {
-    kind: ProxyKind,
-    proxyHost: []const u8 = "",
-    proxyPort: u16 = 0,
-    username: ?[]const u8 = null,
-    password: ?[]const u8 = null,
-    /// SOCKS5H flag: delegate destination resolution to the proxy.
-    remoteDns: bool = false,
+const DialStrategySchema = z.objectOf(.{
+    .kind = z.enumType(ProxyKind, .{}),
+    .proxyHost = z.withDefault(z.string(.{}), ""),
+    .proxyPort = z.withDefault(z.integer(u16, .{}), 0),
+    .username = z.optional(z.string(.{})),
+    .password = z.optional(z.string(.{})),
+    .remoteDns = z.withDefault(z.boolean(.{}), false),
+}, .{});
+pub const DialStrategy = DialStrategySchema.Value;
 
-    /// True when the CALLER must not resolve destHost locally
-    /// (SOCKS5H / SOCKS4a semantics).
-    pub fn needsLocalDns(self: *const DialStrategy) bool {
-        return switch (self.kind) {
-            .direct => true,
-            .httpConnect => true, // CONNECT target may be host:port; proxy resolves
-            .socks5, .socks4 => !self.remoteDns,
-        };
-    }
+/// Parsed proxy URL.
+const ProxyUrlSchema = z.objectOf(.{
+    .kind = z.enumType(ProxyKind, .{}),
+    .host = z.string(.{ .min = 1 }),
+    .port = z.integer(u16, .{}),
+    .username = z.optional(z.string(.{})),
+    .password = z.optional(z.string(.{})),
+    .remoteDns = z.withDefault(z.boolean(.{}), false),
+}, .{});
+pub const ProxyUrl = ProxyUrlSchema.Value;
 
-    /// True when the destination host string is forwarded to a proxy that
-    /// performs name resolution.
-    pub fn proxiesDns(self: *const DialStrategy) bool {
-        return (self.kind == .socks5 or self.kind == .socks4) and self.remoteDns;
-    }
-};
+/// True when the CALLER must not resolve destHost locally
+/// (SOCKS5H / SOCKS4a semantics).
+pub fn needsLocalDns(strategy: DialStrategy) bool {
+    return switch (strategy.kind) {
+        .direct => true,
+        .httpConnect => true, // CONNECT target may be host:port; proxy resolves
+        .socks5, .socks4 => !strategy.remoteDns,
+    };
+}
+
+/// True when the destination host string is forwarded to a proxy that
+/// performs name resolution.
+pub fn proxiesDns(strategy: DialStrategy) bool {
+    return (strategy.kind == .socks5 or strategy.kind == .socks4) and strategy.remoteDns;
+}
 
 /// Parses a proxy URL of the forms:
 ///   socks5h://[user:pass@]host:port
@@ -77,7 +69,7 @@ pub const DialStrategy = struct {
 ///   socks4://[user@]host:port (IPv4 literals only)
 ///   http://[user:pass@]host:port (userinfo becomes Proxy-Authorization on CONNECT)
 /// Returns null when the text is not a recognized proxy URL.
-pub fn parseProxyUrl(url: []const u8) ?struct { kind: ProxyKind, host: []const u8, port: u16, username: ?[]const u8, password: ?[]const u8, remoteDns: bool } {
+pub fn parseProxyUrl(url: []const u8) ?ProxyUrl {
     if (url.len == 0) return null;
 
     var kind: ProxyKind = undefined;
@@ -136,12 +128,8 @@ pub fn parseProxyUrl(url: []const u8) ?struct { kind: ProxyKind, host: []const u
     };
 }
 
-/// Chooses the dial strategy for a destination URL scheme + optional proxy.
-pub fn selectStrategy(
-    proxyUrl: ?[]const u8,
-    destScheme: Scheme,
-) DialStrategy {
-    _ = destScheme;
+/// Chooses the dial strategy for an optional proxy URL.
+pub fn selectStrategy(proxyUrl: ?[]const u8) DialStrategy {
     if (proxyUrl) |u| {
         if (parseProxyUrl(u)) |p| {
             return .{
@@ -185,22 +173,22 @@ test "parse socks5 vs http defaults" {
 
 test "strategy dns delegation rules" {
     // Direct always resolves locally.
-    var st = selectStrategy(null, .https);
-    try std.testing.expect(st.needsLocalDns());
-    try std.testing.expect(!st.proxiesDns());
+    var st = selectStrategy(null);
+    try std.testing.expect(needsLocalDns(st));
+    try std.testing.expect(!proxiesDns(st));
 
     // SOCKS5 (non-h): local DNS first, then proxy connects to the IP.
-    st = selectStrategy("socks5://p:1080", .https);
-    try std.testing.expect(st.needsLocalDns());
-    try std.testing.expect(!st.proxiesDns());
+    st = selectStrategy("socks5://p:1080");
+    try std.testing.expect(needsLocalDns(st));
+    try std.testing.expect(!proxiesDns(st));
 
     // SOCKS5H: NO local DNS; hostname goes to the proxy verbatim.
-    st = selectStrategy("socks5h://p:1080", .https);
-    try std.testing.expect(!st.needsLocalDns());
-    try std.testing.expect(st.proxiesDns());
+    st = selectStrategy("socks5h://p:1080");
+    try std.testing.expect(!needsLocalDns(st));
+    try std.testing.expect(proxiesDns(st));
 
     // HTTP CONNECT: destination may be a name; proxy resolves it.
-    st = selectStrategy("http://p:3128", .https);
+    st = selectStrategy("http://p:3128");
     try std.testing.expect(st.kind == .httpConnect);
 }
 
@@ -217,13 +205,13 @@ test "parse socks4 and socks4a urls" {
     try std.testing.expect(s4a.remoteDns);
     try std.testing.expectEqual(@as(u16, 1080), s4a.port);
 
-    var st = selectStrategy("socks4://p:1080", .https);
+    var st = selectStrategy("socks4://p:1080");
     try std.testing.expect(st.kind == .socks4);
-    try std.testing.expect(st.needsLocalDns());
-    try std.testing.expect(!st.proxiesDns());
+    try std.testing.expect(needsLocalDns(st));
+    try std.testing.expect(!proxiesDns(st));
 
-    st = selectStrategy("socks4a://p:1080", .https);
+    st = selectStrategy("socks4a://p:1080");
     try std.testing.expect(st.kind == .socks4);
-    try std.testing.expect(!st.needsLocalDns());
-    try std.testing.expect(st.proxiesDns());
+    try std.testing.expect(!needsLocalDns(st));
+    try std.testing.expect(proxiesDns(st));
 }

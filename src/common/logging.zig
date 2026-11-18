@@ -25,6 +25,7 @@
 //!   - RFC 5424 — The Syslog Protocol (severity levels mapping)
 
 const std = @import("std");
+const z = @import("zigantic");
 const sync = @import("sync.zig");
 const tint = @import("tint");
 
@@ -251,19 +252,21 @@ pub const ClientEventCallback = *const fn (event: ClientEvent) void;
 //   }
 
 /// One structured key/value pair attached to a record.
-pub const Field = struct {
-    name: []const u8,
-    value: []const u8,
-};
+const FieldSchema = z.objectOf(.{
+    .name = z.string(.{}),
+    .value = z.string(.{}),
+}, .{});
+pub const Field = FieldSchema.Value;
 
 /// Structured record delivered to every sink. Secrets must be redacted by
 /// callers BEFORE constructing a Record — never put tokens here.
-pub const Record = struct {
-    level: Level,
-    component: []const u8,
-    message: []const u8,
-    fields: []const Field = &.{},
-};
+const RecordSchema = z.objectOf(.{
+    .level = z.enumType(Level, .{}),
+    .component = z.string(.{}),
+    .message = z.string(.{}),
+    .fields = z.withDefault(z.array(FieldSchema, .{}), &.{}),
+}, .{});
+pub const Record = RecordSchema.Value;
 
 /// Explicit custom-logger integration point. Implement this vtable to bridge
 /// ANY external logging library into httpx.

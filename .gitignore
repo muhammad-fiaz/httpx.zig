@@ -50,4 +50,5 @@ downloads/*.bin
 downloads/*.zip
 downloads/*.tar.gz
 downloads/*.txt
-*.txt
+*.tmp
+.graphiql-build/

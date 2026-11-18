@@ -23,71 +23,90 @@ hero:
 
 features:
   - title: All HTTP Versions
+    link: https://muhammad-fiaz.github.io/httpx.zig/guide/http3.html
     details: HTTP/1.0, HTTP/1.1, and HTTP/2 runtimes; HTTP/3 client/server runtime over QUIC with loss recovery, NewReno congestion control, flow control, and 0-RTT resumption.
   - title: Robust Client
+    link: https://muhammad-fiaz.github.io/httpx.zig/guide/client-basics.html
     details: Connection pooling, automatic retries, a typed API, and default-safe chainable config/option overrides.
   - title: Powerful Server
+    link: https://muhammad-fiaz.github.io/httpx.zig/guide/routing.html
     details: Pattern-based routing, middleware support, context-based handling, ETag-aware static file helpers, and explicit port conflict startup strategies.
   - title: Concurrent
+    link: https://muhammad-fiaz.github.io/httpx.zig/guide/concurrency.html
     details: Async task executor and parallel request patterns (all, any, race).
   - title: TLS Security
+    link: https://muhammad-fiaz.github.io/httpx.zig/guide/tls.html
     details: Native TLS 1.3 server and client paths, TLS 1.2 client interoperability, custom CAs, and verification policies.
-  - title: Low-level Control
-    details: Direct access to sockets, buffers, protocol parsers, and HPACK/QPACK compression.
+  - title: Advanced Protocol Access
+    link: https://muhammad-fiaz.github.io/httpx.zig/api/protocol.html
+    details: Optional standalone HTTP/1, HTTP/2, HTTP/3, QUIC, and TLS types for protocol work; ordinary client and server code never needs to construct frames or packets.
   - title: MIME Ready
+    link: https://muhammad-fiaz.github.io/httpx.zig/api/content-types.html
     details: Case-insensitive MIME detection for common web/document/media/font/archive formats with explicit fallback override.
 ---
 
 ## Latest Benchmark Snapshot
 
-Benchmark target: `x86_64-windows`, `ReleaseFast` (measured 2026-10-09, httpx v0.2.3, Zig 0.17.0).
+Benchmark target: `x86_64-windows`, `ReleaseFast` (measured 2026-11-08, httpx v0.2.4, Zig 0.17.0).
 
-| Benchmark | Category | Avg Latency | Throughput | Target |
-| :--- | :--- | :---: | :---: | :---: |
-| `headers_parse` | Core Operations | 271.30 ns/op | **3686008 ops/sec** | `x86_64-windows` |
-| `uri_parse` | Core Operations | 30.42 ns/op | **32871921 ops/sec** | `x86_64-windows` |
-| `status_lookup` | Core Operations | 3.16 ns/op | **316829675 ops/sec** | `x86_64-windows` |
-| `method_lookup` | Core Operations | 22.05 ns/op | **45347669 ops/sec** | `x86_64-windows` |
-| `http1_request_head` | Core Operations | 46.39 ns/op | **21554557 ops/sec** | `x86_64-windows` |
-| `http1_header_block` | Core Operations | 292.25 ns/op | **3421724 ops/sec** | `x86_64-windows` |
-| `router_static_match` | Routing | 300.20 ns/op | **3331168 ops/sec** | `x86_64-windows` |
-| `router_param_match` | Routing | 374.60 ns/op | **2669548 ops/sec** | `x86_64-windows` |
-| `router_dispatch` | Routing | 304.44 ns/op | **3284695 ops/sec** | `x86_64-windows` |
-| `router_typed_match` | Routing | 389.81 ns/op | **2565368 ops/sec** | `x86_64-windows` |
-| `router_miss_404` | Routing | 518.20 ns/op | **1929753 ops/sec** | `x86_64-windows` |
-| `router_reverse` | Routing | 123.88 ns/op | **8072640 ops/sec** | `x86_64-windows` |
-| `json_stringify` | Serialization | 243.83 ns/op | **4101157 ops/sec** | `x86_64-windows` |
-| `json_parse` | Serialization | 365.35 ns/op | **2737138 ops/sec** | `x86_64-windows` |
-| `basic_auth_encode` | Security | 36.74 ns/op | **27220513 ops/sec** | `x86_64-windows` |
-| `basic_auth_decode` | Security | 14.66 ns/op | **68220269 ops/sec** | `x86_64-windows` |
-| `bearer_token_parse` | Security | 1.07 ns/op | **935663759 ops/sec** | `x86_64-windows` |
-| `gzip_compress` | Compression | 24.71 µs/op | **40466 ops/sec** | `x86_64-windows` |
-| `gzip_decompress` | Compression | 8.99 µs/op | **111290 ops/sec** | `x86_64-windows` |
-| `deflate_compress` | Compression | 19.69 µs/op | **50780 ops/sec** | `x86_64-windows` |
-| `deflate_decompress` | Compression | 7.60 µs/op | **131503 ops/sec** | `x86_64-windows` |
-| `html_parse` | Parsing | 22.68 µs/op | **44096 ops/sec** | `x86_64-windows` |
-| `template_parse` | Parsing | 2.80 µs/op | **356959 ops/sec** | `x86_64-windows` |
-| `template_render` | Parsing | 1.75 µs/op | **569931 ops/sec** | `x86_64-windows` |
-| `template_incremental` | Parsing | 24.64 µs/op | **40581 ops/sec** | `x86_64-windows` |
-| `json_feed_parse` | Parsing | 4.12 µs/op | **242809 ops/sec** | `x86_64-windows` |
-| `live_reload_inject` | Parsing | 230.46 ns/op | **4339210 ops/sec** | `x86_64-windows` |
-| `watcher_scan` | Watcher | 1.16 ms/op | **865 ops/sec** | `x86_64-windows` |
-| `watcher_deps` | Watcher | 3.90 µs/op | **256433 ops/sec** | `x86_64-windows` |
-| `worker_pool_submit` | Concurrency | 238.37 ns/op | **4195121 ops/sec** | `x86_64-windows` |
-| `concurrency_queue` | Concurrency | 50.50 ns/op | **19801039 ops/sec** | `x86_64-windows` |
-| `dns_cache_hit` | DNS | 56.17 ns/op | **17802432 ops/sec** | `x86_64-windows` |
-| `h2_frame_header` | Protocols | 1.05 ns/op | **954162054 ops/sec** | `x86_64-windows` |
-| `hpack_int_encode` | Protocols | 1.43 ns/op | **700020300 ops/sec** | `x86_64-windows` |
-| `hpack_int_decode` | Protocols | 4.12 ns/op | **242468915 ops/sec** | `x86_64-windows` |
-| `h3_varint_encode` | Protocols | 1.54 ns/op | **647320417 ops/sec** | `x86_64-windows` |
-| `h3_varint_decode` | Protocols | 1.57 ns/op | **637649369 ops/sec** | `x86_64-windows` |
-| `tls_record_seal` | TLS | 1.29 µs/op | **777763 ops/sec** | `x86_64-windows` |
-| `tls_cert_parse` | TLS | 1.04 µs/op | **961840 ops/sec** | `x86_64-windows` |
-| `client_server_get` | Network | 54.61 µs/op | **18310 req/sec** | `x86_64-windows` |
-| `h2_pooled_get` | Network | 48.72 µs/op | **20524 req/sec** | `x86_64-windows` |
-| `h3_get` | Network | 206.02 ms/op | **4 req/sec** | `x86_64-windows` |
-| `tls_full_handshake` | TLS | 3.40 ms/op | **294 ops/sec** | `x86_64-windows` |
-| `tls_resumed_handshake` | TLS | 2.85 ms/op | **350 ops/sec** | `x86_64-windows` |
+| Benchmark | Category | Avg Latency | Throughput |
+| :--- | :--- | :---: | :---: |
+| `headers_parse` | Core Operations | 221.49 ns/op | **4514882 ops/sec** |
+| `uri_parse` | Core Operations | 68.36 ns/op | **14629208 ops/sec** |
+| `status_lookup` | Core Operations | 2.35 ns/op | **426368322 ops/sec** |
+| `method_lookup` | Core Operations | 14.10 ns/op | **70926462 ops/sec** |
+| `http1_request_head` | Core Operations | 20.30 ns/op | **49253077 ops/sec** |
+| `http1_header_block` | Core Operations | 193.31 ns/op | **5173027 ops/sec** |
+| `authority_parse` | Core Operations | 11.01 ns/op | **90813324 ops/sec** |
+| `percent_decode` | Core Operations | 30.32 ns/op | **32984902 ops/sec** |
+| `percent_encode` | Core Operations | 22.21 ns/op | **45022331 ops/sec** |
+| `cookie_param_iter` | Core Operations | 78.80 ns/op | **12689936 ops/sec** |
+| `token_list_scan` | Core Operations | 28.72 ns/op | **34819911 ops/sec** |
+| `query_param_lookup` | Core Operations | 39.31 ns/op | **25440178 ops/sec** |
+| `router_static_match` | Routing | 286.30 ns/op | **3492798 ops/sec** |
+| `router_param_match` | Routing | 331.05 ns/op | **3020703 ops/sec** |
+| `router_dispatch` | Routing | 283.97 ns/op | **3521482 ops/sec** |
+| `router_typed_match` | Routing | 328.54 ns/op | **3043773 ops/sec** |
+| `router_miss_404` | Routing | 460.00 ns/op | **2173910 ops/sec** |
+| `router_reverse` | Routing | 59.07 ns/op | **16928035 ops/sec** |
+| `json_stringify` | Serialization | 190.77 ns/op | **5241977 ops/sec** |
+| `json_parse` | Serialization | 279.62 ns/op | **3576328 ops/sec** |
+| `basic_auth_encode` | Security | 24.54 ns/op | **40753615 ops/sec** |
+| `basic_auth_decode` | Security | 13.80 ns/op | **72442770 ops/sec** |
+| `bearer_token_parse` | Security | 1.06 ns/op | **947292637 ops/sec** |
+| `gzip_compress` | Compression | 15.46 µs/op | **64674 ops/sec** |
+| `gzip_decompress` | Compression | 4.26 µs/op | **234965 ops/sec** |
+| `deflate_compress` | Compression | 14.10 µs/op | **70932 ops/sec** |
+| `deflate_decompress` | Compression | 4.30 µs/op | **232776 ops/sec** |
+| `html_parse` | Parsing | 12.00 µs/op | **83305 ops/sec** |
+| `html_parse_large` | Parsing | 20.50 ms/op | **48 pages/sec** |
+| `template_parse` | Parsing | 2.49 µs/op | **401097 ops/sec** |
+| `template_render` | Parsing | 1.40 µs/op | **716827 ops/sec** |
+| `template_incremental` | Parsing | 44.49 µs/op | **22475 ops/sec** |
+| `json_feed_parse` | Parsing | 3.35 µs/op | **298141 ops/sec** |
+| `live_reload_inject` | Parsing | 224.73 ns/op | **4449817 ops/sec** |
+| `watcher_scan` | Watcher | 650.99 µs/op | **1536 ops/sec** |
+| `watcher_deps` | Watcher | 3.41 µs/op | **292948 ops/sec** |
+| `static_safe_join` | Static Files | 92.25 ns/op | **10839673 ops/sec** |
+| `spa_fallback_policy` | SPA | 94.22 ns/op | **10613590 ops/sec** |
+| `worker_pool_submit` | Concurrency | 211.88 ns/op | **4719654 ops/sec** |
+| `concurrency_queue` | Concurrency | 23.03 ns/op | **43413329 ops/sec** |
+| `dns_cache_hit` | DNS | 87.81 ns/op | **11387939 ops/sec** |
+| `h2_frame_header` | Protocols | 2.32 ns/op | **431721142 ops/sec** |
+| `hpack_int_encode` | Protocols | 3.37 ns/op | **296837199 ops/sec** |
+| `hpack_int_decode` | Protocols | 8.76 ns/op | **114207791 ops/sec** |
+| `qpack_int_encode` | Protocols | 3.39 ns/op | **295036599 ops/sec** |
+| `qpack_int_decode` | Protocols | 2.15 ns/op | **464634355 ops/sec** |
+| `h3_frame_header` | Protocols | 2.40 ns/op | **416396009 ops/sec** |
+| `h3_varint_encode` | Protocols | 3.15 ns/op | **317430086 ops/sec** |
+| `h3_varint_decode` | Protocols | 2.96 ns/op | **338002271 ops/sec** |
+| `tls_record_seal` | TLS | 1.09 µs/op | **919299 ops/sec** |
+| `tls_cert_parse` | TLS | 993.24 ns/op | **1006806 ops/sec** |
+| `client_server_get` | Network | 80.86 µs/op | **12366 req/sec** |
+| `h2_pooled_get` | Network | 51.48 µs/op | **19423 req/sec** |
+| `h3_get` | Network | 203.15 ms/op | **4 req/sec** |
+| `tls_full_handshake` | TLS | 3.42 ms/op | **292 ops/sec** |
+| `tls_resumed_handshake` | TLS | 2.78 ms/op | **359 ops/sec** |
 
 
 Detailed methodology and analysis: [Benchmarks Reference](/reference/benchmarks).
@@ -96,20 +115,16 @@ Detailed methodology and analysis: [Benchmarks Reference](/reference/benchmarks)
 
 ### Method 1: Zig Fetch (Recommended)
 
-**Latest Release (v0.2.3)**
+**Latest Release (v0.2.4)**
 
 ```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.3.tar.gz
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.4.tar.gz
 ```
 
-**Previous Release (v0.2.2)**
-
-```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.2.tar.gz
-```
-
-> [!WARNING]
-> Zig **0.17** is required by **v0.2.3**. Zig **0.16** is deprecated and supported only by **v0.2.1**, and Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.17.0+** with **httpx.zig v0.2.3**.
+> [!NOTE]
+> **httpx.zig** requires Zig **0.17.0+**.
+>
+> For documentation matching older releases of `httpx.zig`, checkout that release's tag and generate local documentation using `zig build docs`, which emits native HTML documentation into `zig-out/docs/`.
 
 ### Method 2: Zig Fetch (Latest Development Build)
 
@@ -124,14 +139,14 @@ zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 ```zig
 .dependencies = .{
   .httpx = .{
-    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.3.tar.gz",
+    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.4.tar.gz",
     .hash = "<actual-hash-generated-by-zig-fetch>", // Run `zig fetch --save <url>` to generate the hash.
   },
 },
 ```
 
-::: tip Release maturity
-httpx.zig is built with production-readiness as a core goal. It is still a relatively new project, so adoption is growing. You can use it in real projects while tracking changelogs between releases.
+::: tip Release status
+This documentation describes `httpx.zig` `v0.2.4` for Zig `0.17.0`.
 :::
 
 ::: tip Related Zig Projects
@@ -163,17 +178,32 @@ Zig's standard library does not provide HTTP/2, HTTP/3, QUIC, or an ALPN hook. *
 - **QPACK** header compression (RFC 9204) with static/dynamic tables and decoder/encoder stream instructions for HTTP/3
 - **QUIC** transport frame encoding/decoding (RFC 9000) with RESET_STREAM/STOP_SENDING cancellation, ACK/loss recovery, NewReno congestion control, flow control, transport parameters, 0-RTT resumption, and RFC 9001 handshake confirmation/key discard
 - **HTTP/3** frame types, SETTINGS, GOAWAY, and CONNECTION_CLOSE handling
-- **Interop note:** strict TLS-in-QUIC server negotiation expectations may vary by endpoint deployment
+:::
+
+## Capabilities
+
+| Area | Coverage |
+|------|----------|
+| HTTP client and server | HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3 with connection pooling, retries, redirects, timeouts, and streaming |
+| Web framework | Routing, middleware, typed REST, GraphQL, multipart, cookies, sessions, authentication, static files, templates, SPA hosting, OpenAPI, and documentation UIs |
+| Protocols | Native HTTP/1.x, HTTP/2 (HPACK), HTTP/3 (QPACK), QUIC, TLS 1.3, TLS 1.2 client transport, FTP, and FTPS |
+| Data and operations | JSON with declarative schemas, HTML/XML/feed parsing, compression, downloads, metrics, health checks, CORS, CSRF, and rate limiting |
+
+::: tip Advanced protocol APIs
+High-level `httpx.Client` and `httpx.Server` manage framing, HPACK/QPACK, QUIC
+packets, TLS records, pooling, and cleanup internally. Use the standalone
+`httpx.http1`, `httpx.http2`, `httpx.http3`, `httpx.quic`, and `httpx.tls`
+types when you need protocol-level control.
 :::
 
 ## Protocol Support
 
-| Protocol | Status | Transport | Notes |
-|----------|--------|-----------|-------|
-| HTTP/1.0 | ✅ Full | TCP | Legacy support |
-| HTTP/1.1 | ✅ Full | TCP/TLS | Default protocol |
-| HTTP/2 | ✅ Full | TCP/TLS | Client + server runtime (ALPN `h2` / h2c) plus framing/HPACK/stream primitives |
-| HTTP/3 | ✅ Reliable paths | QUIC/TLS | Client + server runtime (ALPN `h3`) with loss recovery, NewReno congestion control, flow control, transport parameters, 0-RTT resumption, RFC 9001 handshake confirmation/key discard, Retry/token validation, v1/v2 version negotiation, key updates, and connection pooling for sequential reuse; no HelloRetryRequest, migration, server push, or datagrams |
+| Protocol | Transport | Capabilities |
+|----------|-----------|--------------|
+| HTTP/1.0 | TCP | Legacy message handling |
+| HTTP/1.1 | TCP/TLS | Default protocol with keep-alive, chunked transfer, and `100-continue` |
+| HTTP/2 | TCP/TLS | Client and server runtime (ALPN `h2` / h2c), multiplexing, HPACK, flow control, and connection pooling |
+| HTTP/3 | QUIC/TLS | Client and server runtime (ALPN `h3`), QPACK, loss recovery, congestion control, flow control, Retry validation, version negotiation, key updates, 0-RTT, and connection pooling |
 
 ## Platform Support
 
@@ -181,16 +211,16 @@ httpx.zig is validated across Linux, Windows, and macOS:
 
 | Platform | x86_64 | aarch64 | x86 |
 |----------|--------|---------|-----|
-| Linux    | ✅     | ✅      | ✅  |
-| Windows  | ✅     | ✅      | ✅  |
-| macOS    | ✅     | ✅      | ❌  |
+| Linux    | Yes     | Yes      | Yes  |
+| Windows  | Yes     | Yes      | Yes  |
+| macOS    | Yes     | Yes      | No  |
 
 ## Examples
 
 All examples are runnable from the repo root:
 
 ```bash
-zig build run-all-simple_get
+zig build run-simple-get
 ```
 
 Runnable examples live in `examples/` (see the [README](https://github.com/muhammad-fiaz/httpx.zig#examples)
@@ -206,10 +236,10 @@ for the full list), including:
 - `sessionServer.zig`: cookie-based session flow
 - `healthCheck.zig`: liveness/readiness probes
 - `proxyDemo.zig`: HTTP proxy and SOCKS5h tunneling
-- `concurrentDemo.zig`: parallel getAll / requestAll
+- `concurrentDemo.zig`: concurrent requests with worker pool
 - `connectionPool.zig`: keep-alive pooling
 - `staticFiles.zig`, `staticSite.zig`, `staticEmbedded.zig`: filesystem, site, and single-file embedded assets
-- `spaServer.zig`, `spaFallback.zig`: single-page applications
+- `server.zig`, `spaFallback.zig`: single-page applications
 - `http2Client.zig`, `http2Multiplex.zig`: HTTP/2 and HPACK
 - `http3Client.zig`, `http3Quic.zig`: HTTP/3, QPACK, and QUIC framing
 - `tlsServer.zig`, `tlsGet.zig`, `tlsMtls.zig`: TLS listener and identities
@@ -247,11 +277,23 @@ zig build run-simple-get -Dtarget=x86_64-linux-gnu
 For production client code, prefer explicit timeout + error handling so failures surface immediately:
 
 ```zig
-var response = client.get(url, .{ .timeoutMs = 10_000 }) catch |err| {
-  std.debug.print("request failed: {s}\n", .{@errorName(err)});
-  return;
-};
-defer response.deinit();
+fn fetchHealth(allocator: std.mem.Allocator, io: std.Io) !void {
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
+
+    var response = client.get("https://api.example.com/health", .{
+        .timeoutMs = 10_000,
+    }) catch |err| {
+        std.debug.print("request failed: {s}\n", .{@errorName(err)});
+        return err;
+    };
+    defer response.deinit();
+
+    if (!response.isSuccess()) {
+        std.debug.print("unexpected status: {d}\n", .{response.status});
+        return error.HttpStatusError;
+    }
+}
 ```
 
 For detailed target-matrix instructions, see [Installation](/guide/installation#validation-and-target-matrix).

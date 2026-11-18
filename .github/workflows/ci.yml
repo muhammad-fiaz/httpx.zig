@@ -110,8 +110,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: x86-macos, target: x86-macos }
           - { name: arm-linux-gnueabihf, target: arm-linux-gnueabihf }
+          - { name: aarch64-windows, target: aarch64-windows }
           - { name: x86-freestanding, target: x86-freestanding }
     steps:
       - uses: actions/checkout@v7

@@ -74,6 +74,26 @@ pub const DEFAULT_SERVER_PREFERENCE = [_]Protocol{ .h3, .h2, .@"http/1.1", .@"ht
 /// h3 is QUIC-only (RFC 9114) and must not be advertised on TCP.
 pub const DEFAULT_TCP_PREFERENCE = [_]Protocol{ .h2, .@"http/1.1", .@"http/1.0" };
 
+/// Server preference lists for the enabled protocol set. The server picks the
+/// first list whose protocols it actually serves, so the wire order always
+/// matches the enabled versions.
+pub const PREFERENCES = struct {
+    /// h2 + http/1.1 + http/1.0
+    pub const h2_http11_http10 = [_]Protocol{ .h2, .@"http/1.1", .@"http/1.0" };
+    /// h2 + http/1.1
+    pub const h2_http11 = [_]Protocol{ .h2, .@"http/1.1" };
+    /// h2 + http/1.0
+    pub const h2_http10 = [_]Protocol{ .h2, .@"http/1.0" };
+    /// h2 only
+    pub const h2 = [_]Protocol{.h2};
+    /// http/1.1 + http/1.0
+    pub const http11_http10 = [_]Protocol{ .@"http/1.1", .@"http/1.0" };
+    /// http/1.1 only
+    pub const http11 = [_]Protocol{.@"http/1.1"};
+    /// http/1.0 only
+    pub const http10 = [_]Protocol{.@"http/1.0"};
+};
+
 /// Parses an ALPN ProtocolNameList body (without extension header):
 /// sequence of u8-length-prefixed names.
 pub fn parseList(allocator: Allocator, body: []const u8) Error![]const []const u8 {

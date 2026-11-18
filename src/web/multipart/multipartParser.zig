@@ -7,100 +7,212 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const parseMod = @import("../../common/parse.zig");
+const z = @import("zigantic");
 const common = @import("multipartCommon.zig");
+const headersMod = @import("../../common/headers.zig");
 
 // Limits
 
-pub const Limits = struct {
-    /// Maximum boundary length (RFC 2046: ≤70 without "--" prefix).
-    maxBoundaryLen: usize = 70,
-    /// Maximum number of parts (0 = unlimited).
-    maxParts: usize = 1024,
-    /// Maximum single header line length in bytes.
-    maxHeaderLine: usize = 8192,
-    /// Maximum total headers size per part in bytes.
-    maxHeadersSize: usize = 16384,
-    /// Maximum number of headers per part (0 = unlimited).
-    maxHeaders: usize = 128,
-    /// Maximum single part body size in bytes (0 = unlimited).
-    maxPartSize: usize = 16 * 1024 * 1024,
-    /// Maximum total part body size in bytes (0 = unlimited).
-    maxTotalSize: usize = 64 * 1024 * 1024,
-    /// Maximum field name length.
-    maxFieldName: usize = 1024,
-    /// Maximum filename length.
-    maxFilename: usize = 4096,
-    /// Maximum Content-Type value length.
-    maxContentType: usize = 4096,
-    /// Maximum preamble size (0 = unlimited).
-    maxPreambleSize: usize = 64 * 1024,
-    /// Maximum epilogue size (0 = unlimited).
-    maxEpilogueSize: usize = 64 * 1024,
-    /// Maximum wire bytes (0 = unlimited).
-    maxWireSize: usize = 128 * 1024 * 1024,
-    /// Maximum buffered bytes in StreamParser (0 = unlimited).
-    maxBuffered: usize = 1024 * 1024,
+/// Limit profiles. Every profile shares one field set; only the defaults
+/// differ, so the schema stays the single source of truth for bounds.
+const Profile = enum { base, strict, relaxed };
 
-    pub const strict = Limits{
-        .maxBoundaryLen = 70,
-        .maxParts = 256,
-        .maxHeaderLine = 4096,
-        .maxHeadersSize = 8192,
-        .maxHeaders = 64,
-        .maxPartSize = 10 * 1024 * 1024,
-        .maxTotalSize = 50 * 1024 * 1024,
-        .maxFieldName = 512,
-        .maxFilename = 1024,
-        .maxContentType = 1024,
-        .maxPreambleSize = 16 * 1024,
-        .maxEpilogueSize = 16 * 1024,
-        .maxWireSize = 64 * 1024 * 1024,
-        .maxBuffered = 256 * 1024,
+fn limitSchema(comptime field: LimitField, comptime profile: Profile) type {
+    return switch (field) {
+        .boundaryLen => z.withDefault(z.integer(usize, .{ .min = 1, .max = 70 }), 70),
+        .parts => z.withDefault(z.nonNegativeInt(usize, .{}), switch (profile) {
+            .base => 1024,
+            .strict => 256,
+            .relaxed => 8192,
+        }),
+        .headerLine => z.withDefault(z.positiveInt(usize, .{}), switch (profile) {
+            .base => 8192,
+            .strict => 4096,
+            .relaxed => 16384,
+        }),
+        .headersSize => z.withDefault(z.positiveInt(usize, .{}), switch (profile) {
+            .base => 16384,
+            .strict => 8192,
+            .relaxed => 65536,
+        }),
+        .headers => z.withDefault(z.nonNegativeInt(usize, .{}), switch (profile) {
+            .base => 128,
+            .strict => 64,
+            .relaxed => 512,
+        }),
+        .partSize => z.withDefault(z.nonNegativeInt(usize, .{}), switch (profile) {
+            .base => 16 * 1024 * 1024,
+            .strict => 10 * 1024 * 1024,
+            .relaxed => 0,
+        }),
+        .totalSize => z.withDefault(z.nonNegativeInt(usize, .{}), switch (profile) {
+            .base => 64 * 1024 * 1024,
+            .strict => 50 * 1024 * 1024,
+            .relaxed => 0,
+        }),
+        .fieldName => z.withDefault(z.positiveInt(usize, .{}), switch (profile) {
+            .base => 1024,
+            .strict => 512,
+            .relaxed => 4096,
+        }),
+        .filename => z.withDefault(z.positiveInt(usize, .{}), switch (profile) {
+            .base => 4096,
+            .strict => 1024,
+            .relaxed => 16384,
+        }),
+        .contentType => z.withDefault(z.positiveInt(usize, .{}), switch (profile) {
+            .base => 4096,
+            .strict => 1024,
+            .relaxed => 16384,
+        }),
+        .preambleSize => z.withDefault(z.nonNegativeInt(usize, .{}), switch (profile) {
+            .base => 64 * 1024,
+            .strict => 16 * 1024,
+            .relaxed => 0,
+        }),
+        .epilogueSize => z.withDefault(z.nonNegativeInt(usize, .{}), switch (profile) {
+            .base => 64 * 1024,
+            .strict => 16 * 1024,
+            .relaxed => 0,
+        }),
+        .wireSize => z.withDefault(z.nonNegativeInt(usize, .{}), switch (profile) {
+            .base => 128 * 1024 * 1024,
+            .strict => 64 * 1024 * 1024,
+            .relaxed => 0,
+        }),
+        .buffered => z.withDefault(z.nonNegativeInt(usize, .{}), switch (profile) {
+            .base => 1024 * 1024,
+            .strict => 256 * 1024,
+            .relaxed => 0,
+        }),
     };
+}
 
-    pub const relaxed = Limits{
-        .maxBoundaryLen = 70,
-        .maxParts = 8192,
-        .maxHeaderLine = 16384,
-        .maxHeadersSize = 65536,
-        .maxHeaders = 512,
-        .maxPartSize = 0,
-        .maxTotalSize = 0,
-        .maxFieldName = 4096,
-        .maxFilename = 16384,
-        .maxContentType = 16384,
-        .maxPreambleSize = 0,
-        .maxEpilogueSize = 0,
-        .maxWireSize = 0,
-        .maxBuffered = 0,
-    };
+/// One limit field of the multipart parser.
+const LimitField = enum {
+    boundaryLen,
+    parts,
+    headerLine,
+    headersSize,
+    headers,
+    partSize,
+    totalSize,
+    fieldName,
+    filename,
+    contentType,
+    preambleSize,
+    epilogueSize,
+    wireSize,
+    buffered,
 };
+
+fn limitsSchema(comptime profile: Profile) type {
+    return z.objectOf(.{
+        .maxBoundaryLen = limitSchema(.boundaryLen, profile),
+        .maxParts = limitSchema(.parts, profile),
+        .maxHeaderLine = limitSchema(.headerLine, profile),
+        .maxHeadersSize = limitSchema(.headersSize, profile),
+        .maxHeaders = limitSchema(.headers, profile),
+        .maxPartSize = limitSchema(.partSize, profile),
+        .maxTotalSize = limitSchema(.totalSize, profile),
+        .maxFieldName = limitSchema(.fieldName, profile),
+        .maxFilename = limitSchema(.filename, profile),
+        .maxContentType = limitSchema(.contentType, profile),
+        .maxPreambleSize = limitSchema(.preambleSize, profile),
+        .maxEpilogueSize = limitSchema(.epilogueSize, profile),
+        .maxWireSize = limitSchema(.wireSize, profile),
+        .maxBuffered = limitSchema(.buffered, profile),
+    }, .{});
+}
+
+pub const LimitsSchema = limitsSchema(.base);
+pub const Limits = LimitsSchema.Value;
+pub const strict = limitsSchema(.strict).Value;
+pub const relaxed = limitsSchema(.relaxed).Value;
 
 // Field
 
-pub const Field = struct {
-    name: []const u8,
-    filename: ?[]const u8 = null,
-    filenameStar: ?FilenameStar = null,
-    contentType: []const u8 = "",
-    contentTransferEncoding: ?[]const u8 = null,
-    data: []const u8,
-    headers: []const Header = &.{},
+pub const HeaderSchema = headersMod.HeaderSchema;
+pub const Header = headersMod.Header;
+
+pub const FilenameStarSchema = z.objectOf(.{
+    .charset = z.withDefault(z.string(.{}), ""),
+    .language = z.withDefault(z.string(.{}), ""),
+    // Raw RFC 8187 value as it appeared in the header.
+    .value = z.string(.{}),
+    // Percent-decoded bytes. For UTF-8 this is the preferred filename.
+    .decoded = z.withDefault(z.string(.{}), ""),
+}, .{});
+pub const FilenameStar = FilenameStarSchema.Value;
+
+pub const FieldSchema = z.objectOf(.{
+    .name = z.string(.{}),
+    .filename = z.optional(z.string(.{})),
+    .filenameStar = z.optional(FilenameStarSchema),
+    .contentType = z.withDefault(z.string(.{}), ""),
+    .contentTransferEncoding = z.optional(z.string(.{})),
+    .data = z.string(.{}),
+    .headers = z.withDefault(z.array(HeaderSchema, .{}), &.{}),
+}, .{});
+pub const Field = FieldSchema.Value;
+
+/// Per-decoder resource limits. Input body bytes remain borrowed for the
+/// lifetime of the returned fields; metadata is allocated by the decoder.
+pub const DecoderOptionsSchema = z.objectOf(.{
+    .limits = z.withDefault(LimitsSchema, .{}),
+}, .{});
+pub const DecoderOptions = DecoderOptionsSchema.Value;
+
+/// Stateful facade that keeps allocator, I/O context, and limits together.
+/// `parse` returns owned metadata and body slices borrowed from its input.
+pub const Decoder = struct {
+    allocator: Allocator,
+    io: std.Io,
+    limits: Limits,
+
+    pub fn init(allocator: Allocator, io: std.Io, options: DecoderOptions) error{InvalidOptions}!Decoder {
+        var scratch: [4096]u8 = undefined;
+        const issue = z.checkFirst(DecoderOptionsSchema, options, &scratch, .{}) catch
+            return error.InvalidOptions;
+        if (issue != null) return error.InvalidOptions;
+        return .{ .allocator = allocator, .io = io, .limits = options.limits };
+    }
+
+    pub fn deinit(_: *Decoder) void {}
+
+    pub fn parse(self: *Decoder, body: []const u8, content_type: []const u8) ParseError![]Field {
+        const body_boundary = extractBoundary(content_type) orelse return ParseError.MissingBoundary;
+        const subtype = detectSubtype(content_type);
+        const require_form_data = if (subtype) |value| std.ascii.eqlIgnoreCase(value, "form-data") else false;
+        return parseMultipartInternal(self.allocator, body, body_boundary, self.limits, require_form_data);
+    }
+
+    /// Parses a complete body when the boundary is already available.
+    pub fn parseBoundary(self: *Decoder, body: []const u8, boundary: []const u8) ParseError![]Field {
+        return parseMultipart(self.allocator, body, boundary, self.limits);
+    }
+
+    /// Starts incremental parsing using the boundary and subtype from a
+    /// Content-Type value. The returned stream parser is owned by the caller.
+    pub fn stream(self: *Decoder, content_type: []const u8) ParseError!StreamParser {
+        const body_boundary = extractBoundary(content_type) orelse return ParseError.MissingBoundary;
+        const subtype = detectSubtype(content_type);
+        const require_form_data = if (subtype) |value| std.ascii.eqlIgnoreCase(value, "form-data") else false;
+        return StreamParser.init(self.allocator, .{
+            .boundary = body_boundary,
+            .requireFormData = require_form_data,
+            .limits = self.limits,
+        });
+    }
+
+    pub fn free(self: *Decoder, fields: []Field) void {
+        freeFieldsAlloc(self.allocator, fields);
+    }
 };
 
-pub const FilenameStar = struct {
-    charset: []const u8 = "",
-    language: []const u8 = "",
-    /// Raw RFC 8187 value as it appeared in the header.
-    value: []const u8 = "",
-    /// Percent-decoded bytes. For UTF-8 this is the preferred filename.
-    decoded: []const u8 = "",
-};
-
-pub const Header = struct {
-    name: []const u8,
-    value: []const u8,
-};
+/// Constructs the stateful decoder facade with allocator, I/O context, and
+/// direct options, matching `httpx.multipart.stream.decoder.init(...)`.
+pub const init = Decoder.init;
 
 /// Returns the best available filename, preferring a decoded UTF-8
 /// `filename*` when present.
@@ -142,29 +254,6 @@ pub const ParseError = error{
     OutOfMemory,
 };
 
-// Parser
-
-pub const Parser = struct {
-    allocator: Allocator,
-    limits: Limits,
-
-    pub fn init(allocator: Allocator, limits: Limits) Parser {
-        return .{ .allocator = allocator, .limits = limits };
-    }
-
-    pub fn parse(self: *Parser, body: []const u8, boundary: []const u8) ParseError![]Field {
-        return parseMultipart(self.allocator, body, boundary, self.limits);
-    }
-
-    pub fn parseFormData(self: *Parser, body: []const u8, boundary: []const u8) ParseError![]Field {
-        return parseMultipartInternal(self.allocator, body, boundary, self.limits, true);
-    }
-
-    pub fn parseContentType(self: *Parser, body: []const u8, contentType: []const u8) ParseError![]Field {
-        return parseBody(self.allocator, body, contentType, self.limits);
-    }
-};
-
 /// An incremental parser event. `partBegin` metadata borrows the parser's
 /// scratch arena and remains valid only until the next call to `next()`.
 /// `partData` is an owned allocation from the parser allocator; the caller
@@ -180,6 +269,35 @@ pub const StreamEvent = union(enum) {
     partEnd,
     done,
 };
+
+const Parser = struct {
+    allocator: Allocator,
+    limits: Limits,
+
+    fn init(allocator: Allocator, limits: Limits) Parser {
+        return .{ .allocator = allocator, .limits = limits };
+    }
+
+    fn parse(self: *Parser, body: []const u8, boundary: []const u8) ParseError![]Field {
+        return parseMultipart(self.allocator, body, boundary, self.limits);
+    }
+
+    fn parseFormData(self: *Parser, body: []const u8, boundary: []const u8) ParseError![]Field {
+        return parseMultipartInternal(self.allocator, body, boundary, self.limits, true);
+    }
+
+    fn parseContentType(self: *Parser, body: []const u8, content_type: []const u8) ParseError![]Field {
+        return parseBody(self.allocator, body, content_type, self.limits);
+    }
+};
+
+/// Stream parser configuration.
+const StreamOptionsSchema = z.objectOf(.{
+    .boundary = z.string(.{ .min = 1 }),
+    .requireFormData = z.withDefault(z.boolean(.{}), true),
+    .limits = z.withDefault(LimitsSchema, .{}),
+}, .{});
+pub const StreamOptions = StreamOptionsSchema.Value;
 
 pub const StreamParser = struct {
     allocator: Allocator,
@@ -209,26 +327,20 @@ pub const StreamParser = struct {
         closed,
     };
 
-    pub fn init(allocator: Allocator, boundary: []const u8, limits: Limits) ParseError!StreamParser {
-        return initWithSubtype(allocator, boundary, true, limits);
-    }
-
-    pub fn initWithSubtype(
-        allocator: Allocator,
-        boundary: []const u8,
-        require_form_data: bool,
-        limits: Limits,
-    ) ParseError!StreamParser {
+    /// Creates a stream parser. `.{}` keeps the default limits and requires
+    /// a `form-data` disposition.
+    pub fn init(allocator: Allocator, opts: StreamOptions) ParseError!StreamParser {
+        const boundary = opts.boundary;
         if (boundary.len == 0) return ParseError.InvalidBoundary;
-        if (boundary.len > limits.maxBoundaryLen) return ParseError.BoundaryTooLong;
+        if (boundary.len > opts.limits.maxBoundaryLen) return ParseError.BoundaryTooLong;
         if (!common.validateBoundary(boundary)) return ParseError.InvalidBoundary;
 
         var sp = StreamParser{
             .allocator = allocator,
             .arena = std.heap.ArenaAllocator.init(allocator),
             .boundary = boundary,
-            .limits = limits,
-            .require_form_data = require_form_data,
+            .limits = opts.limits,
+            .require_form_data = opts.requireFormData,
             .buffer = .empty,
         };
         const d = std.fmt.bufPrint(&sp.delimBuf, "--{s}", .{boundary}) catch return ParseError.InvalidBoundary;
@@ -430,18 +542,18 @@ pub const StreamParser = struct {
 
 /// Parses a full multipart body with default limits. Field names, filenames,
 /// and Content-Type values are owned; release with `freeFields`.
-pub fn parse(allocator: Allocator, body: []const u8, boundary: []const u8) ParseError![]Field {
+fn parse(allocator: Allocator, body: []const u8, boundary: []const u8) ParseError![]Field {
     return parseMultipart(allocator, body, boundary, .{});
 }
 
 /// Parses a complete body and requires `multipart/form-data` part semantics.
-pub fn parseFormData(allocator: Allocator, body: []const u8, boundary: []const u8, limits: Limits) ParseError![]Field {
+fn parseFormData(allocator: Allocator, body: []const u8, boundary: []const u8, limits: Limits) ParseError![]Field {
     return parseMultipartInternal(allocator, body, boundary, limits, true);
 }
 
 /// Extracts the boundary and subtype from a Content-Type header and parses the
 /// body. `multipart/form-data` inputs require a valid name parameter.
-pub fn parseBody(allocator: Allocator, body: []const u8, contentType: []const u8, limits: Limits) ParseError![]Field {
+fn parseBody(allocator: Allocator, body: []const u8, contentType: []const u8, limits: Limits) ParseError![]Field {
     const boundary = extractBoundary(contentType) orelse return ParseError.MissingBoundary;
     const subtype = detectSubtype(contentType);
     const require_form_data = if (subtype) |s| std.ascii.eqlIgnoreCase(s, "form-data") else false;
@@ -450,7 +562,7 @@ pub fn parseBody(allocator: Allocator, body: []const u8, contentType: []const u8
 
 /// Parses with custom allocator and limits. For multipart/form-data use
 /// `parseFormData` or `parseBody` so missing names are rejected.
-pub fn parseMultipart(allocator: Allocator, body: []const u8, boundary: []const u8, limits: Limits) ParseError![]Field {
+fn parseMultipart(allocator: Allocator, body: []const u8, boundary: []const u8, limits: Limits) ParseError![]Field {
     return parseMultipartInternal(allocator, body, boundary, limits, false);
 }
 
@@ -552,11 +664,11 @@ fn checkEpilogue(epilogue: []const u8, limits: Limits) ParseError!void {
         return ParseError.EpilogueTooLarge;
 }
 
-pub fn freeFields(allocator: Allocator, fields: []Field) void {
+fn freeFields(allocator: Allocator, fields: []Field) void {
     freeFieldsAlloc(allocator, fields);
 }
 
-pub fn freeFieldsAlloc(allocator: Allocator, fields: []Field) void {
+fn freeFieldsAlloc(allocator: Allocator, fields: []Field) void {
     for (fields) |*f| freeField(allocator, f);
     allocator.free(fields);
 }
@@ -1185,7 +1297,7 @@ test "parses extra headers" {
 
 test "StreamParser processes multipart stream and emits events" {
     const a = std.testing.allocator;
-    var sp = try StreamParser.init(a, "myboundary", .{});
+    var sp = try StreamParser.init(a, .{ .boundary = "myboundary" });
     defer sp.deinit();
 
     const body =
@@ -1252,7 +1364,7 @@ test "StreamParser processes multipart stream and emits events" {
 
 test "StreamParser incremental 1-byte feed test" {
     const a = std.testing.allocator;
-    var sp = try StreamParser.init(a, "B", .{});
+    var sp = try StreamParser.init(a, .{ .boundary = "B" });
     defer sp.deinit();
 
     const body =
@@ -1295,7 +1407,7 @@ test "StreamParser incremental 1-byte feed test" {
 }
 
 test "StreamParser enforces maxBuffered without losing queued bytes" {
-    var sp = try StreamParser.init(std.testing.allocator, "B", .{ .maxBuffered = 3 });
+    var sp = try StreamParser.init(std.testing.allocator, .{ .boundary = "B", .limits = .{ .maxBuffered = 3 } });
     defer sp.deinit();
 
     try sp.feed("abc");
@@ -1373,7 +1485,7 @@ test "preamble and epilogue limits" {
 }
 
 test "StreamParser finish detects truncation" {
-    var sp = try StreamParser.init(std.testing.allocator, "B", .{});
+    var sp = try StreamParser.init(std.testing.allocator, .{ .boundary = "B" });
     defer sp.deinit();
     try sp.feed("--B\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\ndata");
     while (try sp.next()) |ev| switch (ev) {

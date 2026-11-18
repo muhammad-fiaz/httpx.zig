@@ -1,34 +1,25 @@
-//! Library identity - version string and server token.
+//! Library identity and default documentation metadata.
 //!
-//! Provides the canonical library name and version, used in `Server`
-//! response headers (RFC 9110 Section 12.5.3) and user-agent string
-//! construction (RFC 9110 Section 10.1.5).
-//!
-//! References:
-//!   - RFC 9110 Section 10.1.5 - User-Agent
-//!   - RFC 9110 Section 12.5.3 - Server Header Field
+//! One zigantic schema is the single source of truth: the OpenAPI document,
+//! the `Server` header, and the client `User-Agent` all read the same values,
+//! so the library can never advertise two different versions.
 
 const std = @import("std");
+const z = @import("zigantic");
 
-pub const name = "httpx";
-pub const version = "0.2.3";
-pub const userAgent = "httpx/0.2.3";
+/// Default metadata for generated API documentation, the `Server` header,
+/// and the client `User-Agent`.
+const InfoSchema = z.objectOf(.{
+    .title = z.withDefault(z.string(.{ .min = 1 }), "HTTPX API"),
+    .version = z.withDefault(z.string(.{ .min = 1 }), "0.2.4"),
+    .description = z.withDefault(z.string(.{}), "A Fast, High-Performance HTTP Client and Server Library for Zig."),
+}, .{});
+pub const Info = InfoSchema.Value;
 
-pub const Info = struct {
-    title: []const u8 = "HTTPX API",
-    version: []const u8 = "0.2.3",
-    description: []const u8 = "Fast, modern web framework for Zig with automated OpenAPI & GraphQL documentation.",
-};
-
+/// The schema defaults, used wherever the library identifies itself.
 pub const defaultInfo: Info = .{};
 
-/// Server header value, e.g. "httpx/0.2.3".
-pub fn serverToken(buf: []u8) []const u8 {
-    return std.fmt.bufPrint(buf, "{s}/{s}", .{ name, version }) catch "";
-}
-
-test "server token format" {
-    var buf: [32]u8 = undefined;
-    try std.testing.expectEqualStrings("httpx/0.2.3", serverToken(&buf));
-    try std.testing.expectEqualStrings("httpx/0.2.3", userAgent);
+test "version identity" {
+    try std.testing.expectEqualStrings("HTTPX API", defaultInfo.title);
+    try std.testing.expectEqualStrings("0.2.4", defaultInfo.version);
 }

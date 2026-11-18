@@ -20,7 +20,6 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
     });
     defer server.deinit();
     try server.router.add(.GET, "/sample-local-pdf.pdf", pdfHandler, .{});
@@ -30,8 +29,6 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    std.debug.print("==> Downloading with SHA256SUMS file parsing & verification...\n", .{});
-
     // Sample checksum file format simulation
     const checksumManifest =
         \\# Official Release Hashes
@@ -40,7 +37,7 @@ pub fn main() !void {
     ;
 
     const targetFilename = "sample-local-pdf.pdf";
-    const expectedHash = httpx.client.parseChecksumFile(checksumManifest, targetFilename);
+    const expectedHash = httpx.client.download.parseChecksumFile(checksumManifest, targetFilename);
 
     if (expectedHash) |hash| {
         std.debug.print("Parsed hash for {s}: {s}\n", .{ targetFilename, hash });

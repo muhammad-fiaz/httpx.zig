@@ -5,10 +5,9 @@ serve results from normal handlers. See `examples/concurrentDemo.zig` for
 parallel client requests.
 
 ```zig
-var ctx = try httpx.IoContext.init(allocator);
-defer ctx.deinit();
+const io = std.Io.Threaded.global_single_threaded.io();
 
-var pool = try httpx.concurrency.Pool.init(allocator, ctx.io, .{
+var pool = try httpx.concurrency.Pool.init(allocator, io, .{
     .workers = 4,
     .queueCapacity = 1024,
     .autoStart = true,
@@ -39,8 +38,3 @@ Status values reflect the live endpoints and body lengths vary per response.
 ```bash
 zig build run-concurrent-demo
 ```
-
-## What to Verify
-
-- Parallel `getAll` / `requestAll` calls all return 200.
-- The worker pool submits background jobs without stalling request handling.

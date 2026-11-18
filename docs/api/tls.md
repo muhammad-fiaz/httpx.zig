@@ -25,41 +25,41 @@ its own TLS 1.3 handshake paths**, including:
 
 | Feature | TLS 1.2 (std transport) | TLS 1.3 (native) |
 |---------|-------------------------|------------------|
-| X25519 key exchange | ✅ | ✅ |
-| AES-128-GCM | ✅ | ✅ |
-| AES-256-GCM | ✅ | ✅ |
-| ChaCha20-Poly1305 | ✅ | ✅ |
-| ECDSA P-256 certificate signing | -- | ✅ |
-| Certificate loading (PEM) | ✅ | ✅ |
-| Certificate chain verification | ✅ | ✅ (both sides) |
-| ALPN negotiation | -- | ✅ |
-| SNI extension | ✅ | ✅ (DNS names) |
-| Handshake message encryption | -- | ✅ |
-| Cipher suite selection from client list | -- | ✅ |
-| Mutual TLS enforcement | -- | ✅ |
+| X25519 key exchange | Yes | Yes |
+| AES-128-GCM | Yes | Yes |
+| AES-256-GCM | Yes | Yes |
+| ChaCha20-Poly1305 | Yes | Yes |
+| ECDSA P-256 certificate signing | -- | Yes |
+| Certificate loading (PEM) | Yes | Yes |
+| Certificate chain verification | Yes | Yes (both sides) |
+| ALPN negotiation | -- | Yes |
+| SNI extension | Yes | Yes (DNS names) |
+| Handshake message encryption | -- | Yes |
+| Cipher suite selection from client list | -- | Yes |
+| Mutual TLS enforcement | -- | Yes |
 | Post-handshake `KeyUpdate` | -- | Yes (both roles, RFC 9846 sender cap) |
-| PSK resumption (`psk_dhe_ke` NST tickets) | -- | ✅ (native paths; std HTTPS/1.1 always full handshake) |
-| HelloRetryRequest | -- | ✅ (both sides, single-retry guard) |
+| PSK resumption (`psk_dhe_ke` NST tickets) | -- | Yes (native paths; std HTTPS/1.1 always full handshake) |
+| HelloRetryRequest | -- | Yes (both sides, single-retry guard) |
 | 0-RTT early data | -- | Opt-in via `.earlyData = .{ .enabled = true }`; safe methods by default and bounded `ReplayCache` defense |
 
 ## Architecture
 
 ```
 tls.zig              -- Client/Server owners, Session, Certificate, TrustStore
-├── client.zig       -- Client owner + native TLS client transport
-├── server.zig       -- Server owner + native TLS server transport
-├── engine.zig       -- (internal) TLS 1.3 handshake engine, key schedule
-├── quicTls.zig      -- RFC 9001 key schedule for TLS-in-QUIC
-├── transport.zig    -- (internal) std-based HTTPS/1.1 client transport
-├── handshake.zig    -- handshake message encode/decode, transcript
-├── record.zig       -- record-layer AEAD encrypt/decrypt
-├── certificate.zig  -- X.509 parsing (+ structural DER guard)
-├── verify.zig       -- chain/hostname verification
-├── trustStore.zig  -- system + custom trust anchors
-├── config.zig       -- shared enums (versions, client-auth modes)
-├── alpn.zig         -- ALPN protocol negotiation
-├── key.zig          -- private key parsing (zeroed after use)
-└── errors.zig       -- Unified TLS error set and alert conversion
++-- client.zig       -- Client owner + native TLS client transport
++-- server.zig       -- Server owner + native TLS server transport
++-- engine.zig       -- (internal) TLS 1.3 handshake engine, key schedule
++-- quicTls.zig      -- RFC 9001 key schedule for TLS-in-QUIC
++-- transport.zig    -- (internal) std-based HTTPS/1.1 client transport
++-- handshake.zig    -- handshake message encode/decode, transcript
++-- record.zig       -- record-layer AEAD encrypt/decrypt
++-- certificate.zig  -- X.509 parsing (+ structural DER guard)
++-- verify.zig       -- chain/hostname verification
++-- trustStore.zig  -- system + custom trust anchors
++-- config.zig       -- shared enums (versions, client-auth modes)
++-- alpn.zig         -- ALPN protocol negotiation
++-- key.zig          -- private key parsing (zeroed after use)
++-- errors.zig       -- Unified TLS error set and alert conversion
 ```
 
 The public API is two owners — `httpx.tls.Client` and
@@ -171,22 +171,23 @@ var server = try httpx.Server.init(allocator, io, .{
         .certificatePem = @embedFile("cert.pem"),
         .privateKeyPem = @embedFile("key.pem"),
     },
-    .http2 = true,
+    .protocols = .{ .http2 = true },
 });
 ```
 
-For a standalone TLS listener, use `httpx.tls.Listener`:
+For HTTPS, pass the identity to `httpx.Server`:
 
 ```zig
-var listener = try httpx.tls.Listener.init(allocator, io, .{
+var server = try httpx.Server.init(allocator, io, .{
+    .host = "127.0.0.1",
     .port = 8443,
-    .defaultIdentity = .{
-        .certChainPem = @embedFile("cert.pem"),
+    .tls = .{
+        .certificatePem = @embedFile("cert.pem"),
         .privateKeyPem = @embedFile("key.pem"),
     },
 });
-defer listener.deinit();
-try listener.run(handler);
+defer server.deinit();
+try server.get("/", .{ .handler = handler });
 ```
 
 ::: tip ALPN Default
@@ -199,9 +200,9 @@ The server automatically loads the certificate chain and private key on the firs
 
 Client connections flow through the high-level client (`client.get("https://…")`),
 which performs the handshake, ALPN negotiation, hostname verification, and
-record-layer encryption internally. Server connections are accepted by
-`httpx.tls.Listener` / `Server.tls` and dispatched to HTTP/1 or HTTP/2
-handlers based on the negotiated ALPN protocol.
+record-layer encryption internally. Server connections are accepted via
+`Server.tls` and dispatched to HTTP/1 or HTTP/2 handlers based on the
+negotiated ALPN protocol.
 
 Post-handshake TLS 1.3 `KeyUpdate` records are handled transparently by
 `read`: receive keys rotate, and a peer requesting an update is answered
@@ -221,10 +222,6 @@ subsequent records.
 | `httpx.tls.Server.init(allocator, io, cfg)` | TLS server owner (identity validated once) |
 | `server.accept(&socket)` | Accept; returns an owned `Connection` |
 | `server.acceptBuffered(&socket, peeked)` | Accept with pre-read bytes |
-| `httpx.tls.Listener.init(allocator, io, cfg)` | Bind a TLS listener with `defaultIdentity` |
-| `listener.run(handler)` | Blocking accept loop |
-| `listener.stop()` | Immediate shutdown |
-| `listener.localPort()` | Actual bound port |
 | `server.setTls(certPemOrPath, keyPemOrPath)` | Rotate server identity at runtime |
 | `server.isTls()` | Whether TLS is active |
 

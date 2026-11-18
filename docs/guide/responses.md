@@ -1,6 +1,6 @@
 # Response Handling
 
-The `httpx.router.Response` object is returned by value from client operations. The caller owns the response and must call `defer response.deinit();`.
+The `httpx.Response` object is returned by value from client operations. The caller owns the response and must call `defer response.deinit();`.
 
 ```zig
 var response = try client.get("https://httpbun.com/json", .{});
@@ -22,6 +22,21 @@ const User = struct {
 const user = try response.json(User);
 ```
 
+Use quoted identifiers when JSON keys differ from ordinary Zig names:
+
+```zig
+const User = struct {
+    @"user-name": []const u8,
+    @"@context": []const u8,
+};
+
+const user = try response.json(User);
+```
+
+For dynamic shapes use `response.jsonValue()` and read keys from the returned
+object. All decoded values are owned by the response and released by
+`response.deinit()`. See [JSON typed structs](/api/data#typed-structs).
+
 ## Header Inspection
 
 Headers are queried case-insensitively:
@@ -34,13 +49,13 @@ if (response.header("Content-Type")) |ct| {
 
 ## HTML & DOM Parsing
 
-HTML responses can be parsed into a DOM document tree:
+HTML responses can be parsed into a DOM document tree from the buffered body:
 
 ```zig
-var doc = try response.html();
+var doc = try httpx.parsing.init(allocator, io, .{}).parseHtml(response.body);
 defer doc.deinit();
 
-if (doc.query("h1")) |h1| {
-    std.debug.print("Heading: {s}\n", .{h1.text()});
+if (try doc.selectFirst("h1")) |h1| {
+    std.debug.print("Heading: {s}\n", .{try h1.text()});
 }
 ```

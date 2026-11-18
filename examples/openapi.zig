@@ -5,7 +5,7 @@
 //! Demonstrates building a router with documented routes and producing
 //! the OpenAPI JSON spec to stdout. The same data drives the built-in
 //! /openapi.json, /docs (Swagger UI), and /redoc endpoints when
-//! `enableDocs` is left on.
+//! Docs are mounted explicitly with `httpx.docs.init`.
 
 const std = @import("std");
 const httpx = @import("httpx");
@@ -28,7 +28,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var router = httpx.Router.init(allocator);
+    var router = httpx.Router.init(allocator, .{});
     defer router.deinit();
     try router.add(.GET, "/widgets", listHandler, .{ .meta = .{
         .summary = "List all widgets",

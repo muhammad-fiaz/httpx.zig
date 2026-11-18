@@ -16,6 +16,18 @@
 //!   - RFC 9113 Section 8.1 — Field Requirements (lowercase names)
 
 const std = @import("std");
+const z = @import("zigantic");
+
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
+
 const Allocator = std.mem.Allocator;
 const tcp = @import("../../sockets/tcp.zig");
 const clock = @import("../../common/clock.zig");
@@ -27,6 +39,7 @@ const tlsServerMod = @import("../tls/tlsServer.zig");
 const tlsSessionMod = @import("../tls/tlsSession.zig");
 const semanticsMod = @import("../http1/semantics.zig");
 const parseMod = @import("../../common/parse.zig");
+const headersMod = @import("../../common/headers.zig");
 pub const BodySource = @import("../../common/bodySource.zig").BodySource;
 pub const SliceReader = @import("../../common/bodySource.zig").SliceReader;
 pub const Error = error{
@@ -44,7 +57,8 @@ pub const Error = error{
 pub const maxResponseBodySize: usize = 64 * 1024 * 1024;
 pub const MAX_REQUEST_BODY_SIZE: usize = 16 * 1024 * 1024;
 
-pub const Header = struct { name: []const u8, value: []const u8 };
+pub const HeaderSchema = headersMod.HeaderSchema;
+pub const Header = headersMod.Header;
 
 /// Byte mover used by the server loop. Keeping it abstract lets the
 /// high-level server reuse the same multiplexing logic over its own
@@ -803,11 +817,12 @@ pub const PooledConn = struct {
 /// sending the response (the server loop consumes them synchronously before
 /// invoking the handler again). Handlers backed by a per-request arena must
 /// duplicate response data into a longer-lived allocator.
-pub const HandlerResponse = struct {
-    status: u16 = 200,
-    headers: []const Header = &.{},
-    body: []const u8 = "",
-};
+const HandlerResponseSchema = z.objectOf(.{
+    .status = z.withDefault(z.integer(u16, .{}), 200),
+    .headers = z.withDefault(z.array(HeaderSchema, .{}), &.{}),
+    .body = z.withDefault(z.string(.{}), ""),
+}, .{});
+pub const HandlerResponse = HandlerResponseSchema.Value;
 
 pub const HandlerFn = *const fn (
     ctx: ?*anyopaque,
@@ -834,14 +849,13 @@ pub const ResponseHook = *const fn (
     extra: *std.ArrayList(Header),
 ) anyerror!?[]u8;
 
-pub const ServerOptions = struct {
-    handler: HandlerFn,
-    handlerCtx: ?*anyopaque = null,
-    /// Maximum accepted request body size.
-    maxBodySize: usize = MAX_REQUEST_BODY_SIZE,
-    /// Optional response transformation.
-    decorate: ?ResponseHook = null,
-};
+const ServerOptionsSchema = z.objectOf(.{
+    .handler = typedSchema(HandlerFn),
+    .handlerCtx = z.withDefault(typedSchema(?*anyopaque), null),
+    .maxBodySize = z.withDefault(z.positiveInt(usize, .{}), MAX_REQUEST_BODY_SIZE),
+    .decorate = z.withDefault(typedSchema(?ResponseHook), null),
+}, .{});
+pub const ServerOptions = ServerOptionsSchema.Value;
 
 /// Per-stream server state. One entry per concurrent request.
 const ServerStream = struct {
@@ -1194,10 +1208,10 @@ fn drainResponses(ctx: *ServerCtx) !void {
 
 test "http2 client and server exchange over real tcp (h2c)" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return; // skip w/o network
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var l = tcp.Listener.bind(ctx.io, 0) catch return;
+    var l = tcp.Listener.bind(ctx.io, 0) catch |err| return err;
     defer l.close(ctx.io);
     const port = l.localPort();
 
@@ -1223,7 +1237,7 @@ test "http2 client and server exchange over real tcp (h2c)" {
             serveConnection(std.heap.page_allocator, &conn, H.handle, null) catch {};
         }
     };
-    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch return;
+    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch |err| return err;
     defer thread.join();
 
     var sock = try tcp.connect(ctx.io, "127.0.0.1", port);
@@ -1257,10 +1271,10 @@ test "http2 client and server exchange over real tcp (h2c)" {
 
 test "http2 client and server exchange with request body (POST)" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var l = tcp.Listener.bind(ctx.io, 0) catch return;
+    var l = tcp.Listener.bind(ctx.io, 0) catch |err| return err;
     defer l.close(ctx.io);
     const port = l.localPort();
 
@@ -1279,7 +1293,7 @@ test "http2 client and server exchange with request body (POST)" {
             serveConnection(std.heap.page_allocator, &conn, H.handle, null) catch {};
         }
     };
-    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch return;
+    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch |err| return err;
     defer thread.join();
 
     var sock = try tcp.connect(ctx.io, "127.0.0.1", port);
@@ -1300,10 +1314,10 @@ test "http2 client and server exchange with request body (POST)" {
 
 test "http2 over native tls loopback negotiates h2 via alpn" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return; // skip w/o network
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var l = tcp.Listener.bind(ctx.io, 0) catch return;
+    var l = tcp.Listener.bind(ctx.io, 0) catch |err| return err;
     defer l.close(ctx.io);
     const port = l.localPort();
 
@@ -1350,7 +1364,7 @@ test "http2 over native tls loopback negotiates h2 via alpn" {
         }
     };
     var result: ?anyerror = error.NotRun;
-    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io, &result }) catch return;
+    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io, &result }) catch |err| return err;
 
     var sock = try tcp.connect(ctx.io, "127.0.0.1", port);
     errdefer sock.close();
@@ -1382,10 +1396,10 @@ test "http2 over native tls loopback negotiates h2 via alpn" {
 
 test "two requests are multiplexed over one connection" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var l = tcp.Listener.bind(ctx.io, 0) catch return;
+    var l = tcp.Listener.bind(ctx.io, 0) catch |err| return err;
     defer l.close(ctx.io);
     const port = l.localPort();
 
@@ -1404,7 +1418,7 @@ test "two requests are multiplexed over one connection" {
             serveConnection(std.heap.page_allocator, &conn, H.handle, null) catch {};
         }
     };
-    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch return;
+    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch |err| return err;
     defer thread.join();
 
     var sock = try tcp.connect(ctx.io, "127.0.0.1", port);
@@ -1432,10 +1446,10 @@ test "two requests are multiplexed over one connection" {
 
 test "streaming request drops its stream when the body producer fails" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var l = tcp.Listener.bind(ctx.io, 0) catch return;
+    var l = tcp.Listener.bind(ctx.io, 0) catch |err| return err;
     defer l.close(ctx.io);
     const port = l.localPort();
 
@@ -1451,7 +1465,7 @@ test "streaming request drops its stream when the body producer fails" {
             serveConnection(std.heap.page_allocator, &conn, H.handle, null) catch {};
         }
     };
-    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch return;
+    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch |err| return err;
     defer thread.join();
 
     var sock = try tcp.connect(ctx.io, "127.0.0.1", port);
@@ -1484,10 +1498,10 @@ test "streaming request drops its stream when the body producer fails" {
 
 test "a response larger than the flow-control window is delivered completely" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var l = tcp.Listener.bind(ctx.io, 0) catch return;
+    var l = tcp.Listener.bind(ctx.io, 0) catch |err| return err;
     defer l.close(ctx.io);
     const port = l.localPort();
 
@@ -1510,7 +1524,7 @@ test "a response larger than the flow-control window is delivered completely" {
             serveConnection(std.heap.page_allocator, &conn, H.handle, null) catch {};
         }
     };
-    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch return;
+    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch |err| return err;
     defer thread.join();
 
     var sock = try tcp.connect(ctx.io, "127.0.0.1", port);
@@ -1529,10 +1543,10 @@ test "a response larger than the flow-control window is delivered completely" {
 
 test "an empty response body ends the stream" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var l = tcp.Listener.bind(ctx.io, 0) catch return;
+    var l = tcp.Listener.bind(ctx.io, 0) catch |err| return err;
     defer l.close(ctx.io);
     const port = l.localPort();
 
@@ -1549,7 +1563,7 @@ test "an empty response body ends the stream" {
             serveConnection(std.heap.page_allocator, &conn, H.handle, null) catch {};
         }
     };
-    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch return;
+    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch |err| return err;
     defer thread.join();
 
     var sock = try tcp.connect(ctx.io, "127.0.0.1", port);
@@ -1567,10 +1581,10 @@ test "an empty response body ends the stream" {
 
 test "a HEAD request returns the headers without a body" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var l = tcp.Listener.bind(ctx.io, 0) catch return;
+    var l = tcp.Listener.bind(ctx.io, 0) catch |err| return err;
     defer l.close(ctx.io);
     const port = l.localPort();
 
@@ -1587,7 +1601,7 @@ test "a HEAD request returns the headers without a body" {
             serveConnection(std.heap.page_allocator, &conn, H.handle, null) catch {};
         }
     };
-    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch return;
+    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch |err| return err;
     defer thread.join();
 
     var sock = try tcp.connect(ctx.io, "127.0.0.1", port);
@@ -1613,10 +1627,10 @@ test "a HEAD request returns the headers without a body" {
 
 test "a lowercase head method is not treated as HEAD" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var l = tcp.Listener.bind(ctx.io, 0) catch return;
+    var l = tcp.Listener.bind(ctx.io, 0) catch |err| return err;
     defer l.close(ctx.io);
     const port = l.localPort();
 
@@ -1633,7 +1647,7 @@ test "a lowercase head method is not treated as HEAD" {
             serveConnection(std.heap.page_allocator, &conn, H.handle, null) catch {};
         }
     };
-    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch return;
+    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch |err| return err;
     defer thread.join();
 
     var sock = try tcp.connect(ctx.io, "127.0.0.1", port);
@@ -1651,10 +1665,10 @@ test "a lowercase head method is not treated as HEAD" {
 
 test "a 2xx CONNECT response is tunneled without content-length" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var l = tcp.Listener.bind(ctx.io, 0) catch return;
+    var l = tcp.Listener.bind(ctx.io, 0) catch |err| return err;
     defer l.close(ctx.io);
     const port = l.localPort();
 
@@ -1671,7 +1685,7 @@ test "a 2xx CONNECT response is tunneled without content-length" {
             serveConnection(std.heap.page_allocator, &conn, H.handle, null) catch {};
         }
     };
-    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch return;
+    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch |err| return err;
     defer thread.join();
 
     var sock = try tcp.connect(ctx.io, "127.0.0.1", port);
@@ -1692,10 +1706,10 @@ test "a 2xx CONNECT response is tunneled without content-length" {
 
 test "a request body larger than the flow-control window is sent completely" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var l = tcp.Listener.bind(ctx.io, 0) catch return;
+    var l = tcp.Listener.bind(ctx.io, 0) catch |err| return err;
     defer l.close(ctx.io);
     const port = l.localPort();
 
@@ -1711,7 +1725,7 @@ test "a request body larger than the flow-control window is sent completely" {
             serveConnection(std.heap.page_allocator, &conn, H.handle, null) catch {};
         }
     };
-    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch return;
+    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch |err| return err;
     defer thread.join();
 
     var sock = try tcp.connect(ctx.io, "127.0.0.1", port);

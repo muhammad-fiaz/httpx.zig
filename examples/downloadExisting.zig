@@ -20,7 +20,6 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
     });
     defer server.deinit();
     try server.router.add(.GET, "/sample-local-pdf.pdf", pdfHandler, .{});
@@ -32,7 +31,6 @@ pub fn main() !void {
 
     var urlBuf: [64]u8 = undefined;
     const sampleUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/sample-local-pdf.pdf", .{port});
-    std.debug.print("==> Demonstrating existing-file policies (.skip, .verifyExisting, .fail)...\n", .{});
 
     // Policy 1: Verify on-disk file size/checksum first; if valid, skip downloading!
     const res1 = client.download(

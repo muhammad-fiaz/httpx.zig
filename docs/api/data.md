@@ -4,7 +4,7 @@ MIME types, multipart form data, encoding, and JSON.
 
 ## MIME Types
 
-`httpx.mime` (`src/utils/mime.zig`) is the single MIME implementation shared
+`httpx.mime` (`src/common/mime.zig`) is the single MIME implementation shared
 by static files, embedded assets, templates, and downloads:
 
 - `httpx.mime.fromPath(path)` — Resolve a best-effort MIME type from the file extension (always returns a valid content type, defaulting to `application/octet-stream`)
@@ -12,50 +12,51 @@ by static files, embedded assets, templates, and downloads:
 
 ## Multipart Form Data
 
-RFC 2046 multipart/form-data builder and parser
-(`httpx.multipart.encoder` / `httpx.multipart.parser`).
+RFC 2046 multipart builder and parser are available at
+`httpx.multipart.encoder` and `httpx.multipart.decoder`.
 
 ### Building
 
 ```zig
-var form = httpx.multipart.encoder.Multipart.init(allocator, .formData);
-defer form.deinit();
-
-try form.field("username", "alice");
-try form.file("avatar", png_bytes, .{
-    .filename = "photo.png",
-    .contentType = "image/png",
+var encoder = try httpx.multipart.encoder.init(allocator, io, .{
+    .fields = .{
+        .{ .name = "username", .value = "alice" },
+    },
+    .files = .{
+        .{ .name = "avatar", .data = png_bytes, .filename = "photo.png", .contentType = "image/png" },
+    },
 });
+defer encoder.deinit();
 
-const body = try form.encodeAlloc();
+const body = try encoder.encodeAlloc();
 defer allocator.free(body);
 
 var ctBuf: [128]u8 = undefined;
-const contentType = form.contentType(&ctBuf);
+const contentType = encoder.contentType(&ctBuf);
 // contentType = "multipart/form-data; boundary=..."
 ```
 
 | Method | Description |
 |--------|-------------|
-| `init(allocator, subtype)` | Create a builder (boundary auto-generated; override with `try setBoundary`) |
-| `field(name, value)` | Append a text form field part |
-| `file(name, data, .{ .filename, .contentType, ... })` | Append a file upload part |
-| `encodeAlloc()` | Finalize and return the complete body (caller owns) |
-| `encode(writer)` | Stream-encode into any writer |
-| `contentType(&buf)` | Return the `Content-Type` header value with boundary |
-| `deinit()` | Release builder resources |
+| `init(allocator, io, .{})` | Create an encoder with generated or caller-supplied boundary |
+| `encodeAlloc()` | Return the complete encoded body (caller owns) |
+| `contentType(&buf)` | Return the `Content-Type` header value with the encoder boundary |
+| `deinit()` | Release encoder resources |
 
-The boundary must not contain `--` and should not exceed 70 characters (RFC 2046).
-For a single inline part on a client request, use the `.multipart` request
-option instead:
+Each form field and file is supplied in the initialization options. The boundary
+must follow RFC 2046 syntax and be no longer than 70 characters.
+For client requests, pass fields and files through `.multipart`:
 
 ```zig
+const fileData = "file contents";
 var res = try client.post("https://example.com/upload", .{
     .multipart = .{
-        .name = "upload",
-        .filename = "hello.txt",
-        .contentType = "text/plain",
-        .data = fileData,
+        .fields = .{
+            .{ .name = "description", .value = "sample" },
+        },
+        .files = .{
+            .{ .name = "upload", .filename = "hello.txt", .contentType = "text/plain", .data = fileData },
+        },
     },
 });
 defer res.deinit();
@@ -64,26 +65,28 @@ defer res.deinit();
 ### extractBoundary(contentType)
 
 Extracts the boundary value from a `Content-Type` header via
-`httpx.multipart.parser.extractBoundary(...)`. Returns `null` if no boundary
+`httpx.multipart.Boundary.extract(...)`. Returns `null` if no boundary
 is present. Handles both quoted (`boundary="abc"`) and unquoted
 (`boundary=abc`) forms.
 
-### parseMultipart(allocator, body, boundary, limits)
+### Decoder.parse(body, contentType)
 
 Parses a complete multipart body:
 
 ```zig
-const parser = httpx.multipart.parser;
-const boundary = parser.extractBoundary(contentType) orelse return error.MissingBoundary;
-const fields = try parser.parseMultipart(allocator, body, boundary, .{});
-defer parser.freeFieldsAlloc(allocator, fields);
+const parser = httpx.multipart.decoder;
+var decoder = try parser.init(allocator, io, .{});
+defer decoder.deinit();
+const fields = try decoder.parse(body, contentType);
+defer decoder.free(fields);
 for (fields) |part| {
     std.debug.print("{s} ({d} bytes, type={s})\n", .{ part.name, part.data.len, part.contentType });
 }
 ```
 
-Use `httpx.multipart.parser.Limits` (presets `.strict` / `.relaxed`, or
-`Parser.init(allocator, limits)`) to bound parts, header sizes, and body sizes.
+Pass limits through `.limits` in `decoder.init(allocator, io, .{ .limits = .strict })`.
+The decoded metadata is owned by the decoder allocator; part data borrows the
+input body, which must remain alive while the fields are used.
 
 ### Field
 
@@ -104,15 +107,134 @@ library primitives.
 
 ## JSON
 
-Use Zig std JSON facilities (`std.json`) plus httpx conveniences:
+`httpx.json` is the single JSON implementation used by the client, server,
+typed REST endpoints, GraphQL, and parsing. It covers media-type
+classification, dynamic objects, typed decoding, and typed encoding. Unknown
+object keys are always ignored on input.
 
-- Client: `client.fetch(url, .{ .json = value })` serializes any struct/value automatically; `Response.json(r)` / `Response.jsonAlloc(r, allocator)` decode with unknown fields ignored.
-- Server: `ctx.json(r)` deserializes the request body into `r`; `ctx.renderJson(value)` / `ctx.renderJsonStatus(code, value)` render any struct/value as `application/json`.
+### Typed structs
+
+JSON keys are arbitrary strings, and Zig quoted identifiers express them
+directly. There is no mapping layer: the field name *is* the wire key.
+
+```zig
+const User = struct {
+    @"user-name": []const u8,
+    @"user.name": []const u8,
+    @"user name": []const u8,
+    @"user@email": []const u8,
+    @"user/id": u32,
+    @"123user": []const u8,
+    @"@context": []const u8,
+    @"$schema": []const u8,
+    @"Content-Type": []const u8,
+    @"X-API-Key": []const u8,
+    @"HTTP/2": bool,
+};
+
+const user = try httpx.json.decode(User, arena, body);
+const wire = try httpx.json.encode(allocator, user);
+defer allocator.free(wire);
+```
+
+Decoding rules:
+
+- Field names are matched exactly, including header-style and symbol keys.
+- Optional fields accept `null` and absence.
+- Fields with Zig default values are optional on input.
+- Missing required fields return `error.MissingField`.
+- Unknown JSON keys are ignored.
+- Encoding writes the same exact field names.
+
+### Client requests
+
+The `.json` request option accepts any Zig value and serializes it with its
+exact field names:
+
+```zig
+var res = try client.post("https://example.com/users", .{
+    .json = User{
+        .@"user-name" = "Example User",
+        .@"@context" = "https://schema.org",
+    },
+});
+defer res.deinit();
+```
+
+The fluent builder has the same behavior. The builder owns the header, query,
+and encoded-body buffers, so it must be released with `deinit()`; the
+response owns the header and body allocations and must be released too:
+
+```zig
+var builder = client.builder(.POST, url);
+defer builder.deinit();
+
+_ = try builder.json(user);
+
+var res = try builder.send();
+defer res.deinit();
+```
+
+### Client responses
+
+`Response.json(T)` decodes with the shared decoder; `jsonValue` returns a
+dynamic object:
+
+```zig
+const user = try res.json(User);
+const dynamic = try res.jsonValue();
+const name = httpx.json.getString(&dynamic.object, "user-name");
+```
+
+Values allocate from a response-owned arena released by `Response.deinit`; they
+remain valid until then. `Response.jsonAlloc(T, allocator)` returns
+`std.json.Parsed(T)` when the value must outlive the response.
+
+### Server requests and responses
+
+```zig
+const user = try ctx.json(User);       // body -> User
+const dynamic = try ctx.jsonValue();    // body -> std.json.Value
+return ctx.json(user);                  // any value -> JSON response
+return ctx.jsonStatus(422, problem);    // explicit status
+```
+
+`ctx.json(T)` decodes the request body into `T`; `ctx.json(value)` and
+`ctx.jsonStatus(code, value)` serialize a response. Values decoded with
+`ctx.json` and `ctx.jsonValue` borrow the per-request arena and are valid until
+the request completes.
+
+### Dynamic keys
+
+`httpx.json.Value`, `.Object`, and `.Array` are `std.json` aliases. Typed
+accessors read arbitrary keys without parsing by hand:
+
+| Helper | Result |
+|--------|--------|
+| `get(object, key)` | Exact-key lookup |
+| `getIgnoreCase(object, key)` | Header-style case-insensitive lookup |
+| `getString`, `getInt`, `getFloat`, `getBool` | Scalar lookup |
+| `getObject`, `getArray` | Nested container lookup |
+
+```zig
+const parsed = try httpx.json.parse(arena, body);
+const headers = parsed.object;
+const apiKey = httpx.json.getString(&headers, "X-API-Key") orelse "";
+```
+
+### Media types
+
+`httpx.json.isJsonMediaType(value)` accepts `application/json`,
+`text/json`, `application/x-json`, `application/csp-report`, and any valid
+`+json` structured-syntax subtype. Parameters are validated, type tokens are
+case-insensitive, and `httpx.json.classifyMediaType` distinguishes JSON5,
+NDJSON/JSONL, and JSON text sequences for callers that provide the matching
+parser.
 
 ## Cookies
 
-`httpx.client.cookie` / `httpx.client.cookieJar` (`Cookie` and `Jar`, including
-`Cookie.SameSite`) are the cookie primitives. The jar stores cookies only when
+`httpx.client.cookie` / `httpx.client.jar` (`Cookie` and `Jar`, including
+`httpx.client.sameSite`) are the cookie primitives. The jar stores cookies only when
 your code passes `Set-Cookie` values to it; the client does not attach a jar or
 persist cookies across requests automatically. Server handlers read cookies
 with `ctx.cookie(name)`. `Set-Cookie` parsing, domain/path matching, expiry,

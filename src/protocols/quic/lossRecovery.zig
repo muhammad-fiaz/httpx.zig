@@ -5,6 +5,7 @@
 //! duration (srtt + max(4*rttvar, granularity) + maxAckDelay) * 3.
 
 const std = @import("std");
+const z = @import("zigantic");
 
 pub const GranularityMs: u64 = 1;
 pub const PacketThreshold: u64 = 3;
@@ -57,12 +58,12 @@ pub const RttStats = struct {
     }
 
     /// PTO base without exponential backoff (ms).
-    pub fn ptoBase(self: *const RttStats, includeMaxAckDelay: bool, maxAckDelayMs: u64) u64 {
+    pub fn ptoBase(self: *const RttStats, includeMaxAckDelay: bool, maxAckMs: u64) u64 {
         if (self.firstSampleTsMs == null) {
             return self.initialRttMs +| @max(self.initialRttMs / 2, GranularityMs);
         }
         var pto = self.smoothedRttMs +| @max(4 *| self.rttvarMs, GranularityMs);
-        if (includeMaxAckDelay) pto +|= maxAckDelayMs;
+        if (includeMaxAckDelay) pto +|= maxAckMs;
         return pto;
     }
 };
@@ -75,10 +76,11 @@ pub const SentPacket = struct {
     ackEliciting: bool,
 };
 
-pub const RecoveryConfig = struct {
-    maxAckDelayMs: u64 = 25,
-    includeAckDelayInPto: bool = true,
-};
+const RecoveryConfigSchema = z.objectOf(.{
+    .maxAckMs = z.withDefault(z.integer(u64, .{}), 25),
+    .includeAckDelayInPto = z.withDefault(z.boolean(.{}), true),
+}, .{});
+pub const RecoveryConfig = RecoveryConfigSchema.Value;
 
 pub const Recovery = struct {
     rtt: RttStats = .{},
@@ -152,7 +154,7 @@ pub const Recovery = struct {
         const latest = self.pcLatestTsMs.?; // set together
         const duration = (self.rtt.smoothedRttMs +|
             @max(4 * self.rtt.rttvarMs, GranularityMs) +|
-            self.cfg.maxAckDelayMs) *| 3;
+            self.cfg.maxAckMs) *| 3;
         return (latest - start) >= duration;
     }
 
@@ -163,7 +165,7 @@ pub const Recovery = struct {
 
     /// Current PTO duration including backoff (ms).
     pub fn ptoDuration(self: *const Recovery, appSpace: bool) u64 {
-        const base = self.rtt.ptoBase(appSpace and self.cfg.includeAckDelayInPto, self.cfg.maxAckDelayMs);
+        const base = self.rtt.ptoBase(appSpace and self.cfg.includeAckDelayInPto, self.cfg.maxAckMs);
         const backoffShift: u5 = @intCast(@min(self.ptoCount, 30));
         return base <<| backoffShift;
     }

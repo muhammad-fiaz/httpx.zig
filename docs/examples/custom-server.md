@@ -17,7 +17,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .maxConnections = 5,
+        .limits = .{ .maxConnections = 5 },
         .logging = .{},
     });
     defer server.deinit();
@@ -61,7 +61,7 @@ fn echoHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     if (ctx.body.len == 0) {
         return .{ .status = 400, .body = "{\"error\":\"No body\"}", .contentType = "application/json" };
     }
-    return ctx.renderJson(.{ .echo = ctx.body });
+    return ctx.json(.{ .echo = ctx.body });
 }
 ```
 

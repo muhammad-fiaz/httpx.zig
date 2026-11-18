@@ -5,7 +5,7 @@ across Linux, Windows, and macOS.
 
 ## Support Scope (read this first)
 
-* **Client** (`httpx.Client` → `https://`): HTTPS/1.1 without client
+* **Client** (`httpx.Client` -> `https://`): HTTPS/1.1 without client
   certificates runs on `std.crypto.tls` (TLS 1.2/1.3) with SNI, system +
   custom trust stores, and hostname verification. Setting
   `.tls = .{ .clientCertPem, .clientKeyPem }` (mTLS) or explicit
@@ -25,7 +25,7 @@ across Linux, Windows, and macOS.
   when already native via client certificates). Plain HTTPS/1.1 runs on
   `std.crypto.tls`, which exposes no ticket API, so it always does full
   handshakes.
-* **HelloRetryRequest**: fully handled on both sides (shareless hello →
+* **HelloRetryRequest**: fully handled on both sides (shareless hello ->
   retry with share, single-retry guard, transcript splice). Only X25519
   is supported: a server selecting any other group fails loudly.
 * **0-RTT Early Data (RFC 8446 & RFC 9001)**: Fully supported across TLS 1.3,

@@ -61,8 +61,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 32,
+        .limits = .{ .maxConnections = 32 },
     });
     defer server.deinit();
 
@@ -72,7 +71,7 @@ pub fn main() !void {
     try api.get("/users/{userId:int}/posts/{postId:int}", postHandler, .{ .name = "api-post" });
 
     // Mounted sub-router.
-    var blog = httpx.Router.init(allocator);
+    var blog = httpx.Router.init(allocator, .{});
     defer blog.deinit();
     try blog.get("/{slug:slug}", slugHandler, .{});
     try server.mount("/blog", &blog, .{});

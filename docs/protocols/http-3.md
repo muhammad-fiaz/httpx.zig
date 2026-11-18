@@ -40,7 +40,7 @@ While HTTP/2 eliminated head-of-line blocking at the application level, TCP head
 
 1. **Zero Transport Head-of-Line Blocking**: Each stream is delivered independently. Packet loss in stream A has zero impact on stream B.
 2. **0-RTT Handshakes**: Combines transport connection setup and TLS 1.3 encryption keys into a single round trip.
-3. **Connection Migration**: QUIC uses connection IDs so a client can move between networks; HTTPX does not implement migration yet (see limits above).
+3. **Connection IDs**: QUIC connection IDs let peers identify a connection independently of the network path.
 4. **QPACK Header Compression (RFC 9204)**: Dynamic table compression designed specifically for out-of-order packet delivery without deadlock.
 
 ## Client Usage Example

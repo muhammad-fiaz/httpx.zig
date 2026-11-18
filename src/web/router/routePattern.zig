@@ -12,6 +12,7 @@
 //! Patterns compile once at registration; matching borrows path slices.
 
 const std = @import("std");
+const validators = @import("zigantic").validators;
 
 pub const SegmentKind = enum {
     literal,
@@ -70,8 +71,8 @@ pub const Converter = enum {
                 break :blk true;
             },
             .boolean => std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "false"),
-            .uuid => isUuid(value),
-            .slug => isSlug(value),
+            .uuid => validators.isUuid(value),
+            .slug => validators.isSlug(value),
         };
     }
 };
@@ -88,48 +89,6 @@ pub fn isInt(value: []const u8) bool {
     if (value.len == 0) return false;
     const digits = if (value[0] == '-') value[1..] else value;
     return isUint(digits);
-}
-
-pub fn isHexByte(c: u8) bool {
-    return std.ascii.isHex(c);
-}
-
-pub fn isUuid(value: []const u8) bool {
-    // Canonical 8-4-4-4-12 hex groups.
-    if (value.len != 36) return false;
-    const hexes = [_]bool{
-        true,  true, true, true, true,  true,  true, true, false,
-        true,  true, true, true, false, true,  true, true, true,
-        false, true, true, true, true,  false, true, true, true,
-        true,  true, true, true, true,  true,  true, true, true,
-    };
-    for (hexes, 0..) |wantHex, i| {
-        const c = value[i];
-        if (wantHex) {
-            if (!isHexByte(c)) return false;
-        } else if (c != '-') {
-            return false;
-        }
-    }
-    return true;
-}
-
-pub fn isSlug(value: []const u8) bool {
-    // [a-z0-9]+(-[a-z0-9]+)* — lowercase, no leading/trailing/doubled hyphen.
-    if (value.len == 0) return false;
-    var expectAlnum = true;
-    for (value) |c| {
-        const alnum = std.ascii.isLower(c) or std.ascii.isDigit(c);
-        if (expectAlnum) {
-            if (!alnum) return false;
-            expectAlnum = false;
-        } else if (c == '-') {
-            expectAlnum = true;
-        } else if (!alnum) {
-            return false;
-        }
-    }
-    return !expectAlnum;
 }
 
 pub const Segment = struct {

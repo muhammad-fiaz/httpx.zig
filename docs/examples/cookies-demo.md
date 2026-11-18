@@ -1,10 +1,10 @@
-# Cookies Demo
+# Cookies
 
-Cookie flows with per-request headers and the standalone `httpx.client.cookieJar`.
+Cookie flows with per-request headers and the standalone `httpx.client.jar`.
 See `examples/cookieServer.zig`.
 
 ```zig
-var jar = httpx.client.cookieJar.init(allocator, io);
+var jar = httpx.client.jar.init(allocator, io, .{});
 defer jar.deinit();
 
 // Store a Set-Cookie value received from a login response.
@@ -36,8 +36,3 @@ The port is ephemeral so it varies on every run; the body shows the representati
 ```bash
 zig build run-cookie-server
 ```
-
-## What to Verify
-
-- `GET /get` returns 200 with the expected JSON body.
-- Jar round-trips survive domain/path/expiry checks.

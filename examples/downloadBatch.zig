@@ -1,22 +1,25 @@
+//! Concurrent downloads of multiple files with one shared client.
+//!
+//! The worker pool runs each task through `client.download`; the client
+//! connection pool, DNS cache, and TLS session cache are all internally
+//! synchronized, so a single client is safe across threads.
+//!
+//! Run with: `zig build run-download-batch`
+
 const std = @import("std");
 const httpx = @import("httpx");
 
-const DownloadTask = struct {
-    taskId: usize,
-    url: []const u8,
-    dest: []const u8,
+const Job = struct {
+    client: *httpx.Client,
+    task: httpx.client.download.Task,
 
     fn run(ctx: ?*anyopaque, cancel: *std.atomic.Value(bool)) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(ctx.?));
-        const io = std.Io.Threaded.global_single_threaded.io();
-        var c = httpx.Client.init(std.heap.smp_allocator, io, .{});
-        defer c.deinit();
-
-        _ = try c.download(self.url, .{
-            .path = self.dest,
-            .progress = .enabled,
+        _ = try self.client.download(self.task.url, .{
+            .path = self.task.dest,
+            .progress = .disabled,
             .existing = .overwrite,
-            .cancelFlag = cancel,
+            .cancel = cancel,
             .createDirs = true,
         });
     }
@@ -41,38 +44,35 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
     });
     defer server.deinit();
-    try server.router.add(.GET, "/bytes/90", bytesHandler, .{});
+    try server.get("/bytes/90", .{ .handler = bytesHandler });
     const port = server.localPort();
     const thread = try server.start();
+    defer {
+        server.requestShutdown();
+        thread.join();
+    }
 
     var urlBuf: [64]u8 = undefined;
     const sampleUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/bytes/90", .{port});
 
-    var tasks = [_]DownloadTask{
-        .{ .taskId = 1, .url = sampleUrl, .dest = "downloads/batch_file1.bin" },
-        .{ .taskId = 2, .url = sampleUrl, .dest = "downloads/batch_file2.bin" },
-        .{ .taskId = 3, .url = sampleUrl, .dest = "downloads/batch_file3.bin" },
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
+
+    var jobs = [_]Job{
+        .{ .client = &client, .task = .{ .url = sampleUrl, .dest = "downloads/batch_file1.bin" } },
+        .{ .client = &client, .task = .{ .url = sampleUrl, .dest = "downloads/batch_file2.bin" } },
+        .{ .client = &client, .task = .{ .url = sampleUrl, .dest = "downloads/batch_file3.bin" } },
     };
 
-    var pool = try httpx.concurrency.Pool.init(allocator, io, .{
-        .workers = 4,
-    });
+    var pool = try httpx.concurrency.Pool.init(allocator, io, .{ .workers = 3 });
     defer pool.deinit();
 
-    std.debug.print("==> Starting concurrent batch download with built-in zero-config progress bar...\n", .{});
-
-    for (&tasks) |*task| {
-        try pool.submit(DownloadTask.run, task, null);
+    for (&jobs) |*job| {
+        try pool.submit(Job.run, job, null);
     }
 
     pool.shutdownDrain();
     pool.join();
-
-    server.requestShutdown();
-    thread.join();
-
-    std.debug.print("Batch download completed successfully.\n", .{});
 }

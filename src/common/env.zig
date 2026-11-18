@@ -8,12 +8,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const envMod = @import("env");
 
-/// Installed env.Env structure for in-memory .env parsing and storage.
-pub const Env = envMod.Env;
-
-/// Direct access to process runtime environment methods.
-pub const runtime = envMod.runtime;
-
 /// Fetches a raw string value from the process/terminal environment.
 pub fn get(key: []const u8) ?[]const u8 {
     return envMod.runtime.get(key);
@@ -59,19 +53,19 @@ pub fn parseBool(val: []const u8) ?bool {
     return null;
 }
 
-/// Explicitly loads and parses a `.env` file from the given path into a new `Env` store.
-/// Caller must deinit the returned `Env`.
-pub fn loadFile(allocator: Allocator, path: []const u8) !Env {
-    var e = Env.init(allocator, .{});
+/// Explicitly loads and parses a `.env` file from the given path into a new store.
+/// Caller must deinit the returned value.
+pub fn loadFile(allocator: Allocator, path: []const u8) !envMod.Env {
+    var e = envMod.Env.init(allocator, .{});
     errdefer e.deinit();
     try e.load(path);
     return e;
 }
 
-/// Parses `.env` formatted content from a string buffer into a new `Env` store.
-/// Caller must deinit the returned `Env`.
-pub fn parse(allocator: Allocator, content: []const u8) !Env {
-    var e = Env.init(allocator, .{});
+/// Parses `.env` formatted content from a string buffer into a new store.
+/// Caller must deinit the returned value.
+pub fn parse(allocator: Allocator, content: []const u8) !envMod.Env {
+    var e = envMod.Env.init(allocator, .{});
     errdefer e.deinit();
     try e.parseString(content);
     return e;

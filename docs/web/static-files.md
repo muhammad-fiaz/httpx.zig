@@ -18,7 +18,7 @@ pub fn main() !void {
     defer server.deinit();
 
     // Serve files from ./public at /static URL prefix
-    try server.static("/static", "./public");
+    try server.static(.{ .mount = "/static", .root = "./public" });
 
     server.run();
 }
@@ -31,17 +31,15 @@ HTTPX servers feature built-in directory watching, event debouncing, and Server-
 ```zig
 var server = try httpx.Server.init(allocator, io, .{
     .port = 8080,
-    .watch = true,
-    .watchDir = "./public",
-    .liveReload = true,
+    .liveReload = .{ .enabled = true, .watch = true, .watchDir = "./public" },
 });
 defer server.deinit();
 
-try server.static("/", "./public");
+try server.static(.{ .mount = "/", .root = "./public", .liveReload = true });
 server.run();
 ```
 
-When files within `watchDir` are created, modified, deleted, or renamed:
+When files within `liveReload.watchDir` are created, modified, deleted, or renamed:
 1. Native filesystem notifications normalize across Windows (`ReadDirectoryChangesW`), Linux (`inotify`), and macOS (kqueue), with recursive watching and rename pairing.
 2. Rapid editor saves (including atomic save+rename) are debounced and coalesced into one logical change.
 3. CSS changes trigger instant in-place style refreshes (`hot_reload`).

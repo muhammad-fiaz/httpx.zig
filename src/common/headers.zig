@@ -14,12 +14,40 @@
 //!   - RFC 7230 Section 3.2.6 — Token Definition
 
 const std = @import("std");
+const z = @import("zigantic");
 const Allocator = std.mem.Allocator;
 
-pub const Header = struct {
-    name: []const u8,
-    value: []const u8,
+/// Canonical wire names for commonly shared HTTP fields. Names remain
+/// strings because HTTP field names are extensible and case-insensitive.
+pub const names = struct {
+    pub const accept = "Accept";
+    pub const acceptCharset = "Accept-Charset";
+    pub const acceptEncoding = "Accept-Encoding";
+    pub const acceptLanguage = "Accept-Language";
+    pub const cacheControl = "Cache-Control";
+    pub const contentDisposition = "Content-Disposition";
+    pub const contentEncoding = "Content-Encoding";
+    pub const contentLanguage = "Content-Language";
+    pub const contentLength = "Content-Length";
+    pub const contentRange = "Content-Range";
+    pub const contentTransferEncoding = "Content-Transfer-Encoding";
+    pub const contentType = "Content-Type";
+    pub const etag = "ETag";
+    pub const lastModified = "Last-Modified";
+    pub const location = "Location";
+    pub const trailer = "Trailer";
+    pub const transferEncoding = "Transfer-Encoding";
+    pub const vary = "Vary";
 };
+
+/// A single HTTP header name/value pair. One schema for the whole library:
+/// the client, the router, the protocol writers, and the multipart codecs all
+/// exchange the same type.
+pub const HeaderSchema = z.objectOf(.{
+    .name = z.string(.{ .min = 1 }),
+    .value = z.string(.{}),
+}, .{});
+pub const Header = HeaderSchema.Value;
 
 pub const Headers = struct {
     allocator: Allocator,
@@ -43,29 +71,26 @@ pub const Headers = struct {
         try validateValue(value);
         for (self.entries.items) |*h| {
             if (std.ascii.eqlIgnoreCase(h.name, name)) {
-                if (h.value.len == value.len) {
-                    @memcpy(@constCast(h.value), value);
-                    return;
-                }
+                // Allocate before freeing: a failed allocation must leave the
+                // existing entry intact instead of dangling.
+                const fresh = try self.allocator.dupe(u8, value);
                 self.allocator.free(h.value);
-                h.value = try self.allocator.dupe(u8, value);
+                h.value = fresh;
                 return;
             }
         }
-        try self.entries.append(self.allocator, .{
-            .name = try self.allocator.dupe(u8, name),
-            .value = try self.allocator.dupe(u8, value),
-        });
+        try self.append(name, value);
     }
 
     /// Appends a header without replacing duplicates.
     pub fn append(self: *Headers, name: []const u8, value: []const u8) !void {
         try validateName(name);
         try validateValue(value);
-        try self.entries.append(self.allocator, .{
-            .name = try self.allocator.dupe(u8, name),
-            .value = try self.allocator.dupe(u8, value),
-        });
+        const name_copy = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(name_copy);
+        const value_copy = try self.allocator.dupe(u8, value);
+        errdefer self.allocator.free(value_copy);
+        try self.entries.append(self.allocator, .{ .name = name_copy, .value = value_copy });
     }
 
     /// Case-insensitive lookup; returns first match.
@@ -74,18 +99,6 @@ pub const Headers = struct {
             if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
         }
         return null;
-    }
-
-    /// Returns all values for a header name (for multi-value headers).
-    pub fn getAll(self: *const Headers, allocator: Allocator, name: []const u8) ![]const []const u8 {
-        var results = std.ArrayList([]const u8).empty;
-        errdefer results.deinit(allocator);
-        for (self.entries.items) |h| {
-            if (std.ascii.eqlIgnoreCase(h.name, name)) {
-                try results.append(allocator, h.value);
-            }
-        }
-        return results.toOwnedSlice(allocator);
     }
 
     pub fn remove(self: *Headers, name: []const u8) bool {
@@ -191,4 +204,22 @@ test "remove header" {
     try std.testing.expect(h.contains("X-Remove-Me"));
     _ = h.remove("x-remove-me");
     try std.testing.expect(!h.contains("X-Remove-Me"));
+}
+
+fn headersAllocationFailureImpl(allocator: Allocator) !void {
+    var h = Headers.init(allocator);
+    defer h.deinit();
+    try h.append("X-One", "1");
+    try h.set("X-One", "one");
+    try h.set("X-Two", "2");
+    try h.set("X-Two", "two");
+    _ = h.remove("X-One");
+    try h.append("X-Three", "3");
+    try std.testing.expectEqual(@as(usize, 2), h.count());
+}
+
+test "header mutations release memory when an allocation fails" {
+    // Exercises every allocation point in append/set/remove and proves the
+    // old value is not freed before its replacement exists.
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, headersAllocationFailureImpl, .{});
 }

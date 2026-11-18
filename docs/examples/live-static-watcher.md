@@ -72,7 +72,7 @@ fn appJsHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
 }
 
 fn apiStatusHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{
+    return ctx.json(.{
         .status = "healthy",
         .engine = "httpx.zig",
         .version = "0.1.0",
@@ -91,12 +91,12 @@ pub fn main() !void {
 
     // 1. Setup sample asset for watcher
     const testAsset = "sample_dev_asset.txt";
-    try httpx.static.files.writeFile(testAsset, "Initial static asset content");
+    try httpx.fs.writeFile(testAsset, "Initial static asset content");
 
     // 2. Initialize Watcher with reload callbacks
     var fileWatcher = try httpx.static.Watcher.init(allocator, io, .{
         .dirPath = ".",
-        .pollIntervalMs = 50,
+        .pollMs = 50,
     });
     defer fileWatcher.deinit();
     try fileWatcher.watchFile(testAsset);
@@ -108,8 +108,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 4,
+        .limits = .{ .maxConnections = 4 },
         .logging = .{},
     });
     defer server.deinit();
@@ -166,7 +165,7 @@ pub fn main() !void {
     std.debug.print("[HOT RELOAD] Modifying static file '{s}'...\n", .{testAsset});
     try httpx.fs.writeFile(testAsset, "Updated asset content trigger");
 
-    httpx.clock.sleepMillis(io, 150);
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(150), .awake) catch {};
     while (fileWatcher.next()) |event| {
         std.debug.print("[HOT RELOAD] Event: path='{s}', kind={s}, strategy={s}\n", .{
             event.path,

@@ -6,10 +6,10 @@ The `httpx.zig` client provides a high-level HTTP client for making requests ove
 
 | Protocol | Status | Transport | Notes |
 |----------|--------|-----------|-------|
-| HTTP/1.0 | ✅ Full | TCP | Legacy support |
-| HTTP/1.1 | ✅ Full | TCP/TLS | Default protocol |
-| HTTP/2 | ✅ Client Runtime + Primitives | TCP/TLS | High-level client request execution path plus full framing/HPACK/stream primitives |
-| HTTP/3 | ✅ Reliable paths | QUIC/UDP | High-level client runtime over QUIC/TLS 1.3 with ALPN `h3`, QPACK dynamic tables, loss recovery, NewReno congestion control, 0-RTT resumption, Retry/version negotiation, key updates, and pooled connections for sequential reuse |
+| HTTP/1.0 | Full | TCP | Legacy support |
+| HTTP/1.1 | Full | TCP/TLS | Default protocol |
+| HTTP/2 | Client Runtime + Primitives | TCP/TLS | High-level client request execution path plus full framing/HPACK/stream primitives |
+| HTTP/3 | Reliable paths | QUIC/UDP | High-level client runtime over QUIC/TLS 1.3 with ALPN `h3`, QPACK dynamic tables, loss recovery, NewReno congestion control, 0-RTT resumption, Retry/version negotiation, key updates, and pooled connections for sequential reuse |
 
 HTTP/3 runtime mode performs a QUIC TLS 1.3 handshake and verifies the server certificate. Loopback integration is covered, including dynamic QPACK and response trailers. QUIC loss recovery, NewReno congestion control, Retry/version negotiation, key updates, and connection pooling for sequential requests are active; the remaining transport limits are HelloRetryRequest, connection migration, and concurrent multiplexing over a shared high-level HTTP/3 connection.
 
@@ -39,32 +39,36 @@ The `Client` struct is the main entry point for making requests. It manages conn
 const std = @import("std");
 const httpx = @import("httpx");
 
+var gpa: std.heap.DebugAllocator(.{}) = .init;
+defer _ = gpa.deinit();
+const allocator = gpa.allocator();
 const io = std.Io.Threaded.global_single_threaded.io();
 
 // Initialize with default configuration (returns Client by value)
 var client = httpx.Client.init(allocator, io, .{});
 defer client.deinit();
 
-// Initialize with custom configuration
-var client = httpx.Client.init(allocator, io, .{
+// Initialize with custom configuration instead
+var custom_client = httpx.Client.init(allocator, io, .{
     .httpVersion = .auto, // or .http10, .http11, .http2, .http3
     .timeoutMs = 10_000,
     .followRedirects = true,
 });
-defer client.deinit();
+defer custom_client.deinit();
 
 // Requests use the initialized client and its allocator/I/O context.
-var response = try client.get("https://api.example.com/users", .{});
+var response = try custom_client.get("https://api.example.com/users", .{});
 defer response.deinit();
 
-var post_res = try client.post("https://api.example.com/users", .{ .json = .{ .name = "Alice", .role = "developer" },
+var post_res = try custom_client.post("https://api.example.com/users", .{
+    .json = .{ .name = "Alice", .role = "developer" },
 });
 defer post_res.deinit();
 ```
 
-The client configuration is an idiomatic Zig struct passed to `Client.init`;
-omitted fields use standard defaults. It mirrors `Config` in
-`src/client/httpClient.zig`:
+The client configuration is an inline `.{}` literal passed to `Client.init`.
+There is no exported configuration type to import; every field is documented
+below and omitted fields use production-safe defaults:
 
 ```zig
 const io = std.Io.Threaded.global_single_threaded.io();
@@ -73,7 +77,7 @@ var client = httpx.Client.init(allocator, io, .{
     .followRedirects = true,
     .maxRedirects = 5,
     .maxRetries = 3,
-    .retryDelayMs = 500,
+    .retryMs = 500,
     .retryStatusCodes = &.{ 502, 503, 504 },
     .httpVersion = .http2,
     .pool = .{ .maxConnections = 64, .maxPerHost = 16 },
@@ -104,7 +108,7 @@ const apiKey = envStore.get("MY_API_KEY");
 | `followRedirects` | `bool` | `true` | Whether to automatically follow redirects. |
 | `maxRedirects` | `u8` | `10` | Maximum redirects to follow per request. |
 | `maxRetries` | `u32` | `0` | Retry attempts for failed requests (`0` = disabled). |
-| `retryDelayMs` | `u64` | `1000` | Base delay between retries in milliseconds. |
+| `retryMs` | `u64` | `1000` | Base delay between retries in milliseconds. |
 | `retryStatusCodes` | `[]const u16` | `&.{ 502, 503, 504 }` | Status codes that trigger a retry. |
 | `retryUnsafeMethods` | `bool` | `false` | Also retry POST, PATCH, and CONNECT; leave false unless the server deduplicates. |
 | `earlyData` | `EarlyDataOptions` | `{}` | Default 0-RTT early-data settings. |
@@ -113,7 +117,8 @@ const apiKey = envStore.get("MY_API_KEY");
 | `http11` | `bool` | `true` | Fast toggle to enable HTTP/1.1 protocol. |
 | `http2` | `bool` | `false` | Fast toggle to use HTTP/2 as default protocol. |
 | `http3` | `bool` | `false` | Fast toggle to use HTTP/3 as default protocol. |
-| `pool` | `PoolConfig` | `{}` | Connection pool limits (`maxConnections`, `maxPerHost`, `idleTimeoutMs`, `maxParkedMs`). |
+| `protocols` | `Protocols` | `{}` | Protocol engine tuning. `protocols.http3.quic` exposes QUIC idle timeout, flow-control windows, stream limits, UDP payload, version, Retry, and role. |
+| `pool` | `PoolConfig` | `{}` | Connection pool limits (`maxConnections`, `maxPerHost`, `idleMs`, `maxParkedMs`). |
 | `dnsCache` | `DnsCacheOptions` | `{}` | DNS cache settings (`enable`, `ttlMs`, `negativeTtlMs`, `maxEntries`). |
 | `tls` | `?TlsOptions` | `null` | Default TLS overrides for `https://`; null uses system trust verification. |
 | `proxy` | `?[]const u8` | `null` | Default proxy URL (`http://`, `socks5://`, `socks5h://`, `socks4://`, `socks4a://`). |
@@ -151,23 +156,23 @@ defer res.deinit();
 |----------|-------------|
 | `Client.init(allocator, io, config)` | Initialize client with allocator, io, and configuration (or `.{}` for defaults). |
 
-### Primary Unified API: `fetch`
+### Operation Options
 
-`client.fetch(url, options)` is the primary high-level HTTP client operation. It supports all HTTP methods, strongly typed JSON serialization, custom headers, query parameters, timeouts, and body streaming in a single call:
+Every operation takes the URL first and an operation-options struct second. Use
+`.{}` for defaults. The same options work across methods:
 
 ```zig
 // Simple GET
-var res = try client.fetch("https://api.example.com/data", .{});
+var res = try client.get("https://api.example.com/data", .{});
 defer res.deinit();
 
 // POST with strongly typed Zig struct (automatically serialized via std.json)
 const CreateUser = struct { name: []const u8, email: []const u8 };
 const User = struct { id: u64, name: []const u8, email: []const u8 };
 
-var res2 = try client.fetch("https://api.example.com/users", .{
-    .method = .POST,
-    .headers = .{ .Authorization = "Bearer secret_token" },
-    .json = CreateUser{ .name = "Fiaz", .email = "fiaz@example.com" },
+var res2 = try client.post("https://api.example.com/users", .{
+    .headers = &.{.{ .name = "Authorization", .value = "Bearer secret_token" }},
+    .json = .{ .name = "Example User", .email = "user@example.com" },
 });
 defer res2.deinit();
 
@@ -201,43 +206,44 @@ All methods are URL-first (`url`, then options):
 
 | Method | Description |
 |--------|-------------|
-| `fetch(url, options)` | **Primary unified HTTP request operation** |
 | `get(url, options)` | HTTP GET request |
 | `post(url, options)` | HTTP POST request (accepts `.body`, `.json`, `.form`) |
-| `postJson(url, payload, options)` | HTTP POST with typed struct or serialized JSON payload |
 | `put(url, options)` | HTTP PUT request |
 | `delete(url, options)` | HTTP DELETE request |
 | `patch(url, options)` | HTTP PATCH request |
 | `head(url, options)` | HTTP HEAD request |
-| `trace(url, options)` | HTTP TRACE request |
-| `connect(url, options)` | HTTP CONNECT request |
 | `options(url, options)` | HTTP OPTIONS request |
 | `request(url, options)` | Generic request (method set via `options.method`) |
 | `requestStream(url, options)` | Streaming request returning `ResponseStream` (incremental on HTTP/1.1) |
-| `requestBuilder(method, url)` | Start fluent `RequestBuilder` for chained request construction |
-| `builder(method, url)` | Alias for `requestBuilder` |
-| `getBuilder(url)` | Start GET `RequestBuilder` |
-| `postBuilder(url)` | Start POST `RequestBuilder` |
-| `getAll(urls)` | Concurrent GETs; deinit each response, free the slice |
-| `requestAll(reqs)` | Concurrent requests; same ownership |
+| `builder(method, url)` | Start a fluent `RequestBuilder` for chained request construction |
 | `download(url, options)` | Streaming file download with resume/verify (destination via `options.path`) |
-| `downloadBatch(tasks, options)` | Concurrent downloads |
 | `lookupFileInfo(url, options)` | Remote metadata without body download |
 | `updateFile(url, options)` | Atomic file update with rollback (target via `options.path`) |
 | `graphql(url, query, variables, options)` | GraphQL request |
-| `fetchDocument/fetchHtml/fetchXml/fetchFeed/fetchRobots/fetchSitemap(url, options)` | Fetch + parse documents |
+| `client.document.fetch(url, options)` | Fetch and auto-detect a document |
+| `client.html.fetch(url, options)` | Fetch and parse an HTML document |
+| `client.xml.fetch(url, options)` | Fetch and parse an XML document |
+| `client.feed.fetch(url, options)` | Fetch and parse an RSS, Atom, or JSON feed |
+| `client.robots.fetch(url, options)` | Fetch and parse a `Robots` document |
+| `client.sitemap.fetch(url, options)` | Fetch and parse a `Sitemap` document |
 | `resolve(host, options)` / `resolveUrl(url, options)` | DNS resolution (port via `options.port`) |
+| `isOnline(options)` | Boolean TCP reachability check; reuses the client's `io` |
+| `checkConnectivity(options)` | Detailed `ConnectivityResult` for the documented default endpoints |
+| `checkHosts(hosts, options)` | Detailed check for textual IP endpoints such as `"10.0.0.5:443"` |
 | `close()` | Purge the connection pool |
 | `reset()` | Close + clear DNS cache |
 
+Request option names are checked at compile time; misspelled top-level options
+are compile errors. Put custom names in `.headers` or `.query` maps.
+
 ### Cookie Jar API
 
-The standalone `httpx.client.cookieJar` keeps cookies across requests
+The standalone `httpx.client.jar` keeps cookies across requests
 (domain-filtered per RFC 6265). Per-request cookies use the `cookie` option.
 
 | Method | Description |
 |--------|-------------|
-| `cookieJar.init(allocator, io)` / `deinit()` | Lifecycle |
+| `jar.init(allocator, io, .{})` / `deinit()` | Lifecycle |
 | `setFromHeader(setCookie, host)` | Store a `Set-Cookie` value |
 | `cookieHeader(host, path, secure, buf)` | Render the `Cookie` header (`secure` gates `Secure` cookies) |
 | `purgeExpired()` | Drop expired cookies |
@@ -266,10 +272,9 @@ defer json_response.deinit();
 
 // POST with typed struct
 const User = struct { name: []const u8, role: []const u8 };
-var typed_res = try client.postJson("https://api.example.com/users", User{
-    .name = "John",
-    .role = "engineer",
-}, .{});
+var typed_res = try client.post("https://api.example.com/users", .{
+    .json = User{ .name = "John", .role = "engineer" },
+});
 defer typed_res.deinit();
 
 // Custom headers
@@ -300,32 +305,32 @@ For complete copy/paste demos, see these example pages:
 
 - [Simple Get](/examples/simple-get)
 - [Simple Get Deserialize](/examples/simple-get-deserialize)
-- [JSON API](/examples/json-api-example) - typed `.json` bodies, `Response.json(r)`, server `ctx.json(r)` + `ctx.renderJson(value)`
+- [JSON API](/examples/json-api-example) - typed `.json` bodies, `Response.json(r)`, server `ctx.json(r)` + `ctx.json(value)`
 - [Post JSON](/examples/post-json)
 - [Custom Headers](/examples/custom-headers)
 - [Concurrent Requests](/examples/concurrent-requests)
 - [Connection Pool](/examples/connection-pool)
-- [Cookies Demo](/examples/cookies-demo)
+- [Cookies](/examples/cookies-demo)
 - [HTTP Auth Helpers](/examples/http-auth-helpers)
 - [Simplified API Aliases](/examples/simplified-api-aliases)
 
-### Request Options (`RequestOptions`)
+### Per-request options
 
-Per-request overrides for configuration. The client accepts these fields
-directly (plus duck-typed extras such as `multipart` and `graphql`
-handled via `anytype` opts). Unset optional fields fall back to
-client-level defaults.
+Per-request overrides are passed as fields of the options literal on each
+client operation. Zig infers the literal's type from the method. Unset
+optional fields fall back to client-level defaults.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `method` | `?Method` | `null` | Explicit method for generic `request`/`fetch` (wrappers supply their own). |
+| `method` | `?Method` | `null` | Explicit method for generic `request` (verb helpers supply their own). |
 | `headers` | `[]const Header` | `&.{}` | Additional headers (`{ .name, .value }` pairs). |
 | `query` | `[]const Header` | `&.{}` | Percent-encoded query params appended to the URL. |
-| `body` | `?[]const u8` | `null` | Raw request body. |
-| `json` | `?[]const u8` | `null` | JSON string body (sets Content-Type). |
+| `body` | `[]const u8` or `httpx.BodySource` | `null` | Raw request body, or a streaming body source. |
+| `json` | any serializable value | `null` | JSON body (sets Content-Type); field names are the exact Zig names. |
 | `form` | `?[]const u8` | `null` | Pre-encoded `application/x-www-form-urlencoded` body. |
 | `text` | `?[]const u8` | `null` | Plain-text body. |
 | `contentType` | `?[]const u8` | `null` | Explicit Content-Type override. |
+| `multipart` | inline `.{}` | `null` | `multipart/form-data` body (`.fields`/`.files`/`.file`/`.parts`). |
 | `basicAuth` | `?[]const u8` | `null` | `"user:pass"` encoded as `Authorization: Basic ...`. |
 | `bearerAuth` | `?[]const u8` | `null` | Sets `Authorization: Bearer <token>`. |
 | `cookie` | `?[]const u8` | `null` | Cookie header value for this request. |
@@ -333,13 +338,15 @@ client-level defaults.
 | `maxResponseSize` | `?usize` | `null` | Request-specific max response body size. |
 | `followRedirects` | `?bool` | `null` | Override client redirect setting. |
 | `maxRedirects` | `?u8` | `null` | Override client max-redirect limit. |
-| `allowLfLineEndings` | `bool` | `false` | Accept bare LF line endings in the response. |
+| `allowLfLineEndings` | `?bool` | `null` | Accept bare LF line endings in the response. |
 | `httpVersion` | `?HttpVersion` | `null` | Force a request over a specific protocol runtime. |
 | `http10` / `http11` / `http2` / `http3` | `?bool` | `null` | Per-request protocol toggles. |
 | `tls` | `?TlsOptions` | `null` | Per-request TLS overrides; null inherits the client default or system trust. |
 | `proxy` | `?[]const u8` | `null` | Per-request proxy URL override. |
+| `earlyData` | inline `.{}` | `{}` | Per-request 0-RTT early-data settings (`.enabled`, `.allowUnsafeMethods`). |
+| `cancel` | `*const std.atomic.Value(bool)` | `null` | Cooperative cancellation flag. |
 
-Request options are configured directly using struct literals:
+Pass request fields directly to the operation:
 
 ```zig
 var res = try client.get("/users", .{
@@ -352,6 +359,11 @@ var res = try client.get("/users", .{
 defer res.deinit();
 ```
 
+`headers` and `query` take `Header` pairs (`{ .name, .value }`). As a
+convenience, a struct literal of named fields is also accepted and its
+field names are used verbatim as the header/query names
+(`.headers = .{ .acceptEncoding = "gzip" }`).
+
 ### Multipart File Uploads
 
 Use the `multipart` option to send `multipart/form-data` bodies.
@@ -361,10 +373,17 @@ The client assembles the body and sets the `Content-Type` header
 ```zig
 var resp = try client.post("https://example.com/upload", .{
     .multipart = .{
-        .name = "upload",
-        .filename = "data.bin",
-        .contentType = "application/octet-stream",
-        .data = chunk_slice,
+        .fields = .{
+            .{ .name = "description", .value = "upload" },
+        },
+        .files = .{
+            .{
+                .name = "upload",
+                .filename = "data.bin",
+                .contentType = "application/octet-stream",
+                .data = chunk_slice,
+            },
+        },
     },
 });
 defer resp.deinit();
@@ -375,13 +394,10 @@ defer resp.deinit();
 > On Windows the Winsock kernel send buffer is typically 8–64 KB. When sending
 > large multipart data as a single body, `winsock.send()` may stall.
 >
-> httpx.zig 0.1.8+ automatically caps each send call to 64 KB, so most uploads
-> now work without application changes. For extra safety — especially for payloads
-> larger than a few hundred KB — build the body with
-> `httpx.multipart.encoder.Multipart` (or post a single part inline with the
-> `.multipart` request option) and issue one request per slice.
-> See the [Multipart Guide](../guide/multipart.md#large-file-uploads--windows-compatibility)
-> for a complete resumable upload example.
+> The client caps individual socket writes, but it currently assembles the full
+> multipart body in memory before sending it. Large uploads therefore use memory
+> proportional to the encoded body. If an application splits a file across
+> requests, it must define the matching server-side reassembly protocol.
 
 
 ## Response
@@ -500,12 +516,11 @@ Client request methods (all URL-first):
 | `client.delete(url, opts)` | HTTP DELETE |
 | `client.head(url, opts)` | HTTP HEAD |
 | `client.options(url, opts)` | HTTP OPTIONS |
-| `client.trace(url, opts)` | HTTP TRACE |
-| `client.connect(url, opts)` | HTTP CONNECT |
-| `client.fetch(url, opts)` | Unified fetch (any method via `.method`) |
+| `client.fetch(url, opts)` | Fetch-style convenience operation using the same native request transport |
 | `client.request(url, opts)` | General HTTP request (any method via `.method`) |
-| `client.getAll(&urls)` | Concurrent GET requests |
-| `client.requestAll(&requests)` | Concurrent custom requests |
+
+Use `client.request(url, .{ .method = .TRACE })` or `.CONNECT` for less common
+methods; the core verb conveniences cover ordinary request operations.
 
 ## See Also
 

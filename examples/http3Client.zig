@@ -22,10 +22,10 @@ pub fn main() !void {
     std.debug.print("1. HTTP/3 client configured: protocol={s}\n", .{@tagName(client.config.httpVersion.?)});
 
     // 2. Client & Server HTTP/3 Connection Engines (RFC 9114)
-    var clientConn = httpx.http3.Connection.init(allocator, .client);
+    var clientConn = httpx.http3.Connection.init(allocator, .{ .role = .client });
     defer clientConn.deinit();
 
-    var serverConn = httpx.http3.Connection.init(allocator, .server);
+    var serverConn = httpx.http3.Connection.init(allocator, .{ .role = .server });
     defer serverConn.deinit();
 
     // Exchange control stream SETTINGS
@@ -108,12 +108,11 @@ fn liveLoopbackDemo(allocator: std.mem.Allocator, io: std.Io) !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .http3 = true,
+        .protocols = .{ .http3 = true },
         .tls = .{
             .certificatePem = demoCertPem,
             .privateKeyPem = demoKeyPem,
         },
-        .enableDocs = false,
     });
     defer server.deinit();
 
@@ -141,7 +140,7 @@ fn liveLoopbackDemo(allocator: std.mem.Allocator, io: std.Io) !void {
 
     // Wait for the background thread to start the HTTP/3 pump and accept loop
     while (server.h3Pump == null) {
-        httpx.clock.sleepMillis(io, 10);
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake) catch {};
     }
 
     var client = httpx.Client.init(allocator, io, .{});

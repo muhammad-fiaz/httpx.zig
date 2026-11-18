@@ -20,7 +20,6 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
     });
     defer server.deinit();
     try server.router.add(.GET, "/bytes/90", bytesHandler, .{});
@@ -32,7 +31,6 @@ pub fn main() !void {
 
     var urlBuf: [64]u8 = undefined;
     const sampleUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/bytes/90", .{port});
-    std.debug.print("==> Downloading {s} with zero-config progress bar...\n", .{sampleUrl});
 
     // 1. Download to a specific directory (automatically uses URL basename "90")
     const result1 = client.download(
@@ -51,7 +49,7 @@ pub fn main() !void {
     };
 
     std.debug.print("Downloaded with auto filename: {s} ({d} bytes in {d} ms)\n", .{
-        result1.destinationPath(),
+        httpx.client.download.destinationPath(&result1),
         result1.downloadedBytes,
         result1.elapsedMs,
     });
@@ -73,7 +71,7 @@ pub fn main() !void {
     };
 
     std.debug.print("Downloaded with explicit filename: {s} ({d} bytes)\n", .{
-        result2.destinationPath(),
+        httpx.client.download.destinationPath(&result2),
         result2.downloadedBytes,
     });
 

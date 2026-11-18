@@ -35,8 +35,3 @@ Status codes and bodies vary with the target URL and payload.
 ```bash
 zig build run-post-json
 ```
-
-## What to Verify
-
-- GET returns 200 with a JSON body.
-- Typed decoding succeeds and ignores unknown fields.

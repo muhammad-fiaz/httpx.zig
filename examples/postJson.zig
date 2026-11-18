@@ -23,8 +23,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 1,
+        .limits = .{ .maxConnections = 1 },
     });
     defer server.deinit();
     try server.router.add(.POST, "/post", postHandler, .{});
@@ -38,10 +37,9 @@ pub fn main() !void {
     var urlBuf: [64]u8 = undefined;
     const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/post", .{port});
 
-    // POST with typed JSON struct using unified fetch
-    var response = try client.fetch(url, .{
-        .method = .POST,
-        .json = CreateUser{ .name = "Alice", .role = "developer" },
+    // POST with typed JSON struct
+    var response = try client.post(url, .{
+        .json = .{ .name = "Alice", .role = "developer" },
     });
     defer response.deinit();
 

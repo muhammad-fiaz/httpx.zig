@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const z = @import("zigantic");
 
 /// Maximum number of nodes in a single document (hostile-input guard).
 pub const MAX_NODES: u32 = 1_000_000;
@@ -25,22 +26,25 @@ pub const NodeKind = enum(u8) {
     cdata,
 };
 
-pub const Attribute = struct {
-    name: []const u8,
-    value: []const u8,
-};
+const AttributeSchema = z.objectOf(.{
+    .name = z.string(.{ .min = 1 }),
+    .value = z.string(.{}),
+}, .{});
+pub const Attribute = AttributeSchema.Value;
 
-pub const SourcePoint = struct {
-    row: u32 = 0,
-    column: u32 = 0,
-};
+const SourcePointSchema = z.objectOf(.{
+    .row = z.withDefault(z.integer(u32, .{}), 0),
+    .column = z.withDefault(z.integer(u32, .{}), 0),
+}, .{});
+pub const SourcePoint = SourcePointSchema.Value;
 
-pub const SourceRange = struct {
-    startByte: u32 = 0,
-    endByte: u32 = 0,
-    startPoint: SourcePoint = .{},
-    endPoint: SourcePoint = .{},
-};
+const SourceRangeSchema = z.objectOf(.{
+    .startByte = z.withDefault(z.integer(u32, .{}), 0),
+    .endByte = z.withDefault(z.integer(u32, .{}), 0),
+    .startPoint = z.withDefault(SourcePointSchema, .{}),
+    .endPoint = z.withDefault(SourcePointSchema, .{}),
+}, .{});
+pub const SourceRange = SourceRangeSchema.Value;
 
 pub const Node = struct {
     kind: NodeKind,

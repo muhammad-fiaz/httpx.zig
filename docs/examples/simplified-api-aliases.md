@@ -17,8 +17,8 @@ defer del.deinit();
 ```
 
 Available methods include `fetch`, `get`, `post`, `put`, `patch`, `delete`,
-`head`, `options`, `trace`, `connect`, `request`, `getAll` and `requestAll`.
-Downloads, GraphQL, connectivity and DNS are also methods on the client.
+`head`, `options`, and `request`. Downloads, GraphQL, connectivity and DNS
+are also methods on the client.
 
 ## Expected Output
 
@@ -37,7 +37,3 @@ Status codes and bodies vary with the target URL and verb.
 ```bash
 zig build run-simple-get
 ```
-
-## What to Verify
-
-- Each verb returns the expected status and body.

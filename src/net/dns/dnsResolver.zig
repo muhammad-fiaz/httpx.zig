@@ -425,7 +425,7 @@ const DnsTcpTestServer = struct {
 };
 
 const DnsUdpTruncatedServer = struct {
-    socket: *udpMod.UdpSocket,
+    socket: *udpMod.Socket,
 };
 
 fn runDnsUdpTruncatedServer(ctx: *DnsUdpTruncatedServer) void {
@@ -483,7 +483,7 @@ test "DNS retries a truncated UDP response over TCP where timed receive is avail
     defer a.free(packet);
 
     if (builtin.os.tag == .windows) {
-        var socket = try udpMod.UdpSocket.bind(ctx.io, 0);
+        var socket = try udpMod.Socket.bind(ctx.io, 0);
         defer socket.close();
         var buf: [16]u8 = undefined;
         try std.testing.expectError(error.TimeoutUnsupported, socket.receiveTimeout(&buf, .{ .duration = .{
@@ -493,7 +493,7 @@ test "DNS retries a truncated UDP response over TCP where timed receive is avail
         return;
     }
 
-    var udp = try udpMod.UdpSocket.bind(ctx.io, 0);
+    var udp = try udpMod.Socket.bind(ctx.io, 0);
     defer udp.close();
     const udpPort = switch (udp.socket.address) {
         .ip4 => |v| v.port,
@@ -601,7 +601,7 @@ fn queryTcp(allocator: Allocator, io: std.Io, nsAddr: net.IpAddress, packet: []c
 /// Query over UDP first and retry over TCP when the server sets TC. Returns
 /// an owned response packet and validates its endpoint/question on either path.
 fn queryDns(allocator: Allocator, io: std.Io, nsAddr: net.IpAddress, packet: []const u8, id: u16, name: []const u8, qtype: RecordType) ![]u8 {
-    var sock = try udpMod.UdpSocket.bind(io, 0);
+    var sock = try udpMod.Socket.bind(io, 0);
     defer sock.close();
     try sock.sendTo(&nsAddr, packet);
 

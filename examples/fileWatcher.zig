@@ -24,19 +24,14 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    std.debug.print("==> HTTPX Filesystem Watcher Demo\n\n", .{});
-
     const watchTarget = "watcher_demo_asset.txt";
-    try httpx.static.files.writeFile(watchTarget, "Version 1");
-    defer {
-        const cwd = std.Io.Dir.cwd();
-        cwd.deleteFile(io, watchTarget) catch {};
-    }
+    try httpx.fs.writeFile(watchTarget, "Version 1");
+    defer httpx.fs.deleteFile(watchTarget) catch {};
 
     var watcher = try httpx.Watcher.init(allocator, io, .{
         .dirPath = ".",
         .debounceMs = 50,
-        .pollIntervalMs = 50,
+        .pollMs = 50,
         .onChange = onFileChanged,
     });
     defer watcher.deinit();
@@ -46,10 +41,10 @@ pub fn main() !void {
     std.debug.print("Watcher started on '{s}'...\n", .{watchTarget});
 
     // Simulate an editor save
-    httpx.clock.sleepMillis(io, 100);
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(100), .awake) catch {};
     try httpx.fs.writeFile(watchTarget, "Version 2 (Modified)");
 
-    httpx.clock.sleepMillis(io, 200);
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake) catch {};
 
     // Consume queued events using next()
     var eventCount: usize = 0;
@@ -65,6 +60,4 @@ pub fn main() !void {
 
     const changes = watcher.changeCount();
     std.debug.print("Total changes captured: {d} (dequeued: {d})\n", .{ changes, eventCount });
-
-    std.debug.print("\nFile Watcher verification successful.\n", .{});
 }

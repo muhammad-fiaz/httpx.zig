@@ -1,5 +1,4 @@
-//! Local UDP send/receive round trip over loopback with
-//! `httpx.udp.UdpSocket`.
+//! Local UDP send/receive round trip over loopback with `httpx.udp`.
 //!
 //! Run with:
 //!   zig build run-udp-local
@@ -8,12 +7,15 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 pub fn main() !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var recvSock = try httpx.udp.UdpSocket.bind(io, 0);
+    var recvSock = try httpx.udp.init(allocator, io, .{});
     defer recvSock.close();
 
-    var sendSock = try httpx.udp.UdpSocket.bind(io, 0);
+    var sendSock = try httpx.udp.init(allocator, io, .{});
     defer sendSock.close();
 
     const recvPort = switch (recvSock.socket.address) {

@@ -3,6 +3,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const parserMod = @import("templateParser.zig");
+const z = @import("zigantic");
 pub const TemplateAst = parserMod.TemplateAst;
 
 pub const CachedTemplate = struct {
@@ -17,10 +18,11 @@ pub const CachedTemplate = struct {
 /// keeps pointing at live memory.
 pub const GarbageEntry = *CachedTemplate;
 
-pub const CacheConfig = struct {
-    enabled: bool = true,
-    maxTemplates: usize = 1024,
-};
+const CacheConfigSchema = z.objectOf(.{
+    .enabled = z.withDefault(z.boolean(.{}), true),
+    .maxTemplates = z.withDefault(z.positiveInt(usize, .{}), 1024),
+}, .{});
+pub const CacheConfig = CacheConfigSchema.Value;
 
 const sync = @import("../../common/sync.zig");
 

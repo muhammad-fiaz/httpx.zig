@@ -16,18 +16,22 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const tcp = @import("../sockets/tcp.zig");
-const mimeMod = @import("../utils/mime.zig");
+const mimeMod = @import("../common/mime.zig");
+const mediaTypeMod = @import("../common/mediaType.zig");
+const jsonMod = @import("../common/json.zig");
 const sync = @import("../common/sync.zig");
 const logging = @import("../common/logging.zig");
 const Method = @import("../common/method.zig").Method;
 const req = @import("requestBuilder.zig");
-const Pool = @import("connectionPool.zig").Pool;
-const PoolConfig = @import("connectionPool.zig").PoolConfig;
+const poolNs = @import("pool/connectionPool.zig");
+const Pool = poolNs.Pool;
+const PoolConfig = poolNs.PoolConfig;
 const tlsSessionCache = @import("../protocols/tls/tlsSession.zig");
 const dnsCache = @import("../net/dns/dnsCache.zig");
 const clock = @import("../common/clock.zig");
+const quicModule = @import("../protocols/quic/connection.zig");
 const HttpVersion = @import("../common/httpVersion.zig").HttpVersion;
-const DownloadCore = @import("downloadManager.zig");
+const DownloadCore = @import("download/downloadManager.zig");
 const connectivity = @import("../net/connectivity.zig");
 pub const ConnectivityOptions = connectivity.ConnectivityOptions;
 pub const ConnectivityResult = connectivity.ConnectivityResult;
@@ -45,23 +49,46 @@ pub const RemoteFileInfo = DownloadCore.RemoteFileInfo;
 
 const addressMod = @import("../net/address.zig");
 const netResolve = @import("../net/resolve.zig");
+const encoderMod = @import("../web/multipart/multipartEncoder.zig");
+const z = @import("zigantic");
+
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
+
 pub const Address = addressMod.Address;
+
+/// Restricts DNS resolution to a particular address family.
 pub const AddressFamilyPreference = enum {
+    /// Return both IPv4 and IPv6 results in resolver order.
     any,
+    /// Return only IPv4 results.
     ipv4,
+    /// Return only IPv6 results.
     ipv6,
 };
-pub const ResolveOptions = struct {
-    family: AddressFamilyPreference = .any,
-    useCache: bool = true,
-    timeoutMs: ?u64 = null,
-    /// Port stamped onto every returned address. Defaults to 443 (HTTPS).
-    port: u16 = 443,
-};
+
+/// Options for `Client.resolve` and `Client.resolveUrl`.
+const ResolveOptionsSchema = z.objectOf(.{
+    .family = z.withDefault(z.enumType(AddressFamilyPreference, .{}), .any),
+    .useCache = z.withDefault(z.boolean(.{}), true),
+    .timeoutMs = z.optional(z.integer(u64, .{})),
+    .port = z.withDefault(z.integer(u16, .{}), 443),
+}, .{});
+pub const ResolveOptions = ResolveOptionsSchema.Value;
+
+/// Owned list of resolved addresses returned by `Client.resolve`.
 pub const ResolvedAddresses = struct {
     allocator: Allocator,
     items: []addressMod.Address,
 
+    /// Releases the address list. Safe to call more than once.
     pub fn deinit(self: *ResolvedAddresses) void {
         if (self.items.len > 0) {
             self.allocator.free(self.items);
@@ -69,18 +96,22 @@ pub const ResolvedAddresses = struct {
         self.items = &.{};
     }
 
+    /// Borrowed view of every resolved address.
     pub fn slice(self: *const ResolvedAddresses) []const addressMod.Address {
         return self.items;
     }
 
+    /// First resolved address, or `null` when the result is empty.
     pub fn first(self: *const ResolvedAddresses) ?addressMod.Address {
         return if (self.items.len > 0) self.items[0] else null;
     }
 
+    /// Number of resolved addresses.
     pub fn len(self: *const ResolvedAddresses) usize {
         return self.items.len;
     }
 
+    /// Formats the address list as a comma-separated diagnostic string.
     pub fn format(self: ResolvedAddresses, writer: anytype) !void {
         for (self.items, 0..) |item, i| {
             if (i > 0) try writer.writeAll(", ");
@@ -89,99 +120,167 @@ pub const ResolvedAddresses = struct {
     }
 };
 
-pub const Config = struct {
-    maxRedirects: u8 = 10,
-    followRedirects: bool = true,
-    pool: PoolConfig = .{},
-    /// Application-supplied callback for client events (request completed, failed, etc.).
-    /// When null (the default), HTTPX produces no output.
-    eventCallback: ?logging.ClientEventCallback = null,
-    dnsCache: DnsCacheOptions = .{},
-    /// Allow bare LF line endings (instead of strict CRLF) for
-    /// non-compliant peers (issue #37). Stripping optional trailing
-    /// \r. Default false (strict RFC 9110/9112).
-    allowLfLineEndings: bool = false,
-    /// Default HTTP version for requests when per-request version not set.
-    httpVersion: ?HttpVersion = null,
-    /// Default TLS options for https:// requests.
-    tls: ?req.TlsOptions = null,
-    /// Default request timeout in ms.
-    timeoutMs: ?u64 = null,
-    /// Default max response body size.
-    maxResponseSize: ?usize = null,
-    /// Number of retry attempts for failed requests (0 = no retry).
-    maxRetries: u32 = 0,
-    /// Delay between retry attempts in milliseconds.
-    retryDelayMs: u64 = 1000,
-    /// HTTP status codes that trigger a retry (502, 503, 504 by default).
-    retryStatusCodes: []const u16 = &.{ 502, 503, 504 },
-    /// Retry replay-sensitive methods (POST, PATCH, CONNECT). Keep this
-    /// false unless the server is idempotent or deduplicates requests.
-    retryUnsafeMethods: bool = false,
-    /// Default proxy URL (e.g. "socks5://127.0.0.1:1080", "socks5h://127.0.0.1:1080", "http://127.0.0.1:8080").
-    proxy: ?[]const u8 = null,
-    /// Fast boolean toggle to use HTTP/1.0
-    http10: bool = true,
-    /// Fast boolean toggle to use HTTP/1.1
-    http11: bool = true,
-    /// Fast boolean toggle to use HTTP/2 as default protocol
-    http2: bool = false,
-    /// Fast boolean toggle to use HTTP/3 as default protocol
-    http3: bool = false,
-    /// Default early data options (disabled by default).
-    earlyData: req.EarlyDataOptions = .{},
+/// Client-wide defaults passed to `Client.init`.
+///
+/// Every field has a safe production default, so `.{}` is a complete
+/// configuration. Per-request options always override these values.
+const ConfigSchema = z.objectOf(.{
+    .maxRedirects = z.withDefault(z.integer(u8, .{}), 10),
+    .followRedirects = z.withDefault(z.boolean(.{}), true),
+    .pool = z.withDefault(poolNs.PoolConfigSchema, .{}),
+    .eventCallback = z.withDefault(z.custom(?logging.ClientEventCallback, .{
+        .check = struct {
+            fn accept(_: ?logging.ClientEventCallback) bool {
+                return true;
+            }
+        }.accept,
+    }), null),
+    .dnsCache = z.withDefault(DnsCacheOptionsSchema, .{}),
+    .allowLfLineEndings = z.withDefault(z.boolean(.{}), false),
+    .httpVersion = z.optional(z.enumType(HttpVersion, .{})),
+    .tls = z.optional(req.TlsOptionsSchema),
+    .timeoutMs = z.optional(z.integer(u64, .{})),
+    .maxResponseSize = z.optional(z.integer(usize, .{})),
+    .maxRetries = z.withDefault(z.integer(u32, .{}), 0),
+    .retryMs = z.withDefault(z.integer(u64, .{}), 1000),
+    .retryStatusCodes = z.withDefault(z.array(z.integer(u16, .{}), .{}), &.{ 502, 503, 504 }),
+    .retryUnsafeMethods = z.withDefault(z.boolean(.{}), false),
+    .proxy = z.optional(z.string(.{ .min = 1 })),
+    .http10 = z.withDefault(z.boolean(.{}), true),
+    .http11 = z.withDefault(z.boolean(.{}), true),
+    .http2 = z.withDefault(z.boolean(.{}), false),
+    .http3 = z.withDefault(z.boolean(.{}), false),
+    .earlyData = z.withDefault(req.EarlyDataOptionsSchema, .{}),
+    .protocols = z.withDefault(ProtocolsSchema, .{}),
+}, .{});
+pub const Config = ConfigSchema.Value;
 
-    pub const DnsCacheOptions = struct {
-        enable: bool = true,
-        ttlMs: i64 = 60_000,
-        negativeTtlMs: i64 = 5_000,
-        maxEntries: u32 = 1024,
-    };
+/// Nested protocol-engine tuning.
+const ProtocolsSchema = z.objectOf(.{
+    .http3 = z.withDefault(Http3OptionsSchema, .{}),
+}, .{});
+pub const Protocols = ProtocolsSchema.Value;
+
+/// HTTP/3 transport tuning.
+const Http3OptionsSchema = z.objectOf(.{
+    .quic = z.withDefault(quicModule.ConfigSchema, .{}),
+}, .{});
+pub const Http3Options = Http3OptionsSchema.Value;
+
+/// DNS cache sizing and TTL controls.
+const DnsCacheOptionsSchema = z.objectOf(.{
+    .enable = z.withDefault(z.boolean(.{}), true),
+    .ttlMs = z.withDefault(z.nonNegativeInt(i64, .{}), 60_000),
+    .negativeTtlMs = z.withDefault(z.nonNegativeInt(i64, .{}), 5_000),
+    .maxEntries = z.withDefault(z.positiveInt(u32, .{}), 1024),
+}, .{});
+pub const DnsCacheOptions = DnsCacheOptionsSchema.Value;
+
+/// Canonical description of every per-request client option.
+///
+/// Request calls still accept a struct literal (`client.get(url, .{ ... })`)
+/// because payload fields such as `.json`, `.headers`, `.form`, and
+/// `.multipart` deliberately accept several concrete shapes. This type is the
+/// single, compile-time source of truth for the *names* and documented
+/// defaults, and [`validateRequestOptions`] rejects misspelled or unknown
+/// fields at build time — there is no runtime string allowlist.
+pub const RequestOptionsSchema = z.objectOf(.{
+    .method = z.optional(z.enumType(Method, .{})),
+    .headers = z.optional(z.array(req.HeaderSchema, .{})),
+    .query = z.optional(z.array(req.HeaderSchema, .{})),
+    .body = z.optional(typedSchema(BodySource)),
+    .json = z.optional(typedSchema(std.json.Value)),
+    .form = z.optional(z.array(req.HeaderSchema, .{})),
+    .text = z.optional(z.string(.{})),
+    .contentType = z.optional(z.string(.{ .min = 1 })),
+    .multipart = z.optional(MultipartOptionsSchema),
+    .followRedirects = z.optional(z.boolean(.{})),
+    .maxRedirects = z.optional(z.integer(u8, .{})),
+    .allowLfLineEndings = z.optional(z.boolean(.{})),
+    .httpVersion = z.optional(z.enumType(HttpVersion, .{})),
+    .http10 = z.optional(z.boolean(.{})),
+    .http11 = z.optional(z.boolean(.{})),
+    .http2 = z.optional(z.boolean(.{})),
+    .http3 = z.optional(z.boolean(.{})),
+    .tls = z.optional(req.TlsOptionsSchema),
+    .cookie = z.optional(z.string(.{})),
+    .basicAuth = z.optional(z.string(.{})),
+    .bearerAuth = z.optional(z.string(.{})),
+    .timeoutMs = z.optional(z.integer(u64, .{})),
+    .maxResponseSize = z.optional(z.integer(usize, .{})),
+    .proxy = z.optional(z.string(.{ .min = 1 })),
+    .earlyData = z.optional(req.EarlyDataOptionsSchema),
+    .cancel = z.optional(typedSchema(*const std.atomic.Value(bool))),
+}, .{});
+pub const RequestOptions = RequestOptionsSchema.Value;
+
+/// Canonical multipart request-option shape. Every member is optional so the
+/// caller can use any of the supported forms: generic `.parts`, the
+/// `.fields` + `.files` shorthand, a single `.file`, or a bare single-part
+/// struct with `.name` and `.data` / `.value`.
+const MultipartOptionsSchema = z.objectOf(.{
+    .subtype = z.optional(typedSchema(encoderMod.Subtype)),
+    .boundary = z.optional(z.string(.{ .min = 1 })),
+    .parts = z.optional(z.array(encoderMod.PartSchema, .{})),
+    .fields = z.optional(z.array(encoderMod.FieldValueSchema, .{})),
+    .files = z.optional(z.array(encoderMod.FileSchema, .{})),
+    .file = z.optional(encoderMod.FileSchema),
+    .name = z.optional(z.string(.{})),
+    .filename = z.optional(z.string(.{})),
+    .contentType = z.optional(z.string(.{ .min = 1 })),
+    .data = z.optional(z.string(.{})),
+    .value = z.optional(z.string(.{})),
+}, .{});
+pub const MultipartOptions = MultipartOptionsSchema.Value;
+
+fn validateNestedOptions(comptime label: []const u8, comptime T: type, comptime Allowed: type) void {
+    const info = @typeInfo(T);
+    if (info == .optional) return validateNestedOptions(label, info.optional.child, Allowed);
+    if (info != .@"struct") return;
+    inline for (info.@"struct".field_names) |name| {
+        if (comptime !@hasField(Allowed, name)) {
+            @compileError("unknown " ++ label ++ " option `." ++ name ++ "`; available options are " ++ @typeName(Allowed));
+        }
+    }
+}
+
+fn validateRequestOptions(comptime Options: type) void {
+    if (@typeInfo(Options) != .@"struct") @compileError("client request options must be a struct literal");
+    inline for (@typeInfo(Options).@"struct".field_names) |name| {
+        if (comptime !@hasField(RequestOptions, name)) {
+            @compileError("unknown client request option `." ++ name ++ "`; available options are " ++ @typeName(RequestOptions));
+        }
+    }
+    if (@hasField(Options, "tls")) {
+        validateNestedOptions("TLS", @FieldType(Options, "tls"), req.TlsOptions);
+    }
+    if (@hasField(Options, "earlyData")) {
+        validateNestedOptions("early-data", @FieldType(Options, "earlyData"), req.EarlyDataOptions);
+    }
+    if (@hasField(Options, "multipart")) {
+        validateNestedOptions("multipart", @FieldType(Options, "multipart"), MultipartOptions);
+    }
+}
+
+/// GraphQL options add only `.operationName` to the standard request options.
+const GraphQLOptions = struct {
+    operationName: ?[]const u8 = null,
 };
 
-pub const RequestOptions = struct {
-    url: []const u8,
-    /// Explicit method for generic `request` (e.g. `.method = .GET` or `.method = .post`); if null, uses the wrapper's method.
-    method: ?Method = null,
-    headers: []const req.Header = &.{},
-    query: []const req.Header = &.{},
-    body: ?[]const u8 = null,
-    /// Serialized JSON bytes; sets Content-Type automatically.
-    json: ?[]const u8 = null,
-    /// Typed JSON value (struct) — will be `json.stringify`ed; takes precedence over `json` string if set.
-    jsonTyped: ?*const anyopaque = null,
-    jsonTypedInfo: ?struct { ptr: *const anyopaque, stringify: *const fn (Allocator, *const anyopaque) anyerror![]u8 } = null,
-    /// Encoded form body; sets Content-Type automatically.
-    form: ?[]const u8 = null,
-    text: ?[]const u8 = null,
-    contentType: ?[]const u8 = null,
-    followRedirects: ?bool = null,
-    maxRedirects: ?u8 = null,
-    /// Allow bare LF line endings for response parsing (issue #37).
-    allowLfLineEndings: bool = false,
-    /// HTTP version selection (auto or explicit). Reuses httpVersion.zig.
-    httpVersion: ?HttpVersion = null,
-    /// Fast boolean toggle to use HTTP/1.0 for this request
-    http10: ?bool = null,
-    /// Fast boolean toggle to use HTTP/1.1 for this request
-    http11: ?bool = null,
-    /// Fast boolean toggle to use HTTP/2 for this request
-    http2: ?bool = null,
-    /// Fast boolean toggle to use HTTP/3 for this request
-    http3: ?bool = null,
-    tls: ?req.TlsOptions = null,
-    cookie: ?[]const u8 = null,
-    basicAuth: ?[]const u8 = null,
-    bearerAuth: ?[]const u8 = null,
-    timeoutMs: ?u64 = null,
-    maxResponseSize: ?usize = null,
-    /// Optional proxy URL for this request.
-    proxy: ?[]const u8 = null,
-    /// 0-RTT early data options for this request.
-    earlyData: ?req.EarlyDataOptions = null,
-    /// Streaming body source for bounded-memory chunked/streamed uploads across HTTP/1.1, HTTP/2, and HTTP/3.
-    bodySource: ?req.BodySource = null,
-};
+fn validateGraphQLOptions(comptime Options: type) void {
+    if (@typeInfo(Options) != .@"struct") @compileError("GraphQL options must be a struct literal");
+    inline for (@typeInfo(Options).@"struct".field_names) |name| {
+        if (comptime !@hasField(RequestOptions, name) and !@hasField(GraphQLOptions, name)) {
+            @compileError("unknown GraphQL option `." ++ name ++ "`");
+        }
+    }
+    if (@hasField(Options, "tls")) {
+        validateNestedOptions("TLS", @FieldType(Options, "tls"), req.TlsOptions);
+    }
+    if (@hasField(Options, "earlyData")) {
+        validateNestedOptions("early-data", @FieldType(Options, "earlyData"), req.EarlyDataOptions);
+    }
+}
 
 pub const Response = req.Response;
 pub const ResponseStream = req.ResponseStream;
@@ -236,26 +335,214 @@ fn extractMethod(opts: anytype) Method {
     return .GET;
 }
 
+/// True when an optional option is present and carries a value. Used to reject
+/// conflicting body options instead of silently preferring one.
+fn optionPresent(opts: anytype, comptime name: []const u8) bool {
+    if (!@hasField(@TypeOf(opts), name)) return false;
+    const v = @field(opts, name);
+    const T = @TypeOf(v);
+    if (T == @TypeOf(null)) return false;
+    if (comptime @typeInfo(T) == .optional) return v != null;
+    return true;
+}
+
+fn extractBodySource(opts: anytype) ?req.BodySource {
+    const O = @TypeOf(opts);
+    if (@hasField(O, "body")) {
+        const v = opts.body;
+        const T = @TypeOf(v);
+        if (T == req.BodySource) return v;
+        if (comptime @typeInfo(T) == .optional and @typeInfo(T).optional.child == req.BodySource) return v;
+    }
+    return null;
+}
+
+fn extractCancel(opts: anytype) ?*const std.atomic.Value(bool) {
+    const O = @TypeOf(opts);
+    if (@hasField(O, "cancel")) {
+        const value = opts.cancel;
+        if (comptime @typeInfo(@TypeOf(value)) == .optional) return value;
+        return value;
+    }
+    return null;
+}
+
+fn fetchForParsing(client: *Client, url: []const u8, opts: anytype) !req.Response {
+    return client.get(url, opts);
+}
+
+/// `client.document.fetch(...)` — fetches and auto-detects HTML, XML, feed,
+/// robots, or sitemap documents from the response media type.
+pub const DocumentApi = struct {
+    /// Fetches `url` and parses the body using the detected document type.
+    pub fn fetch(self: *DocumentApi, url: []const u8, opts: anytype) !@import("../parsing/document.zig").Document {
+        const client: *Client = @fieldParentPtr("document", self);
+        var res = try fetchForParsing(client, url, opts);
+        defer res.deinit();
+        return @import("../parsing/document.zig").Parser.init(client.allocator, client.io, .{}).parse(res.body, res.header("content-type"));
+    }
+};
+
+/// `client.html.fetch(...)` — fetches and parses an HTML document.
+pub const HtmlApi = struct {
+    /// Fetches `url` and parses the body as HTML.
+    pub fn fetch(self: *HtmlApi, url: []const u8, opts: anytype) !@import("../parsing/document.zig").Document {
+        const client: *Client = @fieldParentPtr("html", self);
+        var res = try fetchForParsing(client, url, opts);
+        defer res.deinit();
+        return @import("../parsing/document.zig").Parser.init(client.allocator, client.io, .{}).parseHtml(res.body);
+    }
+};
+
+/// `client.xml.fetch(...)` — fetches and parses an XML document.
+pub const XmlApi = struct {
+    /// Fetches `url` and parses the body as XML.
+    pub fn fetch(self: *XmlApi, url: []const u8, opts: anytype) !@import("../parsing/document.zig").Document {
+        const client: *Client = @fieldParentPtr("xml", self);
+        var res = try fetchForParsing(client, url, opts);
+        defer res.deinit();
+        return @import("../parsing/document.zig").Parser.init(client.allocator, client.io, .{}).parseXml(res.body);
+    }
+};
+
+/// `client.feed.fetch(...)` — fetches and parses RSS, Atom, or JSON feeds.
+pub const FeedApi = struct {
+    /// Fetches `url` and parses the body as a feed.
+    pub fn fetch(self: *FeedApi, url: []const u8, opts: anytype) !@import("../parsing/feed.zig").Feed {
+        const client: *Client = @fieldParentPtr("feed", self);
+        var res = try fetchForParsing(client, url, opts);
+        defer res.deinit();
+        return @import("../parsing/feed.zig").parse(client.allocator, res.body, res.header("content-type"));
+    }
+};
+
+/// `client.robots.fetch(...)` — fetches and parses a `robots.txt` file.
+pub const RobotsApi = struct {
+    /// Fetches `url` and parses the body as a robots file.
+    pub fn fetch(self: *RobotsApi, url: []const u8, opts: anytype) !@import("../parsing/robots.zig").RobotsFile {
+        const client: *Client = @fieldParentPtr("robots", self);
+        var res = try fetchForParsing(client, url, opts);
+        defer res.deinit();
+        return @import("../parsing/robots.zig").parse(client.allocator, res.body);
+    }
+};
+
+/// `client.sitemap.fetch(...)` — fetches and parses an XML sitemap.
+pub const SitemapApi = struct {
+    /// Fetches `url` and parses the body as a sitemap.
+    pub fn fetch(self: *SitemapApi, url: []const u8, opts: anytype) !@import("../parsing/sitemap.zig").Sitemap {
+        const client: *Client = @fieldParentPtr("sitemap", self);
+        var res = try fetchForParsing(client, url, opts);
+        defer res.deinit();
+        return @import("../parsing/sitemap.zig").parse(client.allocator, res.body);
+    }
+};
+
+/// Client-side TLS 1.3 session cache. Reached as `client.session`, so cached
+/// resumption state is inspected and managed through explicit `.{}` options:
+///
+/// ```zig
+/// if (client.session.cache("example.com", 443, .{ .alpn = "h3" })) |session| {
+///     defer session.deinit(allocator);
+/// }
+/// ```
+pub const Session = struct {
+    sessions: tlsSessionCache.SessionCache,
+    io: std.Io,
+    defaultTls: req.TlsOptions,
+
+    const CacheOptionsSchema = z.objectOf(.{
+        .alpn = z.withDefault(z.string(.{ .min = 1 }), "h2"),
+        .tls = z.optional(req.TlsOptionsSchema),
+    }, .{});
+    pub const CacheOptions = CacheOptionsSchema.Value;
+
+    /// Options for `Session.init`. The default TLS options are used as the
+    /// fallback policy when `cache`/`store` are called without explicit `.tls`.
+    pub const InitOptions = struct {
+        tls: ?req.TlsOptions = null,
+    };
+
+    pub fn init(allocator: Allocator, io: std.Io, options: InitOptions) Session {
+        return .{
+            .sessions = tlsSessionCache.SessionCache.init(allocator),
+            .io = io,
+            .defaultTls = options.tls orelse .{},
+        };
+    }
+
+    pub fn deinit(self: *Session) void {
+        self.sessions.deinit();
+    }
+
+    /// Returns an owned copy of a cached session for `host`/`port`, or `null`.
+    /// The caller owns the result and releases it with `ClientSession.deinit`.
+    pub fn cache(self: *Session, host: []const u8, port: u16, options: CacheOptions) ?tlsSessionCache.ClientSession {
+        const tls = options.tls orelse self.defaultTls;
+        return self.sessions.getWithAlpnPolicy(
+            host,
+            port,
+            @intCast(clock.millisNow(self.io)),
+            options.alpn,
+            req.sessionPolicyFingerprint(tls),
+        );
+    }
+
+    /// Stores an owned copy of `session` for later resumption.
+    pub fn store(self: *Session, host: []const u8, port: u16, session: *const tlsSessionCache.ClientSession, options: CacheOptions) void {
+        const tls = options.tls orelse self.defaultTls;
+        self.sessions.putWithPolicy(host, port, session, req.sessionPolicyFingerprint(tls));
+    }
+};
+
+/// Pooled HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3 client.
+///
+/// The client owns its connection pool, DNS cache, and TLS session cache and
+/// borrows the allocator and `std.Io` supplied to `init`. Request methods take
+/// a `.{}` options literal; unknown option names are rejected at compile time.
 pub const Client = struct {
+    pub const Document = DocumentApi;
+    pub const Html = HtmlApi;
+    pub const Xml = XmlApi;
+    pub const Feed = FeedApi;
+    pub const Robots = RobotsApi;
+    pub const Sitemap = SitemapApi;
+
+    document: DocumentApi = .{},
+    html: HtmlApi = .{},
+    xml: XmlApi = .{},
+    feed: FeedApi = .{},
+    robots: RobotsApi = .{},
+    sitemap: SitemapApi = .{},
     allocator: Allocator,
     io: std.Io,
     pool: Pool,
     config: Config,
     dnsCache: ?dnsCache.Cache = null,
-    /// Origin-keyed TLS 1.3 session cache for resumption on the native
-    /// TLS paths (H2-TLS always; HTTPS/1.1 when already native via
-    /// client certificates). Shared across threads; bounded.
-    sessionCache: tlsSessionCache.SessionCache,
+    /// Origin-keyed TLS 1.3 session cache for resumption on the native TLS
+    /// paths. Reached as `client.session`.
+    session: Session,
+    /// False when the configuration failed schema validation; requests then
+    /// fail with `error.InvalidConfig` instead of running with bad bounds.
+    configValid: bool = true,
 
-    /// Initializes client with explicit allocator and shared IO.
-    /// Matches `var client = httpx.Client.init(allocator, io, .{});`
+    /// Creates a client from an explicit allocator, shared I/O, and a partial
+    /// or full `.{}` config. Omitted fields keep their declared defaults.
+    ///
+    /// ```zig
+    /// var client = httpx.Client.init(allocator, io, .{ .timeoutMs = 5_000 });
+    /// defer client.deinit();
+    /// ```
     pub fn init(allocator: Allocator, io: std.Io, config: Config) Client {
+        var scratch: [4096]u8 = undefined;
+        const issue = z.checkFirst(ConfigSchema, config, &scratch, .{}) catch null;
         var c = Client{
             .allocator = allocator,
             .io = io,
             .pool = Pool.init(allocator, io, config.pool),
             .config = config,
-            .sessionCache = tlsSessionCache.SessionCache.init(allocator),
+            .session = Session.init(allocator, io, .{ .tls = config.tls }),
+            .configValid = issue == null,
         };
         if (config.dnsCache.enable) {
             c.dnsCache = dnsCache.Cache.init(
@@ -273,24 +560,11 @@ pub const Client = struct {
         return c;
     }
 
+    /// Releases the DNS cache, connection pool, and TLS session cache.
     pub fn deinit(self: *Client) void {
         if (self.dnsCache) |*cache| cache.deinit();
         self.pool.deinit();
-        self.sessionCache.deinit();
-    }
-
-    /// The primary unified HTTP client operation.
-    ///
-    /// Executes an HTTP request to `url` with options (method, headers, body, json, query, timeout, etc.):
-    ///   const response = try client.fetch("https://api.example.com/users", .{
-    ///       .method = .POST,
-    ///       .json = CreateUser{ .name = "Fiaz", .email = "example@example.com" },
-    ///   });
-    ///   defer response.deinit();
-    ///   const user = try response.json(User);
-    pub fn fetch(self: *Client, url: []const u8, opts: anytype) Error!Response {
-        const m: Method = extractMethod(opts);
-        return self.doRequestWithOverride(m, url, opts);
+        self.session.deinit();
     }
 
     /// GET request. `url` is the first argument; `opts` is request options.
@@ -303,35 +577,6 @@ pub const Client = struct {
     ///   const res = try client.post("https://example.com/api", .{ .json = payload });
     pub fn post(self: *Client, url: []const u8, opts: anytype) Error!Response {
         return self.doRequestWithOverride(.POST, url, opts);
-    }
-
-    /// POST request with typed struct or JSON payload.
-    ///   const res = try client.postJson("https://example.com/api", payload, .{});
-    pub fn postJson(self: *Client, url: []const u8, payload: anytype, opts: anytype) Error!Response {
-        const P = @TypeOf(payload);
-        if (P == []const u8 or P == []u8) {
-            return self.doRequestWithOverride(.POST, url, .{
-                .json = payload,
-                .headers = if (@hasField(@TypeOf(opts), "headers")) opts.headers else null,
-                .timeoutMs = if (@hasField(@TypeOf(opts), "timeoutMs")) opts.timeoutMs else null,
-                .bearerAuth = if (@hasField(@TypeOf(opts), "bearerAuth")) opts.bearerAuth else null,
-                .basicAuth = if (@hasField(@TypeOf(opts), "basicAuth")) opts.basicAuth else null,
-                .tls = if (@hasField(@TypeOf(opts), "tls")) opts.tls else null,
-                .proxy = if (@hasField(@TypeOf(opts), "proxy")) opts.proxy else null,
-            });
-        } else {
-            const jsonBytes = std.json.Stringify.valueAlloc(self.allocator, payload, .{}) catch return Error.OutOfMemory;
-            defer self.allocator.free(jsonBytes);
-            return self.doRequestWithOverride(.POST, url, .{
-                .json = jsonBytes,
-                .headers = if (@hasField(@TypeOf(opts), "headers")) opts.headers else null,
-                .timeoutMs = if (@hasField(@TypeOf(opts), "timeoutMs")) opts.timeoutMs else null,
-                .bearerAuth = if (@hasField(@TypeOf(opts), "bearerAuth")) opts.bearerAuth else null,
-                .basicAuth = if (@hasField(@TypeOf(opts), "basicAuth")) opts.basicAuth else null,
-                .tls = if (@hasField(@TypeOf(opts), "tls")) opts.tls else null,
-                .proxy = if (@hasField(@TypeOf(opts), "proxy")) opts.proxy else null,
-            });
-        }
     }
 
     /// PUT request.
@@ -364,18 +609,16 @@ pub const Client = struct {
         return self.doRequestWithOverride(.OPTIONS, url, opts);
     }
 
-    /// TRACE request.
-    pub fn trace(self: *Client, url: []const u8, opts: anytype) Error!Response {
-        return self.doRequestWithOverride(.TRACE, url, opts);
-    }
-
-    /// CONNECT request.
-    pub fn connect(self: *Client, url: []const u8, opts: anytype) Error!Response {
-        return self.doRequestWithOverride(.CONNECT, url, opts);
-    }
-
     /// Generic request with explicit method in opts (.method = .GET / .POST / ...).
     ///   const res = try client.request("https://example.com/", .{ .method = .GET });
+    /// Fetch-style convenience operation backed by the same native request
+    /// transport as `request`. It does not apply browser-only policies;
+    /// response ownership and supported options are identical.
+    pub fn fetch(self: *Client, url: []const u8, opts: anytype) Error!Response {
+        return self.request(url, opts);
+    }
+
+    /// Sends a generic request; `.method` selects the method and defaults to GET.
     pub fn request(self: *Client, url: []const u8, opts: anytype) Error!Response {
         const m: Method = extractMethod(opts);
         return self.doRequestWithOverride(m, url, opts);
@@ -387,278 +630,59 @@ pub const Client = struct {
         return self.doRequestStream(m, url, opts);
     }
 
-    /// Alias for `requestStream`.
-    pub fn stream(self: *Client, url: []const u8, opts: anytype) Error!ResponseStream {
-        return self.requestStream(url, opts);
-    }
-
-    /// Returns a direct streaming file downloader attached to this client.
-    pub fn downloader(self: *Client) DownloadCore.Downloader {
-        return DownloadCore.Downloader.init(self.allocator, self);
-    }
-
-    /// Convenience batch file download helper: downloads multiple files using this client.
-    pub fn downloadAll(self: *Client, tasks: []const DownloadCore.DownloadTask, opts: DownloadOptions) ![]DownloadResult {
-        var dl = self.downloader();
-        return dl.downloadAll(tasks, opts);
-    }
-
-    /// Batch: concurrent array of requests (runs in parallel, reuses pool and dns cache).
-    ///
-    /// Caller owns the returned slice: deinit each Response, then free the
-    /// slice with this client's allocator.
-    pub fn requestAll(self: *Client, reqs: anytype) ![]Response {
-        const R = @TypeOf(reqs);
-        var owned: ?[]RequestOptions = null;
-        defer if (owned) |buf| self.allocator.free(buf);
-        const slice: []const RequestOptions = blk: {
-            if (R == []const RequestOptions or R == []RequestOptions) break :blk reqs;
-            const info = @typeInfo(R);
-            if (info == .pointer) {
-                if (info.pointer.size == .slice) break :blk reqs;
-                if (info.pointer.size == .one and @typeInfo(info.pointer.child) == .array) break :blk reqs[0..];
-            }
-            if (info == .array) break :blk reqs[0..];
-            if (info == .@"struct" and info.@"struct".is_tuple) {
-                const buf = try self.allocator.alloc(RequestOptions, info.@"struct".field_names.len);
-                owned = buf;
-                inline for (info.@"struct".field_names, 0..) |name, i| {
-                    const item = @field(reqs, name);
-                    if (@typeInfo(@TypeOf(item)) != .@"struct") @compileError("requestAll tuple entries must be option structs");
-                    if (!@hasField(@TypeOf(item), "url")) @compileError("requestAll tuple entries require a url");
-                    buf[i] = .{ .url = item.url };
-                    inline for (@typeInfo(@TypeOf(item)).@"struct".field_names) |fname| {
-                        if (!@hasField(RequestOptions, fname)) @compileError("unknown request option: " ++ fname);
-                        if (comptime std.mem.eql(u8, fname, "url")) continue;
-                        @field(buf[i], fname) = @field(item, fname);
-                    }
-                }
-                break :blk buf;
-            }
-            @compileError("requestAll expects a slice, array, or tuple of request option structs");
-        };
-        var out = try self.allocator.alloc(Response, slice.len);
-        if (slice.len <= 1) {
-            for (slice, 0..) |item, i| {
-                out[i] = self.doRequest(item.method orelse .GET, item.url, item) catch |e| {
-                    // Only entries before i were assigned; later slots are uninitialized.
-                    for (out[0..i]) |*r| r.deinit();
-                    self.allocator.free(out);
-                    return e;
-                };
-            }
-            return out;
-        }
-
-        const TaskCtx = struct {
-            client: *Client,
-            reqs: []const RequestOptions,
-            out: []Response,
-            success: []bool,
-            nextIdx: *std.atomic.Value(usize),
-            errMutex: sync.Spinlock = .{},
-            firstErr: ?anyerror = null,
-
-            fn worker(ctx: *@This()) void {
-                while (true) {
-                    const idx = ctx.nextIdx.fetchAdd(1, .monotonic);
-                    if (idx >= ctx.reqs.len) break;
-                    {
-                        ctx.errMutex.lock();
-                        const hasErr = ctx.firstErr != null;
-                        ctx.errMutex.unlock();
-                        if (hasErr) break;
-                    }
-
-                    const current = ctx.reqs[idx];
-                    const resp = ctx.client.doRequestWithOverride(current.method orelse .GET, current.url, current) catch |e| {
-                        ctx.errMutex.lock();
-                        if (ctx.firstErr == null) ctx.firstErr = e;
-                        ctx.errMutex.unlock();
-                        break;
-                    };
-                    ctx.out[idx] = resp;
-                    ctx.success[idx] = true;
-                }
-            }
-        };
-
-        const success = self.allocator.alloc(bool, slice.len) catch |e| {
-            self.allocator.free(out);
-            return e;
-        };
-        defer self.allocator.free(success);
-        @memset(success, false);
-
-        var nextIdx = std.atomic.Value(usize).init(0);
-        var taskCtx = TaskCtx{
-            .client = self,
-            .reqs = slice,
-            .out = out,
-            .success = success,
-            .nextIdx = &nextIdx,
-        };
-
-        // Keep batch fan-out bounded independently of batch size. A failed
-        // thread spawn leaves its work for the workers that did start (or
-        // the caller below), rather than running an untracked extra worker.
-        const workerCount = @min(@as(usize, 16), slice.len);
-        var threads = self.allocator.alloc(std.Thread, workerCount - 1) catch |e| {
-            self.allocator.free(out);
-            return e;
-        };
-        defer self.allocator.free(threads);
-
-        var started: usize = 0;
-        while (started < threads.len) : (started += 1) {
-            threads[started] = std.Thread.spawn(.{}, TaskCtx.worker, .{&taskCtx}) catch break;
-        }
-
-        // Always run one worker on the calling thread; this also covers
-        // batches where every additional thread spawn failed.
-        TaskCtx.worker(&taskCtx);
-
-        for (threads[0..started]) |th| th.join();
-
-        if (taskCtx.firstErr) |e| {
-            for (0..slice.len) |i| {
-                if (success[i]) out[i].deinit();
-            }
-            self.allocator.free(out);
-            return e;
-        }
-        return out;
-    }
-
-    /// Parallel GETs. Ownership: deinit each Response, then free the slice
-    /// with this client's allocator (see requestAll).
-    pub fn getAll(self: *Client, urls: anytype) ![]Response {
-        const U = @TypeOf(urls);
-        const slice: []const []const u8 = blk: {
-            if (U == []const []const u8 or U == [][]const u8) break :blk urls;
-            const info = @typeInfo(U);
-            if (info == .pointer) {
-                if (info.pointer.size == .slice) break :blk urls;
-                if (info.pointer.size == .one and @typeInfo(info.pointer.child) == .array) break :blk urls[0..];
-            }
-            if (info == .array) break :blk urls[0..];
-            @compileError("getAll expects a slice or array of URL strings");
-        };
-        var reqs = try self.allocator.alloc(RequestOptions, slice.len);
-        defer self.allocator.free(reqs);
-        for (slice, 0..) |url, i| reqs[i] = .{ .url = url };
-        return self.requestAll(reqs);
-    }
-
-    fn coerceDownloadOptions(opts: anytype) DownloadOptions {
-        if (@TypeOf(opts) == DownloadOptions) return opts;
-        var o = DownloadOptions{};
-        const downloadOptsInfo = @typeInfo(@TypeOf(opts)).@"struct";
-        inline for (downloadOptsInfo.field_names) |fname| {
-            if (comptime std.mem.eql(u8, fname, "verify")) {
-                const v = @field(opts, fname);
-                if (@TypeOf(v) == VerifyOptions) {
-                    o.verify = v;
-                } else {
-                    const verifyInfo = @typeInfo(@TypeOf(v)).@"struct";
-                    inline for (verifyInfo.field_names) |vfname| {
-                        if (@hasField(VerifyOptions, vfname)) {
-                            @field(o.verify, vfname) = @field(v, vfname);
-                        }
-                    }
-                }
-            } else if (@hasField(DownloadOptions, fname)) {
-                @field(o, fname) = @field(opts, fname);
-            }
-        }
-        return o;
-    }
-
     /// Streams a download to disk with progress reporting, resume, and verification.
-    pub fn download(self: *Client, url: []const u8, opts: anytype) DownloadError!DownloadResult {
+    pub fn download(self: *Client, url: []const u8, opts: DownloadOptions) DownloadError!DownloadResult {
         var dl = DownloadCore.Downloader.init(self.allocator, self);
-        const downloadOptions = coerceDownloadOptions(opts);
-        return dl.download(url, downloadOptions);
-    }
-
-    /// Downloads a batch of files concurrently using the client's internal allocator.
-    pub fn downloadBatch(self: *Client, tasks: []const struct { url: []const u8, dest: []const u8 }, opts: anytype) DownloadError!void {
-        const downloadOptions = coerceDownloadOptions(opts);
-        for (tasks) |t| {
-            var perTask = downloadOptions;
-            perTask.path = t.dest;
-            _ = try self.download(t.url, perTask);
-        }
+        return dl.download(url, opts);
     }
 
     /// Queries remote file metadata (size, filename, Content-Type, ETag, Range support) without downloading.
-    pub fn lookupFileInfo(self: *Client, url: []const u8, opts: anytype) DownloadError!RemoteFileInfo {
-        const downloadOptions = coerceDownloadOptions(opts);
+    pub fn lookupFileInfo(self: *Client, url: []const u8, downloadOptions: DownloadOptions) DownloadError!RemoteFileInfo {
         return DownloadCore.lookupFileInfo(self, url, downloadOptions);
     }
 
-    /// Returns a Parser bound to this Client's allocator and config.
-    pub fn parser(self: *Client) @import("../parsing/document.zig").Parser {
-        return @import("../parsing/document.zig").Parser.init(self.allocator, .{});
-    }
-
-    /// Fetches a remote URL and parses it as a Document.
-    pub fn fetchDocument(self: *Client, url: []const u8, opts: anytype) !@import("../parsing/document.zig").Document {
-        var res = try self.get(url, opts);
-        defer res.deinit();
-        return @import("../parsing/document.zig").Document.parse(self.allocator, res.header("content-type"), res.body);
-    }
-
-    /// Fetches a remote URL and parses it as HTML.
-    pub fn fetchHtml(self: *Client, url: []const u8, opts: anytype) !@import("../parsing/document.zig").Document {
-        var res = try self.get(url, opts);
-        defer res.deinit();
-        return @import("../parsing/document.zig").Document.parseHtml(self.allocator, res.body);
-    }
-
-    /// Fetches a remote URL and parses it as XML.
-    pub fn fetchXml(self: *Client, url: []const u8, opts: anytype) !@import("../parsing/document.zig").Document {
-        var res = try self.get(url, opts);
-        defer res.deinit();
-        return @import("../parsing/document.zig").Document.parseXml(self.allocator, res.body);
-    }
-
-    /// Fetches a remote RSS/Atom/JSON feed.
-    pub fn fetchFeed(self: *Client, url: []const u8, opts: anytype) !@import("../parsing/feed.zig").Feed {
-        var res = try self.get(url, opts);
-        defer res.deinit();
-        return @import("../parsing/feed.zig").parse(self.allocator, res.body, res.header("content-type"));
-    }
-
-    /// Fetches robots.txt from a URL.
-    pub fn fetchRobots(self: *Client, url: []const u8, opts: anytype) !@import("../parsing/robots.zig").RobotsFile {
-        var res = try self.get(url, opts);
-        defer res.deinit();
-        return @import("../parsing/robots.zig").parse(self.allocator, res.body);
-    }
-
-    /// Fetches sitemap XML from a URL.
-    pub fn fetchSitemap(self: *Client, url: []const u8, opts: anytype) !@import("../parsing/sitemap.zig").Sitemap {
-        var res = try self.get(url, opts);
-        defer res.deinit();
-        return @import("../parsing/sitemap.zig").parse(self.allocator, res.body);
-    }
-
     /// Executes a GraphQL query or mutation against a remote endpoint.
-    /// `opts` may supply `.timeoutMs`, `.bearerAuth`, `.tls`, etc.
+    ///
+    /// `variables` is either `null`, a pre-encoded JSON object string, or any
+    /// Zig value. Struct variables are serialized with their exact field names,
+    /// so quoted identifiers such as `@"user-id"` reach the server unchanged.
+    /// `opts` may supply `.operationName`, `.headers`, `.timeoutMs`,
+    /// `.bearerAuth`, `.tls`, and the other request options.
     pub fn graphql(self: *Client, url: []const u8, queryStr: []const u8, variables: anytype, opts: anytype) !Response {
+        validateGraphQLOptions(@TypeOf(opts));
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const aa = arena.allocator();
+
+        var payload = try std.json.ObjectMap.init(aa, &.{}, &.{});
+        try payload.put(aa, "query", .{ .string = queryStr });
+
         const VarsType = @TypeOf(variables);
-        const payloadJson = if (VarsType == @TypeOf(null))
-            try std.json.Stringify.valueAlloc(self.allocator, .{ .query = queryStr }, .{})
-        else if (VarsType == []const u8 or VarsType == []u8)
-            try std.json.Stringify.valueAlloc(self.allocator, .{ .query = queryStr, .variables = variables }, .{})
-        else
-            try std.json.Stringify.valueAlloc(self.allocator, .{ .query = queryStr, .variables = variables }, .{});
+        if (VarsType != @TypeOf(null)) {
+            const value: std.json.Value = if (VarsType == []const u8 or VarsType == []u8)
+                std.json.parseFromSliceLeaky(std.json.Value, aa, variables, .{}) catch return error.InvalidGraphQLVariables
+            else blk: {
+                const encoded = std.json.Stringify.valueAlloc(aa, variables, .{}) catch return error.OutOfMemory;
+                break :blk std.json.parseFromSliceLeaky(std.json.Value, aa, encoded, .{}) catch return error.InvalidGraphQLVariables;
+            };
+            try payload.put(aa, "variables", value);
+        }
+
+        if (@hasField(@TypeOf(opts), "operationName")) {
+            const raw = opts.operationName;
+            if (@typeInfo(@TypeOf(raw)) == .optional) {
+                if (raw) |name| try payload.put(aa, "operationName", .{ .string = name });
+            } else {
+                try payload.put(aa, "operationName", .{ .string = raw });
+            }
+        }
+
+        const payloadJson = try std.json.Stringify.valueAlloc(self.allocator, std.json.Value{ .object = payload }, .{});
         defer self.allocator.free(payloadJson);
 
         const gqlHeaders = [_]req.Header{
-            .{ .name = "content-type", .value = "application/json" },
-            .{ .name = "accept", .value = "application/json" },
+            .{ .name = "content-type", .value = mediaTypeMod.applicationJson },
+            .{ .name = "accept", .value = mediaTypeMod.applicationJson },
         };
         // Caller headers, when present, are the complete set (same replace
         // semantics as every other operation); otherwise the JSON defaults
@@ -677,31 +701,15 @@ pub const Client = struct {
         });
     }
 
-    /// Fluent, type-safe RequestBuilder chained builder.
-    pub fn requestBuilder(self: *Client, m: Method, url: []const u8) RequestBuilder {
+    /// Starts a fluent `RequestBuilder` for a single request.
+    pub fn builder(self: *Client, m: Method, url: []const u8) RequestBuilder {
         return RequestBuilder.init(self, m, url);
     }
 
-    /// Alias for `requestBuilder`.
-    pub fn builder(self: *Client, m: Method, url: []const u8) RequestBuilder {
-        return self.requestBuilder(m, url);
-    }
-
-    /// Alias for `requestBuilder`.
-    pub fn buildRequest(self: *Client, m: Method, url: []const u8) RequestBuilder {
-        return self.requestBuilder(m, url);
-    }
-
-    /// Start a GET RequestBuilder for the given URL.
-    pub fn getBuilder(self: *Client, url: []const u8) RequestBuilder {
-        return self.requestBuilder(.GET, url);
-    }
-
-    /// Start a POST RequestBuilder for the given URL.
-    pub fn postBuilder(self: *Client, url: []const u8) RequestBuilder {
-        return self.requestBuilder(.POST, url);
-    }
-
+    /// Fluent request builder returned by `Client.builder`.
+    ///
+    /// Chain setters, then call `send` or `sendStream`. The builder borrows
+    /// header/query/body values; call `deinit` when finished.
     pub const RequestBuilder = struct {
         client: *Client,
         method: Method,
@@ -713,7 +721,9 @@ pub const Client = struct {
         timeoutMsValue: ?u64 = null,
         bearerAuthValue: ?[]const u8 = null,
         basicAuthValue: ?[]const u8 = null,
+        cancelValue: ?*const std.atomic.Value(bool) = null,
 
+        /// Creates a builder for one request on `client`.
         pub fn init(client: *Client, m: Method, url: []const u8) RequestBuilder {
             return .{
                 .client = client,
@@ -724,17 +734,20 @@ pub const Client = struct {
             };
         }
 
+        /// Frees builder-owned header/query lists and encoded JSON.
         pub fn deinit(self: *RequestBuilder) void {
             if (self.jsonAllocated) |j| self.client.allocator.free(j);
             self.headersList.deinit(self.client.allocator);
             self.queryList.deinit(self.client.allocator);
         }
 
+        /// Appends one request header.
         pub fn header(self: *RequestBuilder, name: []const u8, value: []const u8) !*RequestBuilder {
             try self.headersList.append(self.client.allocator, .{ .name = name, .value = value });
             return self;
         }
 
+        /// Appends every header in `hdrs`.
         pub fn headers(self: *RequestBuilder, hdrs: []const req.Header) !*RequestBuilder {
             for (hdrs) |h| {
                 _ = try self.header(h.name, h.value);
@@ -742,61 +755,70 @@ pub const Client = struct {
             return self;
         }
 
+        /// Appends one query parameter.
         pub fn query(self: *RequestBuilder, name: []const u8, value: []const u8) !*RequestBuilder {
             try self.queryList.append(self.client.allocator, .{ .name = name, .value = value });
             return self;
         }
 
-        pub fn timeout(self: *RequestBuilder, ms: u64) *RequestBuilder {
+        /// Sets the per-request timeout in milliseconds.
+        pub fn timeoutMs(self: *RequestBuilder, ms: u64) *RequestBuilder {
             self.timeoutMsValue = ms;
             return self;
         }
 
-        pub fn timeoutMs(self: *RequestBuilder, ms: u64) *RequestBuilder {
-            return self.timeout(ms);
-        }
-
-        pub fn bearer(self: *RequestBuilder, tok: []const u8) *RequestBuilder {
+        /// Sets a Bearer token for the `Authorization` header.
+        pub fn bearerAuth(self: *RequestBuilder, tok: []const u8) *RequestBuilder {
             self.bearerAuthValue = tok;
             return self;
         }
 
-        pub fn bearerAuth(self: *RequestBuilder, tok: []const u8) *RequestBuilder {
-            return self.bearer(tok);
-        }
-
-        pub fn basic(self: *RequestBuilder, creds: []const u8) *RequestBuilder {
+        /// Sets a `user:password` pair for Basic authentication.
+        pub fn basicAuth(self: *RequestBuilder, creds: []const u8) *RequestBuilder {
             self.basicAuthValue = creds;
             return self;
         }
 
-        pub fn basicAuth(self: *RequestBuilder, creds: []const u8) *RequestBuilder {
-            return self.basic(creds);
+        /// Attaches a cooperative cancellation flag.
+        pub fn cancel(self: *RequestBuilder, flag: *const std.atomic.Value(bool)) *RequestBuilder {
+            self.cancelValue = flag;
+            return self;
         }
 
+        /// Sets raw body bytes.
         pub fn body(self: *RequestBuilder, b: []const u8) *RequestBuilder {
             self.bodyBytes = b;
             return self;
         }
 
-        pub fn form(self: *RequestBuilder, encoded: []const u8) !*RequestBuilder {
-            self.bodyBytes = encoded;
-            _ = try self.header("content-type", "application/x-www-form-urlencoded");
+        /// Sets the body and its `Content-Type`.
+        pub fn contentType(self: *RequestBuilder, ct: []const u8) !*RequestBuilder {
+            _ = try self.header("content-type", ct);
             return self;
         }
 
+        /// Sets a pre-encoded `application/x-www-form-urlencoded` body.
+        pub fn form(self: *RequestBuilder, encoded: []const u8) !*RequestBuilder {
+            self.bodyBytes = encoded;
+            _ = try self.header("content-type", mediaTypeMod.formUrlEncoded);
+            return self;
+        }
+
+        /// Serializes `value` as JSON and sets `Content-Type: application/json`.
+        /// Field names are the exact Zig names, quoted identifiers included.
         pub fn json(self: *RequestBuilder, value: anytype) !*RequestBuilder {
             if (self.jsonAllocated) |j| {
                 self.client.allocator.free(j);
                 self.jsonAllocated = null;
             }
-            const jBytes = try std.json.Stringify.valueAlloc(self.client.allocator, value, .{});
+            const jBytes = try req.jsonBody(self.client.allocator, value);
             self.jsonAllocated = jBytes;
             self.bodyBytes = jBytes;
-            _ = try self.header("content-type", "application/json");
+            _ = try self.header("content-type", mediaTypeMod.applicationJson);
             return self;
         }
 
+        /// Sends the buffered request and returns the complete response.
         pub fn send(self: *RequestBuilder) !Response {
             return self.client.doRequestWithOverride(self.method, self.url, .{
                 .headers = self.headersList.items,
@@ -805,9 +827,11 @@ pub const Client = struct {
                 .timeoutMs = self.timeoutMsValue,
                 .bearerAuth = self.bearerAuthValue,
                 .basicAuth = self.basicAuthValue,
+                .cancel = self.cancelValue,
             });
         }
 
+        /// Sends the request and returns an incremental `ResponseStream`.
         pub fn sendStream(self: *RequestBuilder) !ResponseStream {
             return self.client.doRequestStream(self.method, self.url, .{
                 .headers = self.headersList.items,
@@ -816,6 +840,7 @@ pub const Client = struct {
                 .timeoutMs = self.timeoutMsValue,
                 .bearerAuth = self.bearerAuthValue,
                 .basicAuth = self.basicAuthValue,
+                .cancel = self.cancelValue,
             });
         }
     };
@@ -849,30 +874,53 @@ pub const Client = struct {
 
     /// Returns true if the internet is reachable from this machine.
     ///
-    /// Probes a small set of highly-available public endpoints (Cloudflare /
-    /// Google DNS on port 53) using the client's own I/O backend.  IPv4 and
-    /// IPv6 are both attempted.
+    /// Performs a TCP connect to the documented default endpoints (Cloudflare
+    /// and Google DNS over TCP, port 53) using the client's own `io` backend.
+    /// IPv4 is tried before IPv6. `opts.timeoutMs` applies to each endpoint,
+    /// and the check stops at the first success. See `net.connectivity` for
+    /// the full semantics; use `client.checkHosts` to check infrastructure you
+    /// control instead of the public defaults.
     ///
     /// Example:
     /// ```zig
-    /// if (!client.isOnline()) return error.NoInternet;
+    /// if (!client.isOnline(.{})) return error.NoInternet;
     /// ```
-    pub fn isOnline(self: *Client) bool {
-        return connectivity.isOnline(self.io);
+    pub fn isOnline(self: *Client, opts: ConnectivityOptions) bool {
+        return self.checkConnectivity(opts).isOnline();
     }
 
-    /// Probes internet connectivity and returns detailed results.
+    /// Checks internet reachability using the documented default endpoints,
+    /// reusing this client's allocator and `io` backend.
     ///
-    /// Returns a `ConnectivityResult` with `.online`, `.family`, `.latencyMs`,
-    /// and `.endpointStr()`.  Useful for diagnostics or choosing IPv4/IPv6.
+    /// This is the high-level entry point. It returns a `ConnectivityResult`
+    /// with `.family`, `.latencyMs`, `.isOnline()`, and `.endpointStr()`.
+    /// `latencyMs` is TCP handshake time only. A successful connect proves the
+    /// selected endpoint and port are reachable; it does not prove every
+    /// internet service is usable. The result borrows no caller memory.
     ///
     /// Example:
     /// ```zig
     /// const r = client.checkConnectivity(.{ .timeoutMs = 2000 });
-    /// if (r.online) std.debug.print("online via {s} ({?d}ms)\n", .{ r.endpointStr(), r.latencyMs });
+    /// if (r.isOnline()) std.debug.print("online via {s} ({?d}ms)\n", .{ r.endpointStr(), r.latencyMs });
     /// ```
     pub fn checkConnectivity(self: *Client, opts: ConnectivityOptions) ConnectivityResult {
-        return connectivity.checkConnectivity(self.io, opts);
+        return connectivity.check(self.io, opts);
+    }
+
+    /// Checks an explicit list of textual IP endpoints such as
+    /// `"10.0.0.5:443"` or `"[::1]:8443"`, reusing this client's `io` backend.
+    ///
+    /// Entries must be IP literals with a port; malformed entries and
+    /// hostnames are skipped, and no DNS lookup is performed. Use this instead
+    /// of constructing internal `address.Address` arrays in application code.
+    /// `hosts` is borrowed for the duration of the call and is never retained.
+    ///
+    /// Example:
+    /// ```zig
+    /// const r = client.checkHosts(&.{ "10.0.0.5:443", "[::1]:8443" }, .{});
+    /// ```
+    pub fn checkHosts(self: *Client, hosts: []const []const u8, opts: ConnectivityOptions) ConnectivityResult {
+        return connectivity.checkHosts(self.io, hosts, opts);
     }
 
     /// Resolves a hostname or IP address to structured Address results,
@@ -889,25 +937,12 @@ pub const Client = struct {
     /// IPv4-only:
     ///   var addresses = try client.resolve("httpbun.com", .{ .family = .ipv4 });
     ///   defer addresses.deinit();
-    pub fn resolve(self: *Client, host: []const u8, opts: anytype) Error!ResolvedAddresses {
-        const resolveOpts: ResolveOptions = blk: {
-            if (@TypeOf(opts) == ResolveOptions) break :blk opts;
-            var r = ResolveOptions{};
-            const resolveOptsInfo = @typeInfo(@TypeOf(opts)).@"struct";
-            inline for (resolveOptsInfo.field_names) |fname| {
-                if (@hasField(ResolveOptions, fname)) {
-                    @field(r, fname) = @field(opts, fname);
-                }
-            }
-            break :blk r;
-        };
-
+    pub fn resolve(self: *Client, host: []const u8, resolveOpts: ResolveOptions) Error!ResolvedAddresses {
         var outList = std.ArrayList(addressMod.Address).empty;
         errdefer outList.deinit(self.allocator);
 
         // 1. Literal IP check (no DNS query needed)
-        var probe = addressMod.Address{ .family = .ip4, .port = 0 };
-        if (probe.parseIp(host)) |parsed| {
+        if (addressMod.Address.parseIp(host)) |parsed| {
             var addr = parsed;
             addr.port = resolveOpts.port;
             const matchesFamily = switch (resolveOpts.family) {
@@ -989,7 +1024,7 @@ pub const Client = struct {
     pub fn resolveUrl(self: *Client, urlStr: []const u8, opts: anytype) Error!ResolvedAddresses {
         const uriMod = @import("../common/uri.zig");
         const u = uriMod.parse(urlStr) catch return Error.InvalidUrl;
-        const p = u.effectivePort();
+        const p = uriMod.effectivePort(&u);
         if (p == 0) return Error.InvalidUrl;
         if (@TypeOf(opts) == ResolveOptions) {
             var o = opts;
@@ -1042,6 +1077,7 @@ pub const Client = struct {
     }
 
     fn doRequestWithOverride(self: *Client, method: Method, urlOverride: []const u8, opts: anytype) Error!Response {
+        if (!self.configValid) return error.InvalidConfig;
         var attempt: u32 = 0;
         const maxAttempts = self.config.maxRetries + 1;
         // RFC 9110 Section 9.2.2: only idempotent methods may be replayed
@@ -1053,7 +1089,7 @@ pub const Client = struct {
         while (attempt < maxAttempts) : (attempt += 1) {
             var result = self.doRequestInner(false, method, urlOverride, opts) catch |err| {
                 if (!canReplay or attempt + 1 >= maxAttempts) return err;
-                clock.sleepMillis(self.io, self.config.retryDelayMs * (attempt + 1));
+                clock.sleepMillis(self.io, self.config.retryMs * (attempt + 1));
                 continue;
             };
             if (canReplay and self.config.maxRetries > 0 and attempt + 1 < maxAttempts) {
@@ -1066,7 +1102,7 @@ pub const Client = struct {
                 }
                 if (shouldRetry) {
                     result.deinit();
-                    clock.sleepMillis(self.io, self.config.retryDelayMs * (attempt + 1));
+                    clock.sleepMillis(self.io, self.config.retryMs * (attempt + 1));
                     continue;
                 }
             }
@@ -1076,6 +1112,7 @@ pub const Client = struct {
     }
 
     fn doRequestInner(self: *Client, comptime streaming: bool, method: Method, urlOverride: []const u8, opts: anytype) if (streaming) Error!ResponseStream else Error!Response {
+        validateRequestOptions(@TypeOf(opts));
         // Track allocations for header/query string conversions that need freeing.
         var allocatedStrings: std.ArrayList([]u8) = .empty;
         defer {
@@ -1095,6 +1132,21 @@ pub const Client = struct {
                 for (opts.headers) |h| {
                     if (std.ascii.eqlIgnoreCase(h.name, "content-type")) userHasContentType = true;
                     hdrs.append(self.allocator, h) catch return Error.OutOfMemory;
+                }
+            } else if (comptime @typeInfo(H) == .pointer and @typeInfo(H).pointer.size == .one and @typeInfo(@typeInfo(H).pointer.child) == .array) {
+                // `&.{ ... }` yields a pointer to an array, not a slice.
+                for (opts.headers[0..]) |h| {
+                    if (std.ascii.eqlIgnoreCase(h.name, "content-type")) userHasContentType = true;
+                    hdrs.append(self.allocator, .{ .name = h.name, .value = h.value }) catch return Error.OutOfMemory;
+                }
+            } else if (comptime @typeInfo(H) == .pointer and @typeInfo(H).pointer.size == .one and
+                @typeInfo(@typeInfo(H).pointer.child) == .@"struct" and
+                @typeInfo(@typeInfo(H).pointer.child).@"struct".is_tuple)
+            {
+                // `&.{ .{ .name = ..., .value = ... } }` is a pointer to a tuple.
+                inline for (opts.headers.*) |h| {
+                    if (std.ascii.eqlIgnoreCase(h.name, "content-type")) userHasContentType = true;
+                    hdrs.append(self.allocator, .{ .name = h.name, .value = h.value }) catch return Error.OutOfMemory;
                 }
             } else if (comptime @typeInfo(H) == .@"struct") {
                 const headersInfo = @typeInfo(H).@"struct";
@@ -1174,15 +1226,14 @@ pub const Client = struct {
                 if (comptime @typeInfo(T) == .optional) break :blk v != null;
                 break :blk true;
             };
-            const hasJsonTyped = @hasField(@TypeOf(opts), "jsonTyped") and opts.jsonTyped != null;
             const hasForm = blk: {
                 if (!@hasField(@TypeOf(opts), "form")) break :blk false;
                 const v = opts.form;
                 const T = @TypeOf(v);
                 if (comptime @typeInfo(T) == .optional) break :blk v != null else break :blk true;
             };
-            if (ct == null and (hasJson or hasJsonTyped)) ct = "application/json";
-            if (ct == null and hasForm) ct = "application/x-www-form-urlencoded";
+            if (ct == null and hasJson) ct = mediaTypeMod.applicationJson;
+            if (ct == null and hasForm) ct = mediaTypeMod.formUrlEncoded;
             if (ct) |c| {
                 hdrs.append(self.allocator, .{ .name = "Content-Type", .value = c }) catch return Error.OutOfMemory;
             }
@@ -1195,6 +1246,14 @@ pub const Client = struct {
             const Q = @TypeOf(opts.query);
             if (comptime @typeInfo(Q) == .pointer and @typeInfo(Q).pointer.size == .slice) {
                 for (opts.query) |q| queryList.append(self.allocator, q) catch return Error.OutOfMemory;
+            } else if (comptime @typeInfo(Q) == .pointer and @typeInfo(Q).pointer.size == .one and @typeInfo(@typeInfo(Q).pointer.child) == .array) {
+                // `&.{ ... }` yields a pointer to an array, not a slice.
+                for (opts.query[0..]) |q| queryList.append(self.allocator, .{ .name = q.name, .value = q.value }) catch return Error.OutOfMemory;
+            } else if (comptime @typeInfo(Q) == .pointer and @typeInfo(Q).pointer.size == .one and
+                @typeInfo(@typeInfo(Q).pointer.child) == .@"struct" and
+                @typeInfo(@typeInfo(Q).pointer.child).@"struct".is_tuple)
+            {
+                inline for (opts.query.*) |q| queryList.append(self.allocator, .{ .name = q.name, .value = q.value }) catch return Error.OutOfMemory;
             } else if (comptime @typeInfo(Q) == .@"struct") {
                 const queryInfo = @typeInfo(Q).@"struct";
                 inline for (queryInfo.field_names) |fname| {
@@ -1247,6 +1306,21 @@ pub const Client = struct {
             }
         }
 
+        // Exactly one body-producing option may be supplied. Silently picking
+        // one of several would send a different request than the caller wrote.
+        var bodyOptionCount: usize = 0;
+        if (optionPresent(opts, "json")) bodyOptionCount += 1;
+        if (optionPresent(opts, "form")) bodyOptionCount += 1;
+        if (optionPresent(opts, "body")) bodyOptionCount += 1;
+        if (optionPresent(opts, "text")) bodyOptionCount += 1;
+        if (optionPresent(opts, "multipart")) bodyOptionCount += 1;
+        if (bodyOptionCount > 1) return Error.InvalidRequestBody;
+
+        // A multipart request owns its Content-Type: the generated boundary is
+        // part of the framing, so a manual value would be wrong or duplicated.
+        if (optionPresent(opts, "multipart") and (userHasContentType or optionPresent(opts, "contentType")))
+            return Error.InvalidRequestBody;
+
         // Body handling: support typed json via struct
         var jsonBuf: ?[]u8 = null;
         defer if (jsonBuf) |b| self.allocator.free(b);
@@ -1265,7 +1339,10 @@ pub const Client = struct {
                     bodyVal = payload;
                     bodyKind = .json;
                 } else {
-                    jsonBuf = std.json.Stringify.valueAlloc(self.allocator, payload, .{}) catch return Error.OutOfMemory;
+                    jsonBuf = req.jsonBody(self.allocator, payload) catch |err| {
+                        if (err == error.OutOfMemory) return Error.OutOfMemory;
+                        return Error.InvalidJsonBody;
+                    };
                     if (jsonBuf) |b| {
                         bodyVal = b;
                         bodyKind = .json;
@@ -1289,14 +1366,16 @@ pub const Client = struct {
         if (bodyKind == .none and @hasField(@TypeOf(opts), "body")) {
             const v = opts.body;
             const T = @TypeOf(v);
-            if (comptime @typeInfo(T) == .optional) {
-                if (v) |val| {
-                    bodyVal = val;
+            if (T != req.BodySource and (comptime @typeInfo(T) != .optional or @typeInfo(T).optional.child != req.BodySource)) {
+                if (comptime @typeInfo(T) == .optional) {
+                    if (v) |val| {
+                        bodyVal = val;
+                        bodyKind = .raw;
+                    }
+                } else {
+                    bodyVal = v;
                     bodyKind = .raw;
                 }
-            } else {
-                bodyVal = v;
-                bodyKind = .raw;
             }
         }
         if (bodyKind == .none and @hasField(@TypeOf(opts), "text")) {
@@ -1313,89 +1392,25 @@ pub const Client = struct {
             }
         }
 
-        // Multipart file upload support
-        var multipartBuf: ?[]u8 = null;
-        defer if (multipartBuf) |b| self.allocator.free(b);
-        if (bodyKind == .none and @hasField(@TypeOf(opts), "multipart")) {
-            const mp = opts.multipart;
-            const mpEncoder = @import("../web/multipart/multipartEncoder.zig");
-            var boundaryBuf: [32]u8 = undefined;
-            const boundary = mpEncoder.generateBoundary(&boundaryBuf);
-            var ctBuf: [128]u8 = undefined;
-            const ctVal = mpEncoder.contentType(&ctBuf, boundary);
-
-            const fieldNameVal: []const u8 = mp.name;
-            const filenameVal: ?[]const u8 = blk: {
-                if (!@hasField(@TypeOf(mp), "filename")) break :blk null;
-                const v = mp.filename;
-                const T = @TypeOf(v);
-                if (@typeInfo(T) == .optional) break :blk v;
-                break :blk @as(?[]const u8, v);
-            };
-            const contentTypeVal: []const u8 = blk: {
-                if (!@hasField(@TypeOf(mp), "contentType")) break :blk mimeMod.octetStream;
-                const v = mp.contentType;
-                const T = @TypeOf(v);
-                if (@typeInfo(T) == .optional) {
-                    if (v) |val| break :blk val;
-                    break :blk mimeMod.octetStream;
-                } else {
-                    break :blk v;
-                }
-            };
-            const part: mpEncoder.Part = .{
-                .name = fieldNameVal,
-                .filename = filenameVal,
-                .contentType = contentTypeVal,
-                .data = mp.data,
-            };
-            multipartBuf = mpEncoder.encodeAllocParts(self.allocator, boundary, &.{part}) catch |err| switch (err) {
-                error.OutOfMemory => return Error.OutOfMemory,
-                else => return Error.WriteFailed,
-            };
-            if (multipartBuf) |b| {
-                bodyVal = b;
-                bodyKind = .raw;
-                hdrs.append(self.allocator, .{ .name = "Content-Type", .value = ctVal }) catch return Error.OutOfMemory;
-            }
-        }
-
-        // Multi-part form builder support. Parts are encoded before the
-        // transport write; the request engine does not yet support streaming
-        // request bodies, so callers should keep total bodies within the
-        // server/client buffering limits.
-        if (bodyKind == .none and @hasField(@TypeOf(opts), "multipartForm")) {
-            const mf = opts.multipartForm;
-            const mpEncoder = @import("../web/multipart/multipartEncoder.zig");
-
-            var boundaryBuf: [32]u8 = undefined;
-            const boundary: []const u8 = blk: {
-                if (!@hasField(@TypeOf(mf), "boundary")) break :blk mpEncoder.generateBoundary(&boundaryBuf);
-                const raw = mf.boundary;
-                if (@typeInfo(@TypeOf(raw)) == .optional) {
-                    if (raw) |v| break :blk v;
-                    break :blk mpEncoder.generateBoundary(&boundaryBuf);
-                }
-                break :blk raw;
-            };
-
-            const subtype: mpEncoder.Subtype = if (@hasField(@TypeOf(mf), "subtype"))
-                mf.subtype
-            else
-                .formData;
-
-            var ctBuf: [160]u8 = undefined;
-            const ctVal = mpEncoder.contentTypeSubtype(&ctBuf, subtype, boundary);
-            if (ctVal.len == 0) return Error.WriteFailed;
-
-            const parts = mf.parts;
-            multipartBuf = mpEncoder.encodeAllocParts(self.allocator, boundary, parts) catch |err| switch (err) {
-                error.OutOfMemory => return Error.OutOfMemory,
-                else => return Error.WriteFailed,
-            };
-            if (multipartBuf) |b| {
-                bodyVal = b;
-                bodyKind = .raw;
+        // Multipart upload support. The encoded framing is produced lazily by
+        // a pull-based body source: headers are copied once, payload bytes stay
+        // in the caller's slices, and no full-body buffer is allocated.
+        const mpEncoder = @import("../web/multipart/multipartEncoder.zig");
+        var multipartCtBuf: [192]u8 = undefined;
+        var multipartBody: ?mpEncoder.StreamingBody = null;
+        defer if (multipartBody) |*b| b.deinit();
+        if (comptime @hasField(@TypeOf(opts), "multipart")) {
+            if (optionPresent(opts, "multipart")) {
+                const mpOptionsArg = opts.multipart;
+                const mpOptions = if (comptime @typeInfo(@TypeOf(mpOptionsArg)) == .optional) mpOptionsArg.? else mpOptionsArg;
+                var encoder = mpEncoder.init(self.allocator, self.io, mpOptions) catch return Error.WriteFailed;
+                defer encoder.deinit();
+                const ctVal = encoder.contentType(&multipartCtBuf);
+                if (ctVal.len == 0) return Error.WriteFailed;
+                multipartBody = mpEncoder.StreamingBody.init(self.allocator, encoder.boundary(), encoder.options.parts) catch |err| switch (err) {
+                    error.OutOfMemory => return Error.OutOfMemory,
+                    else => return Error.WriteFailed,
+                };
                 hdrs.append(self.allocator, .{ .name = "Content-Type", .value = ctVal }) catch return Error.OutOfMemory;
             }
         }
@@ -1532,7 +1547,7 @@ pub const Client = struct {
             },
             .dnsCache = if (self.dnsCache) |*cache| cache else null,
             .pool = &self.pool,
-            .sessionCache = &self.sessionCache,
+            .sessionCache = &self.session.sessions,
             .earlyData = blk: {
                 if (@hasField(@TypeOf(opts), "earlyData")) {
                     const v = opts.earlyData;
@@ -1557,7 +1572,9 @@ pub const Client = struct {
             .timeoutMs = reqTimeout,
             .maxResponseSize = reqMaxSize,
             .proxy = reqProxy,
-            .bodySource = if (@hasField(@TypeOf(opts), "bodySource")) opts.bodySource else null,
+            .bodySource = if (multipartBody) |*b| b.source() else extractBodySource(opts),
+            .cancel = extractCancel(opts),
+            .quic = self.config.protocols.http3.quic,
         };
         const result = if (streaming)
             req.requestStream(self.allocator, self.io, reqArgs)
@@ -1591,6 +1608,198 @@ test "explicit client init/deinit" {
     defer c.deinit();
 }
 
+test "client exposes shared request and fetch entry points" {
+    try std.testing.expect(@hasDecl(Client, "request"));
+    try std.testing.expect(@hasDecl(Client, "fetch"));
+}
+
+test "client rejects conflicting multipart and ordinary body options" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var client = Client.init(allocator, io, .{});
+    defer client.deinit();
+
+    try std.testing.expectError(Error.InvalidRequestBody, client.post("http://127.0.0.1:1/", .{
+        .json = .{ .ok = true },
+        .multipart = .{},
+    }));
+}
+
+test "client multipart sends fields and files through the shared encoder" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const MultipartHeader = @import("../web/multipart/multipartEncoder.zig").Header;
+    var listener = try tcp.Listener.bind(io, 0);
+    defer listener.close(io);
+
+    const Capture = struct {
+        bytes: [4096]u8 = undefined,
+        len: usize = 0,
+    };
+    const Server = struct {
+        fn run(listener_ptr: *tcp.Listener, capture: *Capture, server_io: std.Io) void {
+            var conn = listener_ptr.accept(server_io) catch return;
+            defer conn.close();
+            conn.setReadTimeoutMs(3000);
+            while (capture.len < capture.bytes.len) {
+                const n = conn.read(capture.bytes[capture.len..]) catch return;
+                if (n == 0) break;
+                capture.len += n;
+                if (std.mem.indexOf(u8, capture.bytes[0..capture.len], "file-content\r\n--test-boundary--\r\n") != null) break;
+            }
+            conn.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK") catch {};
+        }
+    };
+
+    var capture = Capture{};
+    const thread = try std.Thread.spawn(.{}, Server.run, .{ &listener, &capture, io });
+    defer {
+        releaseAcceptor(&listener, io);
+        thread.join();
+    }
+
+    const part_headers = [_]MultipartHeader{
+        .{ .name = "X-Part-Source", .value = "client" },
+    };
+    const fields = [_]struct { name: []const u8, value: []const u8 }{
+        .{ .name = "title", .value = "hello" },
+    };
+    const files = [_]struct {
+        name: []const u8,
+        filename: []const u8,
+        contentType: []const u8,
+        data: []const u8,
+        headers: []const MultipartHeader,
+    }{
+        .{ .name = "upload", .filename = "a.txt", .contentType = "text/plain", .data = "file-content", .headers = &part_headers },
+    };
+
+    var client = Client.init(allocator, io, .{});
+    defer client.deinit();
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/multipart", .{listener.localPort()});
+    var response = try client.post(url, .{ .multipart = .{
+        .boundary = "test-boundary",
+        .fields = &fields,
+        .files = &files,
+    } });
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    const request_bytes = capture.bytes[0..capture.len];
+    try std.testing.expect(std.mem.indexOf(u8, request_bytes, "Content-Type: multipart/form-data; boundary=\"test-boundary\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request_bytes, "name=\"title\"\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nhello") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request_bytes, "X-Part-Source: client") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request_bytes, "filename=\"a.txt\"") != null);
+}
+
+test "client rejects a manual Content-Type for multipart requests" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var client = Client.init(allocator, io, .{});
+    defer client.deinit();
+
+    try std.testing.expectError(Error.InvalidRequestBody, client.post("http://127.0.0.1:1/", .{
+        .contentType = "multipart/form-data",
+        .multipart = .{ .fields = .{.{ .name = "a", .value = "b" }} },
+    }));
+    try std.testing.expectError(Error.InvalidRequestBody, client.post("http://127.0.0.1:1/", .{
+        .headers = &.{.{ .name = "Content-Type", .value = "multipart/form-data" }},
+        .multipart = .{ .fields = .{.{ .name = "a", .value = "b" }} },
+    }));
+}
+
+test "client streams multipart bodies with an exact Content-Length" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const mpEncoder = @import("../web/multipart/multipartEncoder.zig");
+    var listener = try tcp.Listener.bind(io, 0);
+    defer listener.close(io);
+
+    const Capture = struct {
+        bytes: [4096]u8 = undefined,
+        len: usize = 0,
+    };
+    const Server = struct {
+        fn run(listener_ptr: *tcp.Listener, capture: *Capture, server_io: std.Io) void {
+            var conn = listener_ptr.accept(server_io) catch return;
+            defer conn.close();
+            conn.setReadTimeoutMs(3000);
+            while (capture.len < capture.bytes.len) {
+                const n = conn.read(capture.bytes[capture.len..]) catch return;
+                if (n == 0) break;
+                capture.len += n;
+                if (std.mem.indexOf(u8, capture.bytes[0..capture.len], "--len-boundary--\r\n") != null) break;
+            }
+            conn.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK") catch {};
+        }
+    };
+
+    const fields = [_]mpEncoder.FieldValue{.{ .name = "title", .value = "hello" }};
+    const files = [_]mpEncoder.File{.{
+        .name = "upload",
+        .filename = "a.bin",
+        .data = "streamed-file-content",
+    }};
+    var reference = try mpEncoder.init(allocator, io, .{
+        .boundary = "len-boundary",
+        .fields = &fields,
+        .files = &files,
+    });
+    defer reference.deinit();
+    const expected = try reference.encodeAlloc();
+    defer allocator.free(expected);
+
+    var capture = Capture{};
+    const thread = try std.Thread.spawn(.{}, Server.run, .{ &listener, &capture, io });
+    defer {
+        releaseAcceptor(&listener, io);
+        thread.join();
+    }
+
+    var client = Client.init(allocator, io, .{});
+    defer client.deinit();
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/multipart", .{listener.localPort()});
+    var response = try client.post(url, .{ .multipart = .{
+        .boundary = "len-boundary",
+        .fields = &fields,
+        .files = &files,
+    } });
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+
+    const request_bytes = capture.bytes[0..capture.len];
+    var cl_buf: [64]u8 = undefined;
+    const cl_header = try std.fmt.bufPrint(&cl_buf, "Content-Length: {d}\r\n", .{expected.len});
+    try std.testing.expect(std.mem.indexOf(u8, request_bytes, cl_header) != null);
+    try std.testing.expect(std.mem.indexOf(u8, request_bytes, "Transfer-Encoding: chunked") == null);
+    try std.testing.expect(std.mem.endsWith(u8, request_bytes, expected));
+}
+
+test "client http3 quic options propagate to a real quic connection" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var client = Client.init(a, io, .{
+        .protocols = .{ .http3 = .{ .quic = .{
+            .maxIdleMs = 1_234,
+            .initialMaxData = 4096,
+            .initialMaxStreamsBidi = 7,
+            .maxUdpPayload = 1400,
+        } } },
+    });
+    defer client.deinit();
+
+    try std.testing.expectEqual(@as(u64, 1_234), client.config.protocols.http3.quic.maxIdleMs);
+
+    const conn = try quicModule.Connection.init(a, io, client.config.protocols.http3.quic);
+    defer conn.deinit();
+    try std.testing.expectEqual(quicModule.Role.client, conn.role);
+    try std.testing.expectEqual(@as(u64, 4096), conn.maxData);
+    try std.testing.expectEqual(@as(u64, 7), conn.maxStreamsBidiLocal);
+    try std.testing.expectEqual(@as(u64, 1_234), conn.effectiveIdleTimeoutMs());
+}
+
 test "dns cache serves second hostname request from cache" {
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
@@ -1601,14 +1810,14 @@ test "dns cache serves second hostname request from cache" {
     // Windows (accept CANCELLED => unreachable). The HTTP path is
     // already covered by keep-alive / connection-close tests; the
     // FakeResolver unit test covers coalescing deterministically.
-    const r1 = client.dnsCache.?.resolve("localhost") catch return;
+    const r1 = client.dnsCache.?.resolve("localhost") catch |err| return err;
     defer {
         for (r1) |addr| a.free(addr);
         a.free(r1);
     }
     try std.testing.expect(r1.len >= 1);
 
-    const r2 = client.dnsCache.?.resolve("localhost") catch return;
+    const r2 = client.dnsCache.?.resolve("localhost") catch |err| return err;
     defer {
         for (r2) |addr| a.free(addr);
         a.free(r2);
@@ -1664,8 +1873,7 @@ test "struct headers/query string literals serialize as strings on the wire" {
     var client = Client.init(a, io, .{});
     defer client.deinit();
 
-    var addr: addressMod.Address = undefined;
-    addr = try addr.parseIp("127.0.0.1");
+    var addr = try addressMod.Address.parseIp("127.0.0.1");
     addr.port = 0;
     var listener = try tcp.Listener.bindAddress(io, &addr);
     defer listener.close(io);
@@ -1724,15 +1932,15 @@ test "client typed json struct" {
     try std.testing.expectError(Error.ConnectFailed, res);
 }
 
-test "client unified fetch with typed json" {
+test "client unified request with typed json" {
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
     var client = Client.init(a, io, .{});
     defer client.deinit();
     const CreateUser = struct { name: []const u8, email: []const u8 };
-    const res = client.fetch("http://127.0.0.1:1/", .{
+    const res = client.request("http://127.0.0.1:1/", .{
         .method = .POST,
-        .json = CreateUser{ .name = "Fiaz", .email = "fiaz@example.com" },
+        .json = CreateUser{ .name = "Example User", .email = "user@example.com" },
     });
     try std.testing.expectError(Error.ConnectFailed, res);
 }
@@ -1744,7 +1952,7 @@ test "response bytes and jsonAlloc" {
         .name = try a.dupe(u8, "Content-Type"),
         .value = try a.dupe(u8, "application/json"),
     };
-    const bodyStr = "{\"id\":101,\"name\":\"Fiaz\"}";
+    const bodyStr = "{\"id\":101,\"name\":\"Example User\"}";
     const bodyBytes = try a.dupe(u8, bodyStr);
 
     var resp = Response{
@@ -1762,14 +1970,14 @@ test "response bytes and jsonAlloc" {
     const parsed = try resp.jsonAlloc(User, a);
     defer parsed.deinit();
     try std.testing.expectEqual(@as(u64, 101), parsed.value.id);
-    try std.testing.expectEqualStrings("Fiaz", parsed.value.name);
+    try std.testing.expectEqualStrings("Example User", parsed.value.name);
 
     const userLeaky = try resp.json(User);
     try std.testing.expectEqual(@as(u64, 101), userLeaky.id);
-    try std.testing.expectEqualStrings("Fiaz", userLeaky.name);
+    try std.testing.expectEqualStrings("Example User", userLeaky.name);
 }
 
-test "client fetch with socks5 proxy connects through mock server" {
+test "client request with socks5 proxy connects through mock server" {
     const a = std.testing.allocator;
     const IoContext = tcp.IoContext;
     var ctx = try IoContext.init(a);
@@ -1786,11 +1994,11 @@ test "client fetch with socks5 proxy connects through mock server" {
     defer client.deinit();
 
     // Fetch through the mock proxy - verifies handshake was routed through SOCKS
-    _ = client.fetch("http://127.0.0.1:8080/test", .{ .timeoutMs = 500 }) catch {};
+    try std.testing.expectError(error.MalformedResponse, client.request("http://127.0.0.1:8080/test", .{ .timeoutMs = 500 }));
     try std.testing.expect(mock.recordedAtyp.load(.acquire) != 0);
 }
 
-test "client fetch with socks4 proxy connects through mock server" {
+test "client request with socks4 proxy connects through mock server" {
     const a = std.testing.allocator;
     const IoContext = tcp.IoContext;
     var ctx = try IoContext.init(a);
@@ -1806,7 +2014,7 @@ test "client fetch with socks4 proxy connects through mock server" {
     var client = Client.init(a, ctx.io, .{ .proxy = proxyUrl });
     defer client.deinit();
 
-    _ = client.fetch("http://127.0.0.1:8080/test", .{ .timeoutMs = 500 }) catch {};
+    try std.testing.expectError(error.MalformedResponse, client.request("http://127.0.0.1:8080/test", .{ .timeoutMs = 500 }));
     try std.testing.expectEqual(@as(u32, 0x7F000001), mock.recordedIp);
 }
 
@@ -2499,15 +2707,17 @@ test "client get over http3 serves loopback over real udp" {
 
         fn serveRequests(srv: *@This(), deadlineMs: u64, targetRequests: usize) !void {
             const alloc = std.testing.allocator;
-            var qconn = try quicConn.Connection.init(alloc, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+            var qconn = try quicConn.Connection.init(alloc, std.Io.Threaded.global_single_threaded.io(), .{
+                .role = .server,
+            });
             defer qconn.deinit();
             srv.ep.conn = qconn;
-            var drv = quicHs.Driver.initServer(std.Io.Threaded.global_single_threaded.io(), alloc, .{ .certChainPem = certPem, .privateKeyPem = keyPem });
+            var drv = quicHs.Handshake.init(alloc, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server, .certChainPem = certPem, .privateKeyPem = keyPem });
             defer drv.deinit();
-            qconn.tls = .{ .ctx = &drv, .start = quicHs.Driver.clientStart, .onData = quicHs.Driver.onData };
-            try quicHs.serveHandshake(&srv.ep, &srv.pump, &drv, deadlineMs);
+            qconn.tls = .{ .ctx = &drv, .start = quicHs.Handshake.clientStart, .onData = quicHs.Handshake.onData };
+            try quicHs.serve(.{ .ep = &srv.ep, .pump = &srv.pump, .hs = &drv, .deadlineMs = deadlineMs });
 
-            var h3 = h3conn.Connection.init(alloc, .server);
+            var h3 = h3conn.Connection.init(alloc, .{ .role = .server });
             defer h3.deinit();
             var acc = Acc{};
             defer acc.buf.deinit(alloc);
@@ -2517,7 +2727,7 @@ test "client get over http3 serves loopback over real udp" {
             while (served < targetRequests) {
                 const now: u64 = @intCast(clock.millisNow(srv.ep.io));
                 if (now -| start > deadlineMs) return error.Timeout;
-                try quicHs.feedPumped(&srv.ep, &srv.pump, null, 500, now);
+                try quicHs.feedPumped(.{ .ep = &srv.ep, .pump = &srv.pump, .dest = null, .quantumMs = 500, .nowMs = now });
                 if (!acc.fin) continue;
                 // Decode request HEADERS, route by :path, respond.
                 var off: usize = 0;
@@ -2562,15 +2772,17 @@ test "client get over http3 serves loopback over real udp" {
             }
         }
 
-        fn serveHandshakeOnly(srv: *@This(), deadlineMs: u64) !void {
+        fn serveOnly(srv: *@This(), deadlineMs: u64) !void {
             const alloc = std.testing.allocator;
-            var qconn = try quicConn.Connection.init(alloc, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+            var qconn = try quicConn.Connection.init(alloc, std.Io.Threaded.global_single_threaded.io(), .{
+                .role = .server,
+            });
             defer qconn.deinit();
             srv.ep.conn = qconn;
-            var drv = quicHs.Driver.initServer(std.Io.Threaded.global_single_threaded.io(), alloc, .{ .certChainPem = certPem, .privateKeyPem = keyPem });
+            var drv = quicHs.Handshake.init(alloc, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server, .certChainPem = certPem, .privateKeyPem = keyPem });
             defer drv.deinit();
-            qconn.tls = .{ .ctx = &drv, .start = quicHs.Driver.clientStart, .onData = quicHs.Driver.onData };
-            try quicHs.serveHandshake(&srv.ep, &srv.pump, &drv, deadlineMs);
+            qconn.tls = .{ .ctx = &drv, .start = quicHs.Handshake.clientStart, .onData = quicHs.Handshake.onData };
+            try quicHs.serve(.{ .ep = &srv.ep, .pump = &srv.pump, .hs = &drv, .deadlineMs = deadlineMs });
         }
 
         fn run(srv: *@This(), out: *?anyerror) void {
@@ -2582,7 +2794,7 @@ test "client get over http3 serves loopback over real udp" {
             // verification and goes quiet, so the server must time out
             // (never complete). A completed third handshake would mean
             // the client accepted a forged chain — catastrophic.
-            if (serveHandshakeOnly(srv, 5_000)) {
+            if (serveOnly(srv, 5_000)) {
                 out.* = error.UnexpectedSuccess;
             } else |e| {
                 out.* = if (e == error.HandshakeTimeout) null else e;
@@ -2591,7 +2803,9 @@ test "client get over http3 serves loopback over real udp" {
     };
 
     // Placeholder conn: replaced by each serveOne before any feeding.
-    var placeholder = try quicConn.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+    var placeholder = try quicConn.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+        .role = .server,
+    });
     defer placeholder.deinit();
     var srv = Server{};
     srv.ep = try quicEp.Endpoint.init(a, ctx.io, placeholder, .{});
@@ -2814,7 +3028,7 @@ test "client camelCase config options and request options" {
     try std.testing.expectEqual(HttpVersion.http11, client.config.httpVersion.?);
 
     // Test per-request camelCase options and method variants
-    const res1 = client.fetch("http://127.0.0.1:1/", .{
+    const res1 = client.request("http://127.0.0.1:1/", .{
         .method = .post,
         .timeoutMs = 100,
         .followRedirects = false,
@@ -2825,51 +3039,18 @@ test "client camelCase config options and request options" {
     });
     try std.testing.expectError(Error.ConnectFailed, res1);
 
-    const res2 = client.fetch("http://127.0.0.1:1/", .{
+    const res2 = client.request("http://127.0.0.1:1/", .{
         .method = .GET,
         .basicAuth = "dXNlcjpwYXNz",
         .maxResponseSize = 1024,
     });
     try std.testing.expectError(Error.ConnectFailed, res2);
 
-    const res3 = client.fetch("http://127.0.0.1:1/", .{
+    const res3 = client.request("http://127.0.0.1:1/", .{
         .method = "PUT",
         .httpVersion = .http11,
     });
     try std.testing.expectError(Error.ConnectFailed, res3);
-}
-
-test "requestAll error path cleans up without double free" {
-    // Regression test: batch failures previously double-freed the result
-    // buffer (function errdefer + manual cleanup) and segfaulted.
-    const a = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
-    var client = Client.init(a, io, .{ .timeoutMs = 500 });
-    defer client.deinit();
-
-    // Parallel path (len > 1): all targets refused -> firstErr cleanup.
-    const reqs = [_]RequestOptions{
-        .{ .method = .GET, .url = "http://127.0.0.1:1/a" },
-        .{ .method = .GET, .url = "http://127.0.0.1:1/b" },
-        .{ .method = .GET, .url = "http://127.0.0.1:1/c" },
-    };
-    const batch = client.requestAll(reqs);
-    try std.testing.expectError(Error.ConnectFailed, batch);
-
-    // Single path (len == 1): error must free only the assigned prefix.
-    const one = [_]RequestOptions{
-        .{ .method = .GET, .url = "http://127.0.0.1:1/only" },
-    };
-    const single = client.requestAll(one);
-    try std.testing.expectError(Error.ConnectFailed, single);
-
-    // getAll wrapper shares the same cleanup path.
-    const urls = [_][]const u8{
-        "http://127.0.0.1:1/x",
-        "http://127.0.0.1:1/y",
-    };
-    const multi = client.getAll(urls);
-    try std.testing.expectError(Error.ConnectFailed, multi);
 }
 
 test "normalizeMethod enum and string literals" {
@@ -2984,10 +3165,13 @@ test "client get over http3 with 0-rtt early data resumes session" {
 
         fn serveOne(srv: *@This(), deadlineMs: u64, tkeys: sessionMod.TicketKeys, rcache: *sessionMod.ReplayCache) !void {
             const alloc = std.testing.allocator;
-            var qconn = try quicConn.Connection.init(alloc, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+            var qconn = try quicConn.Connection.init(alloc, std.Io.Threaded.global_single_threaded.io(), .{
+                .role = .server,
+            });
             defer qconn.deinit();
             srv.ep.conn = qconn;
-            var drv = quicHs.Driver.initServer(std.Io.Threaded.global_single_threaded.io(), alloc, .{
+            var drv = quicHs.Handshake.init(alloc, std.Io.Threaded.global_single_threaded.io(), .{
+                .role = .server,
                 .certChainPem = certPem,
                 .privateKeyPem = keyPem,
                 .ticketKeys = tkeys,
@@ -2995,10 +3179,10 @@ test "client get over http3 with 0-rtt early data resumes session" {
                 .replayCache = rcache,
             });
             defer drv.deinit();
-            qconn.tls = .{ .ctx = &drv, .start = quicHs.Driver.clientStart, .onData = quicHs.Driver.onData };
-            try quicHs.serveHandshake(&srv.ep, &srv.pump, &drv, deadlineMs);
+            qconn.tls = .{ .ctx = &drv, .start = quicHs.Handshake.clientStart, .onData = quicHs.Handshake.onData };
+            try quicHs.serve(.{ .ep = &srv.ep, .pump = &srv.pump, .hs = &drv, .deadlineMs = deadlineMs });
 
-            var h3 = h3conn.Connection.init(alloc, .server);
+            var h3 = h3conn.Connection.init(alloc, .{ .role = .server });
             defer h3.deinit();
             var acc = Acc{};
             defer acc.buf.deinit(alloc);
@@ -3007,7 +3191,7 @@ test "client get over http3 with 0-rtt early data resumes session" {
             while (true) {
                 const now: u64 = @intCast(clock.millisNow(srv.ep.io));
                 if (now -| start > deadlineMs) return error.Timeout;
-                try quicHs.feedPumped(&srv.ep, &srv.pump, null, 500, now);
+                try quicHs.feedPumped(.{ .ep = &srv.ep, .pump = &srv.pump, .dest = null, .quantumMs = 500, .nowMs = now });
                 if (!acc.fin) continue;
                 var off: usize = 0;
                 const fr = try h3frame.parseFrame(acc.buf.items, &off);
@@ -3048,7 +3232,9 @@ test "client get over http3 with 0-rtt early data resumes session" {
         }
     };
 
-    var placeholder = try quicConn.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+    var placeholder = try quicConn.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+        .role = .server,
+    });
     defer placeholder.deinit();
     var srv = Server{};
     srv.ep = try quicEp.Endpoint.init(a, ctx.io, placeholder, .{});
@@ -3078,8 +3264,10 @@ test "client get over http3 with 0-rtt early data resumes session" {
     try std.testing.expectEqualStrings("initial-1rtt", res1.body);
 
     // Verify session was captured in client session cache
-    const cachePolicy = req.sessionPolicyFingerprint(.{ .verify = .caBundle, .caPem = certPem });
-    var cached = client.sessionCache.getWithAlpnPolicy("127.0.0.1", port, @intCast(clock.millisNow(client.io)), "h3", cachePolicy);
+    var cached = client.session.cache("127.0.0.1", port, .{
+        .alpn = "h3",
+        .tls = .{ .verify = .caBundle, .caPem = certPem },
+    });
     try std.testing.expect(cached != null);
     if (cached) |*c| {
         c.deinit(a);
@@ -3108,13 +3296,13 @@ test "RequestBuilder fluent API constructs and validates request" {
     var client = Client.init(a, io, .{});
     defer client.deinit();
 
-    var builder = client.requestBuilder(.POST, "http://127.0.0.1:8080/test");
+    var builder = client.builder(.POST, "http://127.0.0.1:8080/test");
     defer builder.deinit();
 
     _ = try builder.header("X-Custom-Header", "Value123");
     _ = try builder.query("page", "2");
-    _ = builder.timeout(5000);
-    _ = builder.bearer("my-test-token");
+    _ = builder.timeoutMs(5000);
+    _ = builder.bearerAuth("my-test-token");
     _ = try builder.json(.{ .user = "Alice", .active = true });
 
     try std.testing.expectEqual(Method.POST, builder.method);
@@ -3139,7 +3327,7 @@ fn releaseAcceptor(l: *tcp.Listener, io: std.Io) void {
     } else |_| {}
 }
 
-test "Client fetch with bodySource streaming upload" {
+test "Client request with bodySource streaming upload" {
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -3180,7 +3368,8 @@ test "Client fetch with bodySource streaming upload" {
 
     var sr = SliceReader.init("client-streamed-payload");
     var res = try client.post(url, .{
-        .bodySource = sr.source(),
+        .body = sr.source(),
+        .contentType = "text/plain",
     });
     defer res.deinit();
 
@@ -3188,10 +3377,11 @@ test "Client fetch with bodySource streaming upload" {
     try std.testing.expectEqualStrings("SUCCESS", res.body);
     const reqStr = capture.bytes[0..capture.len];
     try std.testing.expect(std.mem.startsWith(u8, reqStr, "POST /stream-test HTTP/1.1\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, reqStr, "Content-Type: text/plain") != null);
     try std.testing.expect(std.mem.indexOf(u8, reqStr, "client-streamed-payload") != null);
 }
 
-test "Client HTTP method convenience APIs (all 11 methods wire verification)" {
+test "Client HTTP method conveniences and generic method request" {
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -3323,7 +3513,7 @@ test "Client HTTP method convenience APIs (all 11 methods wire verification)" {
     // 4. POST JSON
     {
         const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/post-json", .{port});
-        var res = try client.postJson(url, .{ .user = "Alice", .role = "admin" }, .{});
+        var res = try client.post(url, .{ .json = .{ .user = "Alice", .role = "admin" } });
         defer res.deinit();
         try std.testing.expectEqual(@as(u16, 200), res.status);
     }
@@ -3358,7 +3548,7 @@ test "Client HTTP method convenience APIs (all 11 methods wire verification)" {
     // 9. TRACE
     {
         const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/trace", .{port});
-        var res = try client.trace(url, .{});
+        var res = try client.request(url, .{ .method = .TRACE });
         defer res.deinit();
         try std.testing.expectEqual(@as(u16, 200), res.status);
     }
@@ -3369,7 +3559,7 @@ test "Client HTTP method convenience APIs (all 11 methods wire verification)" {
         defer res.deinit();
         try std.testing.expectEqual(@as(u16, 200), res.status);
     }
-    // 11. fetch()
+    // 11. fetch() with explicit method
     {
         const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/fetch", .{port});
         var res = try client.fetch(url, .{ .method = .POST, .body = "fetch-payload" });
@@ -3405,7 +3595,7 @@ test "Client HTTP method convenience APIs (all 11 methods wire verification)" {
     try std.testing.expectEqualStrings("fetch-payload", captures[10].bodySlice());
 }
 
-test "RequestBuilder send() and postBuilder with form payloads" {
+test "RequestBuilder send() and form payloads" {
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -3438,7 +3628,7 @@ test "RequestBuilder send() and postBuilder with form payloads" {
     var urlBuf: [64]u8 = undefined;
     {
         const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/b-json", .{port});
-        var b = client.requestBuilder(.POST, url);
+        var b = client.builder(.POST, url);
         defer b.deinit();
         _ = try b.header("X-Custom", "active");
         _ = try b.query("filter", "all");
@@ -3451,7 +3641,7 @@ test "RequestBuilder send() and postBuilder with form payloads" {
     }
     {
         const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/b-form", .{port});
-        var b = client.postBuilder(url);
+        var b = client.builder(.POST, url);
         defer b.deinit();
         _ = try b.form("username=user&password=password123");
         var res = try b.send();
@@ -3536,7 +3726,7 @@ test "Client requestStream with BodySource streaming upload" {
     var reader = SliceReader.init("streamed-data-payload");
     var res = try client.requestStream(url, .{
         .method = .POST,
-        .bodySource = reader.source(),
+        .body = reader.source(),
     });
     defer res.deinit();
 
@@ -3544,4 +3734,83 @@ test "Client requestStream with BodySource streaming upload" {
     var replyBuf: [64]u8 = undefined;
     const n = try res.body.read(&replyBuf);
     try std.testing.expectEqualStrings("stream-reply", replyBuf[0..n]);
+}
+
+test "Client request cancellation option aborts cooperatively" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var client = Client.init(a, io, .{});
+    defer client.deinit();
+
+    var cancel = std.atomic.Value(bool).init(true);
+
+    const err = client.get("http://127.0.0.1:9999/test-cancel", .{
+        .cancel = &cancel,
+    });
+    try std.testing.expectError(req.Error.Cancelled, err);
+}
+
+test "Client multipart upload with single file struct and mime detection" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var listener = try tcp.Listener.bind(io, 0);
+    const port = listener.localPort();
+
+    const Server = struct {
+        fn run(l: *tcp.Listener, s_io: std.Io) void {
+            var conn = l.accept(s_io) catch return;
+            defer conn.close();
+
+            var buf: [2048]u8 = undefined;
+            var total: usize = 0;
+            while (total < buf.len) {
+                const n = conn.read(buf[total..]) catch return;
+                if (n == 0) break;
+                total += n;
+                if (std.mem.indexOf(u8, buf[0..total], "hello world content") != null) break;
+            }
+
+            conn.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK") catch {};
+        }
+    };
+
+    const thread = try std.Thread.spawn(.{}, Server.run, .{ &listener, io });
+    defer {
+        releaseAcceptor(&listener, io);
+        thread.join();
+        listener.close(io);
+    }
+
+    var client = Client.init(a, io, .{});
+    defer client.deinit();
+
+    var urlBuf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/upload-single", .{port});
+
+    var resp = try client.post(url, .{
+        .multipart = .{
+            .name = "upload",
+            .filename = "report.json",
+            .data = "hello world content",
+        },
+    });
+    defer resp.deinit();
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expectEqualStrings("OK", resp.body);
+}
+
+test "client request option names are validated at compile time" {
+    try std.testing.expect(@hasField(RequestOptions, "method"));
+    try std.testing.expect(@hasField(RequestOptions, "json"));
+    try std.testing.expect(@hasField(RequestOptions, "multipart"));
+    try std.testing.expect(@hasField(RequestOptions, "cancel"));
+    try std.testing.expect(!@hasField(RequestOptions, "timeOutMs"));
+    try std.testing.expect(!@hasField(RequestOptions, "cancelFlag"));
+}
+
+/// Flat module entry point: `httpx.Client.init(allocator, io, .{})`.
+pub fn init(allocator: Allocator, io: std.Io, config: Config) Client {
+    return Client.init(allocator, io, config);
 }

@@ -5,7 +5,7 @@
 ## Features
 
 - **Protocol Support**: HTTP/1.0/1.1/2/3 client/server runtime paths plus full HTTP/2 and HTTP/3 protocol primitives.
-- **Cross-Platform**: Validated on Linux, Windows, and macOS with x86_64, aarch64, and x86 architectures.
+- **Cross-Platform**: Validated on Linux and Windows (x86, x86_64, aarch64) and macOS (x86_64, aarch64).
 - **Client**:
     - Connection pooling and keep-alive.
     - Automatic retries with configurable linear backoff.
@@ -37,9 +37,9 @@ Zig's standard library does not provide HTTP/2, HTTP/3, QUIC, or an ALPN hook. *
 - **Operating System**: Windows, Linux, or macOS
 
 ::: warning Upgrading from 0.2.x and older
-v0.2.3 is a breaking release (Zig `0.17.0` required) with no
+v0.2.4 is a breaking release (Zig `0.17.0` required) with no
 compatibility wrappers. Review the updated Client/Server/Router usage
-in this guide when migrating from `0.2.2` (or older).
+in this guide when migrating from `0.2.3` (or older).
 :::
 
 ## Platform Support
@@ -48,17 +48,23 @@ in this guide when migrating from `0.2.2` (or older).
 
 | Platform | Status | Notes |
 |----------|--------|-------|
-| Linux    | ✅ Full | All major distributions (Ubuntu, Debian, Fedora, Arch, etc.) |
-| Windows  | ✅ Full | Windows 10/11, Server 2019+ |
-| macOS    | ✅ Full | macOS 11+ (Big Sur and later) |
+| Linux    | Full | All major distributions (Ubuntu, Debian, Fedora, Arch, etc.) |
+| Windows  | Full | Windows 10/11, Server 2019+ |
+| macOS    | Full | macOS 11+ (Big Sur and later) |
 
 ### Architectures
 
 | Architecture | Linux | Windows | macOS | Notes |
 |--------------|-------|---------|-------|-------|
-| x86_64 (64-bit) | ✅ | ✅ | ✅ | Primary development target |
-| aarch64 (ARM64) | ✅ | ✅ | ✅ | Apple Silicon, AWS Graviton, Raspberry Pi 4+ |
-| x86 (32-bit) | ✅ | ✅ | ❌ | Legacy x86 support on Linux/Windows |
+| x86_64 (64-bit) | Yes | Yes | Yes | Primary development target |
+| aarch64 (ARM64) | Yes | Yes | Yes | Apple Silicon, AWS Graviton, Raspberry Pi 4+ |
+| x86 (32-bit) | Yes | Yes | No | Legacy x86 support on Linux and Windows |
+
+::: info
+32-bit macOS (`x86-macos`) is not supported because Zig 0.17's standard library
+has no working page-size, `kevent`, or CPU-context definitions for that target.
+Use `x86_64-macos` or `aarch64-macos` instead.
+:::
 
 ### Cross-Compilation
 

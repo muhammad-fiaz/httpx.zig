@@ -25,7 +25,7 @@ var client = httpx.Client.init(allocator, io, .{
     .pool = .{
         .maxConnections = 64,
         .maxPerHost = 16,
-        .idleTimeoutMs = 30_000,
+        .idleMs = 30_000,
     },
 });
 defer client.deinit();
@@ -35,7 +35,7 @@ defer client.deinit();
 |---|---|---|---|
 | `maxConnections` | `u32` | `256` | Hard ceiling across all origins |
 | `maxPerHost` | `u16` | `16` | Ceiling per origin (host + port) |
-| `idleTimeoutMs` | `i64` | `30000` | Parked sockets older than this are dropped |
+| `idleMs` | `i64` | `30000` | Parked sockets older than this are dropped |
 | `maxParkedMs` | `i64` | `300000` | Max time a connection may stay parked (`0` disables) |
 
 ## Pool Key Isolation

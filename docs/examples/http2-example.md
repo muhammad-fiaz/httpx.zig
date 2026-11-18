@@ -40,9 +40,3 @@ Compressed sizes, outbound bytes, and stream IDs vary; headers reflect the demo 
 ```bash
 zig build run-http2-multiplex
 ```
-
-## What to Verify
-
-- Frame header serialize/parse round trip remains stable.
-- HPACK headers encode and decode back.
-- Multiplexed streams complete independently.

@@ -3,11 +3,11 @@
 HTTPX provides high-performance, structured HTML and XML document parsing, DOM manipulation, and CSS selector inspection.
 
 > [!NOTE]
-> HTTPX parses HTML/XML with its bundled DOM engine, built on Tree-sitter grammars in `parsing/html.zig` and `parsing/xml.zig`. Tree-sitter also backs the JSON Feed syntax layer, the template syntax layer, and the shared incremental-edit vocabulary (`Point`/`SourceRange`/`TextEdit`). Applications normally interact only with HTTPX's HTML/document APIs (`httpx.parsing.Parser`, `response.html()`, `doc.select()`). Applications do not need to install or import Tree-sitter directly.
+> HTTPX parses HTML/XML with its bundled DOM engine, built on Tree-sitter grammars in `parsing/html.zig` and `parsing/xml.zig`. Tree-sitter also backs the JSON Feed syntax layer, the template syntax layer, and the shared incremental-edit vocabulary (`Point`/`SourceRange`/`TextEdit`). Applications normally interact only with HTTPX's HTML/document APIs (`httpx.parsing.init`, `doc.select()`). Applications do not need to install or import Tree-sitter directly.
 
 ## Parsing Documents
 
-Parse HTML directly from an HTTP response or from a string using `httpx.parsing.Parser`:
+Parse HTML directly from an HTTP response or from a string using `httpx.parsing.init`:
 
 ```zig
 const std = @import("std");
@@ -17,6 +17,7 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     const html_content =
         \\<!DOCTYPE html>
@@ -31,7 +32,7 @@ pub fn main() !void {
         \\</html>
     ;
 
-    var parser = httpx.parsing.Parser.init(allocator, .{});
+    var parser = httpx.parsing.init(allocator, io, .{});
     var doc = try parser.parseHtml(html_content);
     defer doc.deinit();
 
@@ -60,7 +61,7 @@ pub fn main() !void {
 
 ## Direct Response Parsing
 
-When executing HTTP requests, responses can be parsed directly into an HTML document with `response.html()`:
+When executing HTTP requests, parse the response body with `httpx.parsing.init`:
 
 ```zig
 var client = httpx.Client.init(allocator, io, .{});
@@ -69,7 +70,7 @@ defer client.deinit();
 var response = try client.get("https://httpbun.com/html", .{});
 defer response.deinit();
 
-var doc = try response.html();
+var doc = try httpx.parsing.init(allocator, io, .{}).parseHtml(response.body);
 defer doc.deinit();
 
 std.debug.print("Title: {s}\n", .{try doc.title()});

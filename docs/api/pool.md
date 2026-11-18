@@ -1,6 +1,6 @@
 # Connection Pool API
 
-The connection pool (`httpx.client.connectionPool`) reuses plain-TCP keep-alive connections, HTTP/2 sessions, and HTTP/3 QUIC sessions. The `Client` uses it internally, but direct use is possible.
+The connection pool (`httpx.client.pool`) reuses plain-TCP keep-alive connections, HTTP/2 sessions, and HTTP/3 QUIC sessions. The `Client` uses it internally, but direct use is possible.
 
 ## PoolConfig
 
@@ -8,7 +8,7 @@ The connection pool (`httpx.client.connectionPool`) reuses plain-TCP keep-alive 
 pub const PoolConfig = struct {
     maxConnections: u32 = 256,
     maxPerHost: u16 = 16,
-    idleTimeoutMs: i64 = 30_000,
+    idleMs: i64 = 30_000,
     maxParkedMs: i64 = 300_000,
 };
 ```
@@ -17,16 +17,16 @@ pub const PoolConfig = struct {
 |-------|------|---------|-------------|
 | `maxConnections` | `u32` | `256` | Hard ceiling across all origins |
 | `maxPerHost` | `u16` | `16` | Ceiling per origin |
-| `idleTimeoutMs` | `i64` | `30_000` | Parked connections older than this are dropped |
+| `idleMs` | `i64` | `30_000` | Parked connections older than this are dropped |
 | `maxParkedMs` | `i64` | `300_000` | Max time a connection may stay parked. 0 disables |
 
 ## Pool
 
 ```zig
-var pool = httpx.client.connectionPool.init(allocator, io, .{
+var pool = httpx.client.pool.init(allocator, io, .{
     .maxConnections = 100,
     .maxPerHost = 10,
-    .idleTimeoutMs = 30_000,
+    .idleMs = 30_000,
 });
 defer pool.deinit();
 ```
@@ -65,10 +65,10 @@ Use `pool.statsSnapshot()` for observability. `Stats.snapshot()` returns the sam
 ```zig
 const httpx = @import("httpx");
 
-var pool = httpx.client.connectionPool.init(allocator, io, .{
+var pool = httpx.client.pool.init(allocator, io, .{
     .maxConnections = 20,
     .maxPerHost = 5,
-    .idleTimeoutMs = 60_000,
+    .idleMs = 60_000,
 });
 defer pool.deinit();
 

@@ -45,13 +45,11 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    std.debug.print("==> HTTPX Unified Development Server Demo\n\n", .{});
-
     // 1. Initialize background watcher
     var watcher = try httpx.Watcher.init(allocator, io, .{
         .dirPath = ".",
         .debounceMs = 50,
-        .pollIntervalMs = 50,
+        .pollMs = 50,
     });
     defer watcher.deinit();
     try watcher.start();
@@ -60,8 +58,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 4,
+        .limits = .{ .maxConnections = 4 },
     });
     defer server.deinit();
 
@@ -90,7 +87,7 @@ pub fn main() !void {
     defer res.deinit();
     std.debug.print("GET / returned {d}\n", .{res.status});
 
-    var doc = try res.html();
+    var doc = try httpx.parsing.init(allocator, io, .{}).parseHtml(res.body);
     defer doc.deinit();
     std.debug.print("Page Title: {s}\n", .{try doc.title()});
 
@@ -100,7 +97,6 @@ pub fn main() !void {
     const changed = try doc.incrementalUpdate(devTemplate);
     std.debug.print("Document incremental reparse detected {d} changed range(s)\n", .{changed});
 
-    std.debug.print("\nDevelopment server verification successful.\n", .{});
     watcher.stop();
     server.stop();
 }

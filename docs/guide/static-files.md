@@ -9,10 +9,10 @@ var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
 defer server.deinit();
 
 // Mount public assets directory to /static URL prefix
-try server.static("/static", "./public");
+try server.static(.{ .mount = "/static", .root = "./public" });
 
 // SPA fallback: serves index.html for unknown HTML paths
-try server.spa("/", "./public");
+try server.spa(.{ .mount = "/", .root = "./public" });
 
 server.run();
 ```

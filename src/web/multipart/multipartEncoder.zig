@@ -1,20 +1,35 @@
 //! Multipart encoding — RFC 2046, RFC 7578, RFC 8187.
 //!
 //! Supports form-data, mixed, related, alternative, and custom subtypes.
-//! Builder API plus a bounded streaming encoder.
+//! Options-based API plus a bounded streaming encoder.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const mimeMod = @import("../../utils/mime.zig");
+const mimeMod = @import("../../common/mime.zig");
+const bodySourceMod = @import("../../common/bodySource.zig");
 const common = @import("multipartCommon.zig");
+const z = @import("zigantic");
+const headersMod = @import("../../common/headers.zig");
+
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
 
 // Subtypes
 
-pub const Subtype = enum {
+pub const Subtype = union(enum) {
     formData,
     mixed,
     related,
     alternative,
+    byteranges,
+    custom: []const u8,
 
     pub fn label(self: Subtype) []const u8 {
         return switch (self) {
@@ -22,121 +37,219 @@ pub const Subtype = enum {
             .mixed => "mixed",
             .related => "related",
             .alternative => "alternative",
+            .byteranges => "byteranges",
+            .custom => |value| value,
+        };
+    }
+
+    pub fn isValid(self: Subtype) bool {
+        return switch (self) {
+            .formData, .mixed, .related, .alternative, .byteranges => true,
+            .custom => |value| common.isToken(value),
         };
     }
 };
 
 // Part
 
-pub const Part = struct {
-    name: []const u8,
-    filename: ?[]const u8 = null,
-    filenameStar: ?FilenameStar = null,
-    dispositionType: []const u8 = "form-data",
-    contentType: []const u8 = mimeMod.octetStream,
-    contentTransferEncoding: ?[]const u8 = null,
-    data: []const u8,
-    headers: ?[]const Header = null,
-};
+pub const HeaderSchema = headersMod.HeaderSchema;
+pub const Header = headersMod.Header;
 
-pub const FilenameStar = struct {
-    charset: []const u8 = "UTF-8",
-    language: []const u8 = "",
-    value: []const u8,
-    /// Set to true when `value` is already RFC 8187 percent-encoded.
-    encoded: bool = false,
-};
+pub const FilenameStarSchema = z.objectOf(.{
+    .charset = z.withDefault(z.string(.{}), "UTF-8"),
+    .language = z.withDefault(z.string(.{}), ""),
+    .value = z.string(.{}),
+    .encoded = z.withDefault(z.boolean(.{}), false),
+}, .{});
+pub const FilenameStar = FilenameStarSchema.Value;
 
-pub const Header = struct {
-    name: []const u8,
-    value: []const u8,
-};
+pub const PartSchema = z.objectOf(.{
+    .name = z.string(.{}),
+    .filename = z.optional(z.string(.{})),
+    .filenameStar = z.optional(FilenameStarSchema),
+    .dispositionType = z.withDefault(z.string(.{ .min = 1 }), "form-data"),
+    .contentType = z.withDefault(z.string(.{ .min = 1 }), mimeMod.octetStream),
+    .contentTransferEncoding = z.optional(z.string(.{})),
+    .data = z.string(.{}),
+    .headers = z.optional(z.array(HeaderSchema, .{})),
+}, .{});
+pub const Part = PartSchema.Value;
 
-// Builder
+pub const FileOptionsSchema = z.objectOf(.{
+    .filename = z.optional(z.string(.{})),
+    .filenameStar = z.optional(FilenameStarSchema),
+    .dispositionType = z.optional(z.string(.{ .min = 1 })),
+    .contentType = z.optional(z.string(.{ .min = 1 })),
+    .contentTransferEncoding = z.optional(z.string(.{})),
+    .headers = z.optional(z.array(HeaderSchema, .{})),
+}, .{});
+pub const FileOptions = FileOptionsSchema.Value;
 
-pub const Multipart = struct {
+pub const FieldValueSchema = z.objectOf(.{
+    .name = z.string(.{}),
+    .value = z.string(.{}),
+}, .{});
+pub const FieldValue = FieldValueSchema.Value;
+
+pub const FileSchema = z.objectOf(.{
+    .name = z.string(.{}),
+    .data = z.string(.{}),
+    .filename = z.optional(z.string(.{})),
+    .contentType = z.withDefault(z.string(.{ .min = 1 }), mimeMod.octetStream),
+    .headers = z.optional(z.array(HeaderSchema, .{})),
+}, .{});
+pub const File = FileSchema.Value;
+
+pub const EncoderOptionsSchema = z.objectOf(.{
+    .subtype = z.withDefault(typedSchema(Subtype), .formData),
+    .boundary = z.optional(z.string(.{ .min = 1 })),
+    .parts = z.withDefault(z.array(PartSchema, .{}), &.{}),
+    .fields = z.withDefault(z.array(FieldValueSchema, .{}), &.{}),
+    .files = z.withDefault(z.array(FileSchema, .{}), &.{}),
+}, .{});
+pub const EncoderOptions = EncoderOptionsSchema.Value;
+
+fn toSubtype(value: anytype) Subtype {
+    if (@TypeOf(value) == Subtype) return value;
+    if (@TypeOf(value) == @TypeOf(null)) return .formData;
+    if (@typeInfo(@TypeOf(value)) == .enum_literal) {
+        const tag = @tagName(value);
+        if (std.mem.eql(u8, tag, "mixed")) return .mixed;
+        if (std.mem.eql(u8, tag, "related")) return .related;
+        if (std.mem.eql(u8, tag, "alternative")) return .alternative;
+        if (std.mem.eql(u8, tag, "byteranges")) return .byteranges;
+        return .formData;
+    }
+    if (@hasField(@TypeOf(value), "custom")) return .{ .custom = value.custom };
+    return .formData;
+}
+
+fn unwrapOptional(comptime T: type, value: T) ?[]const u8 {
+    if (@typeInfo(T) == .optional) return value;
+    return value;
+}
+
+fn partFrom(comptime P: type, p: P) Part {
+    const filename: ?[]const u8 = if (@hasField(P, "filename")) unwrapOptional(@TypeOf(p.filename), p.filename) else null;
+    const content_type: []const u8 = if (@hasField(P, "contentType")) blk: {
+        const raw = unwrapOptional(@TypeOf(p.contentType), p.contentType);
+        break :blk raw orelse if (filename) |f| mimeMod.fromPath(f) else mimeMod.octetStream;
+    } else if (filename) |f| mimeMod.fromPath(f) else mimeMod.octetStream;
+    return .{
+        .name = if (@hasField(P, "name")) p.name else "",
+        .filename = filename,
+        .filenameStar = if (@hasField(P, "filenameStar")) p.filenameStar else null,
+        .dispositionType = if (@hasField(P, "dispositionType")) p.dispositionType else "form-data",
+        .contentType = content_type,
+        .contentTransferEncoding = if (@hasField(P, "contentTransferEncoding")) p.contentTransferEncoding else null,
+        .data = if (@hasField(P, "data")) p.data else if (@hasField(P, "value")) p.value else "",
+        .headers = if (@hasField(P, "headers")) p.headers else null,
+    };
+}
+
+fn fieldPartFrom(comptime F: type, field: F) Part {
+    return .{
+        .name = field.name,
+        .data = if (@hasField(F, "value")) field.value else field.data,
+        .contentType = mimeMod.textPlainUtf8,
+    };
+}
+
+fn filePartFrom(comptime F: type, file: F) Part {
+    return partFrom(F, file);
+}
+
+const ItemKind = enum { part, field, file };
+
+/// Appends tuple or slice items, normalizing each to a `Part`. Tuples are
+/// unrolled at compile time so `.parts = .{ ... }` and `&slice` both work.
+fn appendItems(allocator: Allocator, list: *std.ArrayList(Part), items: anytype, comptime kind: ItemKind) EncodeError!void {
+    const Info = @typeInfo(@TypeOf(items));
+    if (Info == .@"struct" and Info.@"struct".is_tuple) {
+        inline for (items) |item| {
+            try list.append(allocator, switch (kind) {
+                .part => partFrom(@TypeOf(item), item),
+                .field => fieldPartFrom(@TypeOf(item), item),
+                .file => filePartFrom(@TypeOf(item), item),
+            });
+        }
+    } else {
+        for (items) |item| {
+            try list.append(allocator, switch (kind) {
+                .part => partFrom(@TypeOf(item), item),
+                .field => fieldPartFrom(@TypeOf(item), item),
+                .file => filePartFrom(@TypeOf(item), item),
+            });
+        }
+    }
+}
+
+/// Allocator and I/O backed multipart encoder. The allocator and `io` come
+/// from the client/owner that created it, so callers never re-pass them.
+/// Input parts may be slices or `.{}` tuples; the encoder owns the normalized
+/// list until `deinit`.
+pub const Encoder = struct {
     allocator: Allocator,
-    parts: std.ArrayList(Part),
-    boundaryBuf: [32]u8,
-    boundary: []const u8,
-    subtype: Subtype,
+    io: std.Io,
+    options: EncoderOptions,
+    ownedParts: std.ArrayList(Part) = .empty,
+    generatedBoundary: [32]u8 = undefined,
+    hasGeneratedBoundary: bool = false,
 
-    pub fn init(allocator: Allocator, subtype: Subtype) Multipart {
-        var mb = Multipart{
-            .allocator = allocator,
-            .parts = .empty,
-            .boundaryBuf = undefined,
-            .boundary = "",
-            .subtype = subtype,
-        };
-        _ = generateBoundary(&mb.boundaryBuf);
-        return mb;
+    pub fn init(allocator: Allocator, io: std.Io, options: anytype) EncodeError!Encoder {
+        const OptT = @TypeOf(options);
+        if (@typeInfo(OptT) != .@"struct") @compileError("multipart encoder options must be a struct literal");
+
+        var self = Encoder{ .allocator = allocator, .io = io, .options = .{} };
+        errdefer self.ownedParts.deinit(allocator);
+
+        if (@hasField(OptT, "subtype")) self.options.subtype = toSubtype(options.subtype);
+        if (@hasField(OptT, "boundary")) self.options.boundary = unwrapOptional(@TypeOf(options.boundary), options.boundary);
+
+        if (@hasField(OptT, "parts")) try appendItems(allocator, &self.ownedParts, options.parts, .part);
+        if (@hasField(OptT, "fields")) try appendItems(allocator, &self.ownedParts, options.fields, .field);
+        if (@hasField(OptT, "files")) {
+            try appendItems(allocator, &self.ownedParts, options.files, .file);
+        } else if (@hasField(OptT, "file")) {
+            try self.ownedParts.append(allocator, filePartFrom(@TypeOf(options.file), options.file));
+        } else if (@hasField(OptT, "name") and (@hasField(OptT, "data") or @hasField(OptT, "value"))) {
+            // Direct single part: `.{ .name = "upload", .filename = "a.txt", .data = ... }`.
+            try self.ownedParts.append(allocator, partFrom(OptT, options));
+        }
+        self.options.parts = self.ownedParts.items;
+
+        if (!self.options.subtype.isValid()) return EncodeError.InvalidSubtype;
+        if (self.options.boundary) |boundary_value| {
+            if (!common.validateBoundary(boundary_value)) return EncodeError.InvalidBoundary;
+        }
+        return self;
     }
 
-    pub fn deinit(self: *Multipart) void {
-        self.parts.deinit(self.allocator);
+    pub fn deinit(self: *Encoder) void {
+        self.ownedParts.deinit(self.allocator);
     }
 
-    pub fn setBoundary(self: *Multipart, boundary: []const u8) EncodeError!void {
-        if (!common.validateBoundary(boundary)) return EncodeError.InvalidBoundary;
-        self.boundary = boundary;
+    pub fn boundary(self: *Encoder) []const u8 {
+        if (self.options.boundary) |value| return value;
+        if (self.hasGeneratedBoundary) return &self.generatedBoundary;
+        self.hasGeneratedBoundary = true;
+        return generateBoundary(&self.generatedBoundary);
     }
 
-    pub fn regenerateBoundary(self: *Multipart) []const u8 {
-        self.boundary = "";
-        return generateBoundary(&self.boundaryBuf);
+    pub fn contentType(self: *Encoder, buf: []u8) []const u8 {
+        return contentTypeSubtype(buf, self.options.subtype, self.boundary());
     }
 
-    pub fn boundaryValue(self: *const Multipart) []const u8 {
-        return if (self.boundary.len > 0) self.boundary else self.boundaryBuf[0..];
-    }
-
-    pub fn field(self: *Multipart, name: []const u8, value: []const u8) EncodeError!void {
-        const part = Part{ .name = name, .data = value };
-        try validatePart(part);
-        self.parts.append(self.allocator, part) catch return EncodeError.OutOfMemory;
-    }
-
-    pub fn file(self: *Multipart, name: []const u8, data: []const u8, opts: FileOptions) EncodeError!void {
-        const part = Part{
-            .name = name,
-            .filename = opts.filename,
-            .filenameStar = opts.filenameStar,
-            .dispositionType = opts.dispositionType orelse "form-data",
-            .contentType = opts.contentType orelse mimeMod.octetStream,
-            .contentTransferEncoding = opts.contentTransferEncoding,
-            .data = data,
-            .headers = opts.headers,
-        };
-        try validatePart(part);
-        self.parts.append(self.allocator, part) catch return EncodeError.OutOfMemory;
-    }
-
-    pub fn contentType(self: *const Multipart, buf: []u8) []const u8 {
-        return contentTypeSubtype(buf, self.subtype, self.boundaryValue());
-    }
-
-    pub fn encode(self: *const Multipart, w: anytype) EncodeError!void {
-        try encodeParts(w, self.boundaryValue(), self.parts.items);
-    }
-
-    pub fn encodeAlloc(self: *const Multipart) EncodeError![]u8 {
-        return encodeAllocParts(self.allocator, self.boundaryValue(), self.parts.items);
-    }
-
-    pub fn boundaryLength(self: *const Multipart) []const u8 {
-        return self.boundaryValue();
+    pub fn encodeAlloc(self: *Encoder) EncodeError![]u8 {
+        return encodeAllocParts(self.allocator, self.boundary(), self.options.parts);
     }
 };
 
-pub const FileOptions = struct {
-    filename: ?[]const u8 = null,
-    filenameStar: ?FilenameStar = null,
-    dispositionType: ?[]const u8 = null,
-    contentType: ?[]const u8 = null,
-    contentTransferEncoding: ?[]const u8 = null,
-    headers: ?[]const Header = null,
-};
+/// Constructs the high-level multipart encoder used by direct client options
+/// and explicit streaming callers.
+pub fn init(allocator: Allocator, io: std.Io, options: anytype) EncodeError!Encoder {
+    return Encoder.init(allocator, io, options);
+}
 
 // Boundary
 
@@ -164,6 +277,7 @@ pub fn contentType(buf: []u8, boundary: []const u8) []const u8 {
 }
 
 pub fn contentTypeSubtype(buf: []u8, subtype: Subtype, boundary: []const u8) []const u8 {
+    if (!subtype.isValid() or !common.validateBoundary(boundary)) return "";
     return std.fmt.bufPrint(buf, "multipart/{s}; boundary=\"{s}\"", .{ subtype.label(), boundary }) catch "";
 }
 
@@ -173,6 +287,7 @@ pub const EncodeError = error{
     WriteFailed,
     OutOfMemory,
     InvalidBoundary,
+    InvalidSubtype,
     InvalidPartName,
     InvalidFilename,
     InvalidValue,
@@ -284,7 +399,7 @@ pub fn writeFinalBoundary(w: anytype, boundary: []const u8) EncodeError!void {
     w.writeAll("--\r\n") catch return EncodeError.WriteFailed;
 }
 
-pub fn encodeParts(w: anytype, boundary: []const u8, parts: []const Part) EncodeError!void {
+fn encodeParts(w: anytype, boundary: []const u8, parts: []const Part) EncodeError!void {
     if (!common.validateBoundary(boundary)) return EncodeError.InvalidBoundary;
     for (parts) |part| {
         try validatePart(part);
@@ -298,16 +413,136 @@ pub fn encodeParts(w: anytype, boundary: []const u8, parts: []const Part) Encode
     try writeFinalBoundary(w, boundary);
 }
 
-pub fn encodeAllocParts(allocator: Allocator, boundary: []const u8, parts: []const Part) EncodeError![]u8 {
+fn encodeAllocParts(allocator: Allocator, boundary: []const u8, parts: []const Part) EncodeError![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     try encodeParts(&out.writer, boundary, parts);
     return out.toOwnedSlice() catch EncodeError.OutOfMemory;
 }
 
-// Streaming encoder
+/// Pull-based multipart body producer for streaming request uploads.
+///
+/// Only the part headers, CRLF separators, and final boundary are copied into
+/// an owned `meta` buffer; payload bytes are referenced in place by the part
+/// slices. Memory use is therefore bounded by header size regardless of body
+/// size, and the source is replayable when the caller keeps the part slices
+/// alive. Calling `deinit` releases the header buffer.
+pub const StreamingBody = struct {
+    allocator: Allocator,
+    meta: []u8,
+    ops: []Op,
+    total: u64,
+    op_index: usize = 0,
+    op_offset: usize = 0,
 
-pub const StreamEncoder = struct {
+    const Op = union(enum) {
+        meta: struct { off: usize, len: usize },
+        data: []const u8,
+    };
+
+    pub fn init(allocator: Allocator, boundary: []const u8, parts: []const Part) EncodeError!StreamingBody {
+        if (!common.validateBoundary(boundary)) return EncodeError.InvalidBoundary;
+
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        errdefer out.deinit();
+        var ops: std.ArrayList(Op) = .empty;
+        errdefer ops.deinit(allocator);
+
+        for (parts) |part| {
+            const header_off = out.writer.end;
+            try writePartHeader(&out.writer, boundary, part);
+            const header_len = out.writer.end - header_off;
+            ops.append(allocator, .{ .meta = .{ .off = header_off, .len = header_len } }) catch return EncodeError.OutOfMemory;
+            ops.append(allocator, .{ .data = part.data }) catch return EncodeError.OutOfMemory;
+            const crlf_off = out.writer.end;
+            out.writer.writeAll("\r\n") catch return EncodeError.WriteFailed;
+            ops.append(allocator, .{ .meta = .{ .off = crlf_off, .len = 2 } }) catch return EncodeError.OutOfMemory;
+        }
+
+        const final_off = out.writer.end;
+        writeFinalBoundary(&out.writer, boundary) catch |err| switch (err) {
+            EncodeError.WriteFailed => return EncodeError.WriteFailed,
+            else => return err,
+        };
+        const final_len = out.writer.end - final_off;
+        ops.append(allocator, .{ .meta = .{ .off = final_off, .len = final_len } }) catch return EncodeError.OutOfMemory;
+
+        const meta = out.toOwnedSlice() catch return EncodeError.OutOfMemory;
+        errdefer allocator.free(meta);
+        const owned_ops = ops.toOwnedSlice(allocator) catch return EncodeError.OutOfMemory;
+
+        var total: u64 = @intCast(meta.len);
+        for (parts) |part| total += @intCast(part.data.len);
+        return .{ .allocator = allocator, .meta = meta, .ops = owned_ops, .total = total };
+    }
+
+    pub fn deinit(self: *StreamingBody) void {
+        self.allocator.free(self.meta);
+        self.allocator.free(self.ops);
+        self.* = undefined;
+    }
+
+    pub fn contentLength(self: *const StreamingBody) u64 {
+        return self.total;
+    }
+
+    pub fn reset(self: *StreamingBody) void {
+        self.op_index = 0;
+        self.op_offset = 0;
+    }
+
+    fn read(ctx: *anyopaque, buf: []u8) anyerror!usize {
+        const self: *StreamingBody = @ptrCast(@alignCast(ctx));
+        var written: usize = 0;
+        while (written < buf.len and self.op_index < self.ops.len) {
+            switch (self.ops[self.op_index]) {
+                .meta => |m| {
+                    const remaining = m.len - self.op_offset;
+                    const n = @min(remaining, buf.len - written);
+                    @memcpy(buf[written .. written + n], self.meta[m.off + self.op_offset ..][0..n]);
+                    written += n;
+                    self.op_offset += n;
+                    if (self.op_offset == m.len) {
+                        self.op_index += 1;
+                        self.op_offset = 0;
+                    }
+                },
+                .data => |data| {
+                    const remaining = data.len - self.op_offset;
+                    const n = @min(remaining, buf.len - written);
+                    @memcpy(buf[written .. written + n], data[self.op_offset..][0..n]);
+                    written += n;
+                    self.op_offset += n;
+                    if (self.op_offset == data.len) {
+                        self.op_index += 1;
+                        self.op_offset = 0;
+                    }
+                },
+            }
+        }
+        return written;
+    }
+
+    fn resetCb(ctx: *anyopaque) anyerror!void {
+        const self: *StreamingBody = @ptrCast(@alignCast(ctx));
+        self.reset();
+    }
+
+    pub fn source(self: *StreamingBody) bodySourceMod.BodySource {
+        return .{
+            .ptr = self,
+            .readFn = read,
+            .contentLength = self.total,
+            .resetFn = resetCb,
+            .closeFn = null,
+        };
+    }
+};
+
+// Streaming encoder. Callers obtain it with `encoder.stream(writer, .{})`
+// and use the inferred value without naming an implementation type.
+
+const StreamEncoder = struct {
     writer: *std.Io.Writer,
     boundary: []const u8,
     subtype: Subtype,
@@ -319,6 +554,7 @@ pub const StreamEncoder = struct {
     const State = enum { idle, part, finished };
 
     pub fn init(writer: *std.Io.Writer, subtype: Subtype, boundary: []const u8) EncodeError!StreamEncoder {
+        if (!subtype.isValid()) return EncodeError.InvalidSubtype;
         if (!common.validateBoundary(boundary)) return EncodeError.InvalidBoundary;
         return .{ .writer = writer, .boundary = boundary, .subtype = subtype };
     }
@@ -409,6 +645,18 @@ pub const StreamEncoder = struct {
     }
 };
 
+pub const StreamOptionsSchema = z.objectOf(.{
+    .subtype = z.withDefault(typedSchema(Subtype), .formData),
+    .boundary = z.string(.{ .min = 1 }),
+}, .{});
+pub const StreamOptions = StreamOptionsSchema.Value;
+
+/// Creates a bounded-memory writer for incremental multipart output.
+/// The writer owns I/O; the returned encoder borrows it until `finish`.
+pub fn stream(writer: *std.Io.Writer, options: StreamOptions) EncodeError!StreamEncoder {
+    return StreamEncoder.init(writer, options.subtype, options.boundary);
+}
+
 // Length math
 
 pub const CountingWriter = struct {
@@ -495,17 +743,18 @@ test "encodes field and file with canonical framing" {
     try std.testing.expect(std.mem.indexOf(u8, body, "Content-Type: application/x-foo") != null);
 }
 
-test "builder API works" {
-    var form = Multipart.init(std.testing.allocator, .formData);
-    defer form.deinit();
-
-    try form.field("name", "Alice");
-    try form.file("avatar", "png-data", .{
+test "encoder API encodes fields and files" {
+    const fields = [_]FieldValue{.{ .name = "name", .value = "Alice" }};
+    const files = [_]File{.{
+        .name = "avatar",
+        .data = "png-data",
         .filename = "avatar.png",
         .contentType = "image/png",
-    });
+    }};
+    var encoder = try init(std.testing.allocator, std.testing.io, .{ .fields = &fields, .files = &files });
+    defer encoder.deinit();
 
-    const body = try form.encodeAlloc();
+    const body = try encoder.encodeAlloc();
     defer std.testing.allocator.free(body);
 
     try std.testing.expect(std.mem.indexOf(u8, body, "name=\"name\"") != null);
@@ -515,15 +764,25 @@ test "builder API works" {
 }
 
 test "custom subtype works" {
-    var form = Multipart.init(std.testing.allocator, .related);
-    defer form.deinit();
-
-    try form.file("data", "payload", .{ .contentType = "application/json" });
+    const files = [_]File{.{ .name = "data", .data = "payload", .contentType = "application/json" }};
+    var encoder = try init(std.testing.allocator, std.testing.io, .{ .subtype = .related, .files = &files });
+    defer encoder.deinit();
 
     var ctBuf: [128]u8 = undefined;
-    const ct = form.contentType(&ctBuf);
+    const ct = encoder.contentType(&ctBuf);
     try std.testing.expect(std.mem.startsWith(u8, ct, "multipart/related;"));
     try std.testing.expect(std.mem.indexOf(u8, ct, "boundary=\"") != null);
+}
+
+test "custom subtype is emitted as a validated token" {
+    var encoder = try init(std.testing.allocator, std.testing.io, .{ .subtype = .{ .custom = "signed" } });
+    defer encoder.deinit();
+    var ct_buf: [128]u8 = undefined;
+    try std.testing.expect(std.mem.startsWith(u8, encoder.contentType(&ct_buf), "multipart/signed;"));
+
+    try std.testing.expectError(EncodeError.InvalidSubtype, init(std.testing.allocator, std.testing.io, .{
+        .subtype = .{ .custom = "signed\r\nX-Injected: yes" },
+    }));
 }
 
 test "filename* RFC 8187 encoding is applied to raw UTF-8" {
@@ -636,16 +895,26 @@ test "empty parts list" {
     try std.testing.expectEqualStrings(expected, body);
 }
 
-test "builder rejects CRLF injection in names and headers" {
-    var form = Multipart.init(std.testing.allocator, .formData);
-    defer form.deinit();
-    try std.testing.expectError(EncodeError.InvalidPartName, form.field("a\r\nX-Evil: 1", "v"));
-    try std.testing.expectError(EncodeError.InvalidFilename, form.file("f", "v", .{
-        .filename = "a\r\nX-Evil: 1",
-    }));
-    try std.testing.expectError(EncodeError.InvalidHeader, form.file("f", "v", .{
-        .headers = &.{.{ .name = "X-Test", .value = "v\r\nX-Evil: 1" }},
-    }));
+test "encoder rejects CRLF injection in names and headers" {
+    {
+        const fields = [_]FieldValue{.{ .name = "a\r\nX-Evil: 1", .value = "v" }};
+        var encoder = try init(std.testing.allocator, std.testing.io, .{ .fields = &fields });
+        defer encoder.deinit();
+        try std.testing.expectError(EncodeError.InvalidPartName, encoder.encodeAlloc());
+    }
+    {
+        const files = [_]File{.{ .name = "f", .data = "v", .filename = "a\r\nX-Evil: 1" }};
+        var encoder = try init(std.testing.allocator, std.testing.io, .{ .files = &files });
+        defer encoder.deinit();
+        try std.testing.expectError(EncodeError.InvalidFilename, encoder.encodeAlloc());
+    }
+    {
+        const headers = [_]Header{.{ .name = "X-Test", .value = "v\r\nX-Evil: 1" }};
+        const files = [_]File{.{ .name = "f", .data = "v", .headers = &headers }};
+        var encoder = try init(std.testing.allocator, std.testing.io, .{ .files = &files });
+        defer encoder.deinit();
+        try std.testing.expectError(EncodeError.InvalidHeader, encoder.encodeAlloc());
+    }
 }
 
 test "encoder quotes name and filename values" {
@@ -707,4 +976,54 @@ test "stream encoder detects split boundary collision" {
     try enc.beginPart("x", .{});
     try enc.write("abc\r");
     try std.testing.expectError(EncodeError.BoundaryCollision, enc.write("\n--" ++ boundary));
+}
+
+test "streaming body source matches buffered encoder byte-for-byte" {
+    const boundary = "streaming-body-boundary";
+    const parts = [_]Part{
+        .{ .name = "field", .data = "hello", .contentType = mimeMod.textPlainUtf8 },
+        .{ .name = "file", .filename = "data.bin", .data = &.{ 0, 1, 2, 3, 0xFF } },
+        .{ .name = "empty", .data = "" },
+    };
+
+    var reference: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer reference.deinit();
+    try encodeParts(&reference.writer, boundary, &parts);
+
+    var body = try StreamingBody.init(std.testing.allocator, boundary, &parts);
+    defer body.deinit();
+    try std.testing.expectEqual(@as(u64, reference.written().len), body.contentLength());
+
+    const source = body.source();
+    try std.testing.expect(source.canReset());
+
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(std.testing.allocator);
+    var one: [1]u8 = undefined;
+    while (true) {
+        const n = try source.read(&one);
+        if (n == 0) break;
+        try got.appendSlice(std.testing.allocator, one[0..n]);
+    }
+    try std.testing.expectEqualStrings(reference.written(), got.items);
+}
+
+test "streaming body source replays after reset and tolerates large reads" {
+    const boundary = "replay-boundary";
+    const parts = [_]Part{
+        .{ .name = "a", .data = "alpha" },
+        .{ .name = "b", .data = "beta" },
+    };
+    var body = try StreamingBody.init(std.testing.allocator, boundary, &parts);
+    defer body.deinit();
+    const source = body.source();
+
+    var buf: [4096]u8 = undefined;
+    const first = try source.read(&buf);
+    try std.testing.expectEqual(body.contentLength(), @as(u64, first));
+    try std.testing.expectEqual(@as(usize, 0), try source.read(&buf));
+
+    try source.reset();
+    const second = try source.read(&buf);
+    try std.testing.expectEqualStrings(buf[0..first], buf[0..second]);
 }

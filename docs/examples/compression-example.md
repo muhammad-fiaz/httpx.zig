@@ -6,7 +6,7 @@ deflate, brotli, and zstd. See `examples/compressionDemo.zig`.
 ```zig
 // Advertise encodings; the client decodes transparently.
 var response = try client.get("https://httpbun.com/get", .{
-    .headers = .{ .acceptEncoding = "gzip, deflate, br" },
+    .headers = &.{.{ .name = "Accept-Encoding", .value = "gzip, deflate, br" }},
 });
 defer response.deinit();
 
@@ -37,9 +37,3 @@ The status reflects the live endpoint and the body length varies with the decode
 ```bash
 zig build run-compression-demo
 ```
-
-## Checklist
-
-- [x] Client sends `Accept-Encoding` and reads decoded bodies
-- [x] Round-trip compress/decompress matches input
-- [x] `decompressLimited` enforces the cap

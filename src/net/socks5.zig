@@ -80,8 +80,7 @@ fn connectInternal(
     password: ?[]const u8,
     isStream: bool,
 ) !tcpMod.Socket {
-    var probe = addressMod.Address{ .family = .ip4, .port = 0 };
-    var sock = if (probe.parseIp(proxyHost)) |parsed| blk: {
+    var sock = if (addressMod.Address.parseIp(proxyHost)) |parsed| blk: {
         var addr = parsed;
         addr.port = proxyPort;
         if (isStream) {
@@ -164,8 +163,7 @@ fn connectInternal(
         if (destHost.len > 255) return Error.AddressTypeUnsupported;
         var v6: [16]u8 = undefined;
         const addrMod = @import("address.zig");
-        var holder = addrMod.Address{ .family = .ip4, .port = 0 };
-        const parsed = holder.parseIp(destHost) catch return Error.AddressTypeUnsupported;
+        const parsed = addrMod.Address.parseIp(destHost) catch return Error.AddressTypeUnsupported;
         if (parsed.family != .ip6) return Error.AddressTypeUnsupported;
         v6 = parsed.bytes;
         req[pos] = 0x04; // ATYP IPv6

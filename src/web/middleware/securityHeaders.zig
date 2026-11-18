@@ -11,56 +11,58 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const regexMod = @import("regex");
+const mediaTypeMod = @import("../../common/mediaType.zig");
+const z = @import("zigantic");
 
 // CORS (Fetch spec / RFC 9110 semantics)
 
-pub const CorsConfig = struct {
-    allowedOrigins: []const []const u8 = &.{},
-    /// Optional regex patterns for origins (e.g. "^https://[a-z0-9-]+\\.example\\.com$").
-    allowedOriginPatterns: []const []const u8 = &.{},
-    allowAllOrigins: bool = false,
-    allowedMethods: []const []const u8 = &.{ "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS" },
-    allowedHeaders: []const []const u8 = &.{},
-    exposedHeaders: []const []const u8 = &.{},
-    allowCredentials: bool = false,
-    maxAgeSeconds: u32 = 600,
+const CorsConfigSchema = z.objectOf(.{
+    .allowedOrigins = z.withDefault(z.array(z.string(.{ .min = 1 }), .{}), &.{}),
+    .allowedOriginPatterns = z.withDefault(z.array(z.string(.{ .min = 1 }), .{}), &.{}),
+    .allowAllOrigins = z.withDefault(z.boolean(.{}), false),
+    .allowedMethods = z.withDefault(z.array(z.string(.{ .min = 1 }), .{}), &.{ "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS" }),
+    .allowedHeaders = z.withDefault(z.array(z.string(.{ .min = 1 }), .{}), &.{}),
+    .exposedHeaders = z.withDefault(z.array(z.string(.{ .min = 1 }), .{}), &.{}),
+    .allowCredentials = z.withDefault(z.boolean(.{}), false),
+    .maxAgeSeconds = z.withDefault(z.integer(u32, .{}), 600),
+}, .{});
+pub const CorsConfig = CorsConfigSchema.Value;
 
-    /// Validates the unsafe combination: wildcard origin + credentials.
-    pub fn isSafe(self: *const CorsConfig) bool {
-        if (self.allowCredentials and self.allowAllOrigins) return false;
-        return true;
-    }
+/// Validates the unsafe combination: wildcard origin + credentials.
+pub fn corsIsSafe(config: CorsConfig) bool {
+    if (config.allowCredentials and config.allowAllOrigins) return false;
+    return true;
+}
 
-    /// Origin check with exact match or wildcard (*) pattern matching.
-    pub fn isOriginAllowed(self: *const CorsConfig, origin: []const u8) bool {
-        if (self.allowAllOrigins) return true;
-        for (self.allowedOrigins) |o| {
-            if (std.ascii.eqlIgnoreCase(o, origin)) return true;
-            if (std.mem.indexOfScalar(u8, o, '*') != null) {
-                if (matchOriginWildcard(o, origin)) return true;
-            }
+/// Origin check with exact match or wildcard (*) pattern matching.
+pub fn isOriginAllowed(config: CorsConfig, origin: []const u8) bool {
+    if (config.allowAllOrigins) return true;
+    for (config.allowedOrigins) |o| {
+        if (std.ascii.eqlIgnoreCase(o, origin)) return true;
+        if (std.mem.indexOfScalar(u8, o, '*') != null) {
+            if (matchOriginWildcard(o, origin)) return true;
         }
-        return false;
     }
+    return false;
+}
 
-    /// Origin check supporting both static wildcards and regex patterns using the supplied allocator.
-    pub fn isOriginAllowedAlloc(self: *const CorsConfig, allocator: Allocator, origin: []const u8) bool {
-        if (self.isOriginAllowed(origin)) return true;
-        for (self.allowedOriginPatterns) |pattern| {
-            var re = regexMod.compile(allocator, pattern, .{}) catch continue;
-            defer re.deinit();
-            if (re.isMatch(origin, .{})) return true;
-        }
-        return false;
+/// Origin check supporting both static wildcards and regex patterns using the supplied allocator.
+pub fn isOriginAllowedAlloc(config: CorsConfig, allocator: Allocator, origin: []const u8) bool {
+    if (isOriginAllowed(config, origin)) return true;
+    for (config.allowedOriginPatterns) |pattern| {
+        var re = regexMod.compile(allocator, pattern, .{}) catch continue;
+        defer re.deinit();
+        if (re.isMatch(origin, .{})) return true;
     }
+    return false;
+}
 
-    pub fn isMethodAllowed(self: *const CorsConfig, method: []const u8) bool {
-        for (self.allowedMethods) |m| {
-            if (std.ascii.eqlIgnoreCase(m, method)) return true;
-        }
-        return false;
+pub fn isMethodAllowed(config: CorsConfig, method: []const u8) bool {
+    for (config.allowedMethods) |m| {
+        if (std.ascii.eqlIgnoreCase(m, method)) return true;
     }
-};
+    return false;
+}
 
 fn matchOriginWildcard(pattern: []const u8, origin: []const u8) bool {
     const starIdx = std.mem.indexOfScalar(u8, pattern, '*') orelse return std.ascii.eqlIgnoreCase(pattern, origin);
@@ -119,18 +121,18 @@ pub const RateLimitResult = rateLimit.RateLimitResult;
 
 test "cors rejects wildcard plus credentials" {
     const unsafeCfg = CorsConfig{ .allowAllOrigins = true, .allowCredentials = true };
-    try std.testing.expect(!unsafeCfg.isSafe());
+    try std.testing.expect(!corsIsSafe(unsafeCfg));
 
     const safeCfg = CorsConfig{ .allowAllOrigins = true };
-    try std.testing.expect(safeCfg.isSafe());
+    try std.testing.expect(corsIsSafe(safeCfg));
 }
 
 test "cors origin matching" {
     const cfg = CorsConfig{ .allowedOrigins = &.{ "https://a.com", "https://b.com" } };
-    try std.testing.expect(cfg.isOriginAllowed("https://A.com"));
-    try std.testing.expect(!cfg.isOriginAllowed("https://evil.com"));
-    try std.testing.expect(cfg.isMethodAllowed("post"));
-    try std.testing.expect(!cfg.isMethodAllowed("TRACE"));
+    try std.testing.expect(isOriginAllowed(cfg, "https://A.com"));
+    try std.testing.expect(!isOriginAllowed(cfg, "https://evil.com"));
+    try std.testing.expect(isMethodAllowed(cfg, "post"));
+    try std.testing.expect(!isMethodAllowed(cfg, "TRACE"));
 }
 
 test "cors wildcard and regex pattern origin matching" {
@@ -141,18 +143,18 @@ test "cors wildcard and regex pattern origin matching" {
     };
 
     // Wildcard matching in allowedOrigins
-    try std.testing.expect(cfg.isOriginAllowed("https://api.example.com"));
-    try std.testing.expect(cfg.isOriginAllowed("https://admin.dashboard.example.com"));
-    try std.testing.expect(cfg.isOriginAllowed("http://localhost:3000"));
-    try std.testing.expect(cfg.isOriginAllowed("http://localhost:8080"));
-    try std.testing.expect(!cfg.isOriginAllowed("https://evil.com"));
-    try std.testing.expect(!cfg.isOriginAllowed("https://example.org"));
+    try std.testing.expect(isOriginAllowed(cfg, "https://api.example.com"));
+    try std.testing.expect(isOriginAllowed(cfg, "https://admin.dashboard.example.com"));
+    try std.testing.expect(isOriginAllowed(cfg, "http://localhost:3000"));
+    try std.testing.expect(isOriginAllowed(cfg, "http://localhost:8080"));
+    try std.testing.expect(!isOriginAllowed(cfg, "https://evil.com"));
+    try std.testing.expect(!isOriginAllowed(cfg, "https://example.org"));
 
     // Regex pattern matching via isOriginAllowedAlloc
-    try std.testing.expect(cfg.isOriginAllowedAlloc(a, "https://app-42.internal.net"));
-    try std.testing.expect(cfg.isOriginAllowedAlloc(a, "https://app-101.internal.net"));
-    try std.testing.expect(!cfg.isOriginAllowedAlloc(a, "https://app-abc.internal.net"));
-    try std.testing.expect(!cfg.isOriginAllowedAlloc(a, "https://malicious.net"));
+    try std.testing.expect(isOriginAllowedAlloc(cfg, a, "https://app-42.internal.net"));
+    try std.testing.expect(isOriginAllowedAlloc(cfg, a, "https://app-101.internal.net"));
+    try std.testing.expect(!isOriginAllowedAlloc(cfg, a, "https://app-abc.internal.net"));
+    try std.testing.expect(!isOriginAllowedAlloc(cfg, a, "https://malicious.net"));
 }
 
 test "csrf roundtrip and tamper rejection" {
@@ -235,7 +237,7 @@ pub fn recoveryMiddleware(ctx: *Context, next: NextFn) anyerror!Response {
     return next(ctx) catch {
         return Response{
             .status = 500,
-            .contentType = "text/plain; charset=utf-8",
+            .contentType = mediaTypeMod.textPlainUtf8,
             .body = "Internal Server Error",
         };
     };
@@ -246,13 +248,14 @@ pub fn loggingMiddleware(ctx: *Context, next: NextFn) anyerror!Response {
     return next(ctx);
 }
 
-pub const CsrfConfig = struct {
-    cookieName: []const u8 = "csrf_token",
-    headerName: []const u8 = "X-CSRF-Token",
-    cookiePath: []const u8 = "/",
-    cookieSameSite: []const u8 = "Lax",
-    cookieSecure: bool = false,
-};
+const CsrfConfigSchema = z.objectOf(.{
+    .cookieName = z.withDefault(z.string(.{ .min = 1 }), "csrf_token"),
+    .headerName = z.withDefault(z.string(.{ .min = 1 }), "X-CSRF-Token"),
+    .cookiePath = z.withDefault(z.string(.{ .min = 1, .prefix = "/" }), "/"),
+    .cookieSameSite = z.withDefault(z.string(.{ .min = 1 }), "Lax"),
+    .cookieSecure = z.withDefault(z.boolean(.{}), false),
+}, .{});
+pub const CsrfConfig = CsrfConfigSchema.Value;
 
 /// Automated CSRF middleware using the double-submit cookie pattern.
 ///
@@ -301,7 +304,7 @@ pub fn csrfMiddlewareConfig(ctx: *Context, next: NextFn, cfg: CsrfConfig) anyerr
     const cookieToken = existingCookie orelse {
         return Response{
             .status = 403,
-            .contentType = "text/plain; charset=utf-8",
+            .contentType = mediaTypeMod.textPlainUtf8,
             .body = "CSRF Token Missing",
         };
     };
@@ -309,7 +312,7 @@ pub fn csrfMiddlewareConfig(ctx: *Context, next: NextFn, cfg: CsrfConfig) anyerr
     const headerToken = ctx.header(cfg.headerName) orelse {
         return Response{
             .status = 403,
-            .contentType = "text/plain; charset=utf-8",
+            .contentType = mediaTypeMod.textPlainUtf8,
             .body = "CSRF Header Missing",
         };
     };
@@ -317,7 +320,7 @@ pub fn csrfMiddlewareConfig(ctx: *Context, next: NextFn, cfg: CsrfConfig) anyerr
     if (!verifyCsrfToken(cookieToken, headerToken)) {
         return Response{
             .status = 403,
-            .contentType = "text/plain; charset=utf-8",
+            .contentType = mediaTypeMod.textPlainUtf8,
             .body = "CSRF Token Mismatch",
         };
     }
@@ -327,7 +330,7 @@ pub fn csrfMiddlewareConfig(ctx: *Context, next: NextFn, cfg: CsrfConfig) anyerr
 
 test "middleware pipeline execution and headers" {
     const a = std.testing.allocator;
-    var router = routerMod.Router.init(a);
+    var router = routerMod.Router.init(a, .{});
     defer router.deinit();
 
     try router.use(corsMiddleware);
@@ -380,7 +383,7 @@ test "middleware pipeline execution and headers" {
 test "csrfMiddleware sets cookie on safe methods and enforces on POST" {
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
-    var router = routerMod.Router.init(a);
+    var router = routerMod.Router.init(a, .{});
     defer router.deinit();
 
     try router.use(csrfMiddleware);

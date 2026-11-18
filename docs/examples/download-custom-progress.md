@@ -11,8 +11,8 @@ const httpx = @import("httpx");
 const DownloadObserver = struct {
     taskId: u32,
 
-    fn onProgress(info: httpx.client.download.ProgressInfo, userData: ?*anyopaque) void {
-        const self: *@This() = @ptrCast(@alignCast(userData.?));
+    fn onProgress(info: httpx.client.download.Progress, userData: ?*const anyopaque) void {
+        const self: *const @This() = @ptrCast(@alignCast(userData.?));
         const pct = if (info.percentage) |p| p else 0.0;
         const stateColor: []const u8 = switch (info.state) {
             .completed => "\x1b[32m",
@@ -37,22 +37,46 @@ const DownloadObserver = struct {
     }
 };
 
+fn bytesHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
+    const data = try ctx.allocator.alloc(u8, 90);
+    @memset(data, 'X');
+    return .{
+        .status = 200,
+        .body = data,
+        .contentType = "application/octet-stream",
+    };
+}
+
+fn notFoundHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
+    return .{ .status = 404, .body = "not found" };
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
+    var server = try httpx.Server.init(allocator, io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+    });
+    defer server.deinit();
+    try server.router.add(.GET, "/bytes/90", bytesHandler, .{});
+    try server.router.add(.GET, "/status/404", notFoundHandler, .{});
+    const port = server.localPort();
+    const thread = try server.start();
+
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var observer = DownloadObserver{
-        .taskId = 101,
-    };
-
     // 1. Successful download test
-    const sampleUrl = "https://httpbun.com/bytes/90";
-    std.debug.print("==> Downloading {s} with custom progress callback observer...\n", .{sampleUrl});
+    var urlBuf: [64]u8 = undefined;
+    const sampleUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/bytes/90", .{port});
+
+    // The observer must outlive the download call: `userData` is an
+    // opaque pointer the progress callback casts back to this type.
+    var observer = DownloadObserver{ .taskId = 101 };
 
     _ = client.download(
         sampleUrl,
@@ -65,13 +89,15 @@ pub fn main() !void {
         },
     ) catch |err| {
         std.debug.print("Download error handled: {s}\n", .{@errorName(err)});
+        server.requestShutdown();
+        thread.join();
         return;
     };
 
     // 2. Error handling test: 404 Not Found
-    std.debug.print("\n==> Testing 404 Not Found error handling on https://httpbun.com/status/404...\n", .{});
+    const notFoundUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/status/404", .{port});
     _ = client.download(
-        "https://httpbun.com/status/404",
+        notFoundUrl,
         .{
             .path = "downloads/not_found.bin",
             .progress = .quiet,
@@ -83,7 +109,6 @@ pub fn main() !void {
     };
 
     // 3. Error handling test: Invalid URL
-    std.debug.print("\n==> Testing invalid URL error handling...\n", .{});
     _ = client.download(
         "http://invalid.nonexistent.domain.xyz12345/nonexistent",
         .{
@@ -96,6 +121,9 @@ pub fn main() !void {
             @errorName(err),
         });
     };
+
+    server.requestShutdown();
+    thread.join();
 }
 ```
 

@@ -1,29 +1,31 @@
 # Multipart Form Data Example
 
-Multipart bodies with `httpx.multipart.encoder.Multipart`, parsed back with
-`httpx.multipart.parser`. See `examples/multipart.zig`.
+Multipart bodies with `httpx.multipart.encoder`, parsed back with
+`httpx.multipart.decoder`. See `examples/multipart.zig`.
 
 ```zig
-var form = httpx.multipart.encoder.Multipart.init(allocator, .formData);
-defer form.deinit();
-
-try form.field("username", "alice");
-try form.file("avatar", &.{ 0x89, 0x50, 0x4E, 0x47 }, .{
-    .filename = "avatar.png",
-    .contentType = "image/png",
+var encoder = try httpx.multipart.encoder.init(allocator, io, .{
+    .subtype = .formData,
+    .fields = .{
+        .{ .name = "username", .value = "alice" },
+    },
+    .files = .{
+        .{ .name = "avatar", .data = &.{ 0x89, 0x50, 0x4E, 0x47 }, .filename = "avatar.png", .contentType = "image/png" },
+    },
 });
+defer encoder.deinit();
 
-const body = try form.encodeAlloc();
+const body = try encoder.encodeAlloc();
 defer allocator.free(body);
 
 var ctBuf: [128]u8 = undefined;
-const contentType = form.contentType(&ctBuf);
+const contentType = encoder.contentType(&ctBuf);
 
 // Parse the generated body back.
-const fields = try httpx.multipart.parser.parseMultipart(
-    allocator, body, form.boundary, .{},
-);
-defer httpx.multipart.parser.freeFieldsAlloc(allocator, fields);
+var decoder = try httpx.multipart.decoder.init(allocator, io, .{});
+defer decoder.deinit();
+const fields = try decoder.parse(body, contentType);
+defer decoder.free(fields);
 for (fields) |part| {
     std.debug.print("Part: {s}, Content-Type: {s}, Data Size: {d}\n", .{
         part.name, part.contentType, part.data.len,
@@ -31,21 +33,24 @@ for (fields) |part| {
 }
 ```
 
-Client requests take a single part inline:
+Client requests use inline `.{}` tuples for fields, files, and generic parts:
 
 ```zig
+const fileData = "hello, world!";
 var res = try client.post("https://example.com/upload", .{
     .multipart = .{
-        .name = "upload",
-        .filename = "hello.txt",
-        .contentType = "text/plain",
-        .data = fileData,
+        .fields = .{
+            .{ .name = "description", .value = "hello" },
+        },
+        .files = .{
+            .{ .name = "upload", .filename = "hello.txt", .contentType = "text/plain", .data = fileData },
+        },
     },
 });
 defer res.deinit();
 ```
 
-Boundary extraction: `httpx.multipart.parser.extractBoundary(contentType)`.
+Boundary extraction: `httpx.multipart.Boundary.extract(contentType)`.
 
 ## Expected Output
 
@@ -61,8 +66,3 @@ Part names, content types, and data sizes reflect the fields added to the form; 
 ```bash
 zig build run-multipart
 ```
-
-## What to Verify
-
-- POST returns 200 with a `multipart/form-data; boundary=...` content type.
-- Parsed parts round-trip name, content type, and data.

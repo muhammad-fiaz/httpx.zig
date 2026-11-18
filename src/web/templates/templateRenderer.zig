@@ -14,6 +14,7 @@ const Allocator = std.mem.Allocator;
 const contextMod = @import("templateContext.zig");
 const parserMod = @import("templateParser.zig");
 const errMod = @import("templateError.zig");
+const z = @import("zigantic");
 
 pub const Value = contextMod.Value;
 pub const Context = contextMod.Context;
@@ -64,23 +65,24 @@ pub fn writeEscaped(writer: anytype, text: []const u8) !void {
     }
 }
 
-pub const RenderOptions = struct {
-    maxIncludeDepth: usize = 32,
-    maxInheritanceDepth: usize = 16,
-    /// When true, rendering an undefined value is an error instead of empty.
-    strictUndefined: bool = false,
-    /// Default HTML autoescaping for `{{ }}` output (overridable per
-    /// region with `{% autoescape %}`).
-    autoescapeDefault: bool = true,
-    /// Cap on rendered output bytes per render (DoS guard).
-    maxOutputBytes: usize = 64 << 20,
-    /// Cap on nested macro/call depth (recursion guard).
-    maxMacroDepth: usize = 64,
-    /// Cap on `range()` sequence length (memory guard).
-    maxRangeItems: usize = 1 << 20,
-};
+const RenderOptionsSchema = z.objectOf(.{
+    .maxIncludeDepth = z.withDefault(z.positiveInt(usize, .{}), 32),
+    .maxInheritanceDepth = z.withDefault(z.positiveInt(usize, .{}), 16),
+    // When true, rendering an undefined value is an error instead of empty.
+    .strictUndefined = z.withDefault(z.boolean(.{}), false),
+    // Default HTML autoescaping for `{{ }}` output (overridable per
+    // region with `{% autoescape %}`).
+    .autoescapeDefault = z.withDefault(z.boolean(.{}), true),
+    // Cap on rendered output bytes per render (DoS guard).
+    .maxOutput = z.withDefault(z.positiveInt(usize, .{}), 64 << 20),
+    // Cap on nested macro/call depth (recursion guard).
+    .maxMacroDepth = z.withDefault(z.positiveInt(usize, .{}), 64),
+    // Cap on `range()` sequence length (memory guard).
+    .maxRangeItems = z.withDefault(z.positiveInt(usize, .{}), 1 << 20),
+}, .{});
+pub const RenderOptions = RenderOptionsSchema.Value;
 
-/// Writer wrapper enforcing RenderOptions.maxOutputBytes.
+/// Writer wrapper enforcing RenderOptions.maxOutput.
 pub const LimitWriter = struct {
     inner: *std.ArrayList(u8),
     allocator: Allocator,
@@ -100,7 +102,7 @@ pub const LimitWriter = struct {
 };
 
 /// Counts bytes into any writer while enforcing a cap. Used to wrap
-/// caller-provided writers so `maxOutputBytes` holds for every sink.
+/// caller-provided writers so `maxOutput` holds for every sink.
 pub fn CountingWriter(comptime W: type) type {
     return struct {
         inner: W,
@@ -642,12 +644,6 @@ fn boolFilterParam(args: []const Value, kwargs: []const FilterKwarg, ai: usize, 
     if (filterKwarg(kwargs, kname)) |v| return v.isTruthy();
     if (ai < args.len) return args[ai].isTruthy();
     return default;
-}
-
-fn strFilterParam(allocator: Allocator, args: []const Value, kwargs: []const FilterKwarg, ai: usize, kname: []const u8) !?[]u8 {
-    if (filterKwarg(kwargs, kname)) |v| return try filterStringValue(allocator, v);
-    if (ai < args.len) return try filterStringValue(allocator, args[ai]);
-    return null;
 }
 
 /// Dotted attribute lookup used by `attr`, `map`, `selectattr` and friends.
@@ -2091,7 +2087,7 @@ pub const Renderer = struct {
     /// Renders a template AST directly to any writer. This is the single
     /// render entry point; custom filters and globals come from the
     /// renderer's own registry pointers. Output is capped at
-    /// `options.maxOutputBytes`.
+    /// `options.maxOutput`.
     pub fn render(
         self: Renderer,
         ast: *const TemplateAst,
@@ -2122,7 +2118,7 @@ pub const Renderer = struct {
         var errLoc: ?ErrLoc = null;
         var counter = CountingWriter(@TypeOf(writer)){
             .inner = writer,
-            .remaining = self.options.maxOutputBytes,
+            .remaining = self.options.maxOutput,
         };
         const state = RenderState{
             .io = self.io,
@@ -2141,7 +2137,7 @@ pub const Renderer = struct {
             .autoescape = self.options.autoescapeDefault,
             .alloc = arenaAlloc,
             .root = ctx.root,
-            .outputCap = self.options.maxOutputBytes,
+            .outputCap = self.options.maxOutput,
             .maxMacroDepth = self.options.maxMacroDepth,
             .maxRangeItems = self.options.maxRangeItems,
             .errLoc = &errLoc,
@@ -2850,7 +2846,7 @@ pub const Renderer = struct {
         }
 
         /// Exponentiation: right-associative and binding tighter than
-        /// unary sign (Python/Jinja semantics: `-2**2 == -4`,
+        /// unary sign (Jinja semantics: `-2**2 == -4`,
         /// `2**3**2 == 512`). The left operand excludes unary signs;
         /// the right operand allows them (`2**-2 == 0.5`).
         fn parsePow(self: *ExprParser) anyerror!Value {
@@ -4822,7 +4818,7 @@ test "Renderer enforces output macro range caps" {
     const alloc = testing.allocator;
     // Output cap.
     {
-        const tiny = Renderer{ .options = .{ .maxOutputBytes = 10 } };
+        const tiny = Renderer{ .options = .{ .maxOutput = 10 } };
         var parser = parserMod.Parser.init(alloc, "t.html", "0123456789ABCDEF");
         var ast = try parser.parse();
         defer ast.deinit();

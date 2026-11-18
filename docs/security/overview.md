@@ -14,24 +14,24 @@ HTTPX is engineered from the ground up with secure defaults, memory safety, and 
 
 ```text
                Untrusted Internet Request
-                           │
-                           ▼
+                           |
+                           v
                [ TLS 1.3 Termination ]
                (Certificate & SNI validation)
-                           │
-                           ▼
+                           |
+                           v
                [ Connection & Rate Limits ]
                (Max concurrency, Token bucket)
-                           │
-                           ▼
+                           |
+                           v
                [ Protocol Syntax Parsing ]
                (Header length, Transfer-Encoding checks)
-                           │
-                           ▼
+                           |
+                           v
                [ Application Security Middleware ]
                (Auth, CORS, Security Headers, CSRF)
-                           │
-                           ▼
+                           |
+                           v
                [ Safe Route Handlers ]
 ```
 

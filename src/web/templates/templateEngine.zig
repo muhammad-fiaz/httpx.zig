@@ -11,29 +11,25 @@ const parserMod = @import("templateParser.zig");
 const rendererMod = @import("templateRenderer.zig");
 const contextMod = @import("templateContext.zig");
 const errMod = @import("templateError.zig");
+const z = @import("zigantic");
 
 const sync = @import("../../common/sync.zig");
 
-pub const Config = struct {
-    enabled: bool = true,
-    directory: []const u8 = "templates",
-    enableCache: bool = true,
-    maxTemplates: usize = 1024,
-    maxFileSize: usize = 10 * 1024 * 1024,
-    maxIncludeDepth: usize = 32,
-    maxInheritanceDepth: usize = 16,
-    /// When true, rendering an undefined value fails instead of emitting empty.
-    strictUndefined: bool = false,
-    /// Default HTML autoescaping for `{{ }}` (per-region override via
-    /// `{% autoescape %}`).
-    autoescape: bool = true,
-    /// Cap on rendered output bytes per render (DoS guard).
-    maxOutputBytes: usize = 64 << 20,
-    /// Cap on nested macro/call depth (recursion guard).
-    maxMacroDepth: usize = 64,
-    /// Cap on `range()` sequence length (memory guard).
-    maxRangeItems: usize = 1 << 20,
-};
+pub const ConfigSchema = z.objectOf(.{
+    .enabled = z.withDefault(z.boolean(.{}), true),
+    .directory = z.withDefault(z.string(.{ .min = 1 }), "templates"),
+    .enableCache = z.withDefault(z.boolean(.{}), true),
+    .maxTemplates = z.withDefault(z.positiveInt(usize, .{}), 1024),
+    .maxFileSize = z.withDefault(z.positiveInt(usize, .{}), 10 * 1024 * 1024),
+    .maxIncludeDepth = z.withDefault(z.positiveInt(usize, .{}), 32),
+    .maxInheritanceDepth = z.withDefault(z.positiveInt(usize, .{}), 16),
+    .strictUndefined = z.withDefault(z.boolean(.{}), false),
+    .autoescape = z.withDefault(z.boolean(.{}), true),
+    .maxOutput = z.withDefault(z.positiveInt(usize, .{}), 64 << 20),
+    .maxMacroDepth = z.withDefault(z.positiveInt(usize, .{}), 64),
+    .maxRangeItems = z.withDefault(z.positiveInt(usize, .{}), 1 << 20),
+}, .{});
+pub const Config = ConfigSchema.Value;
 
 pub const Engine = struct {
     allocator: Allocator,
@@ -53,7 +49,9 @@ pub const Engine = struct {
     /// parses fresh and pushes a slot (nested includes push their own),
     /// and each top-level `render` pops the slots it added. Never shared
     /// across renders without the no-cache lock below.
-    scratchStack: std.ArrayList(ScratchSlot) = .empty,
+    // Slots live at stable addresses because an include may append another
+    // slot while the renderer still holds a pointer to the current AST.
+    scratchStack: std.ArrayList(*ScratchSlot) = .empty,
     /// Serializes cache-disabled renders: scratch slots are per-render
     /// state, so uncached renders must not interleave. Cached renders
     /// stay fully concurrent (the cache parks evictions instead).
@@ -65,6 +63,10 @@ pub const Engine = struct {
     };
 
     pub fn init(allocator: Allocator, io: std.Io, config: Config) !Engine {
+        var scratch: [4096]u8 = undefined;
+        const issue = z.checkFirst(ConfigSchema, config, &scratch, .{}) catch
+            return error.InvalidConfig;
+        if (issue != null) return error.InvalidConfig;
         return .{
             .allocator = allocator,
             .io = io,
@@ -85,7 +87,7 @@ pub const Engine = struct {
                     .maxInheritanceDepth = config.maxInheritanceDepth,
                     .strictUndefined = config.strictUndefined,
                     .autoescapeDefault = config.autoescape,
-                    .maxOutputBytes = config.maxOutputBytes,
+                    .maxOutput = config.maxOutput,
                     .maxMacroDepth = config.maxMacroDepth,
                     .maxRangeItems = config.maxRangeItems,
                 },
@@ -96,9 +98,10 @@ pub const Engine = struct {
     }
 
     pub fn deinit(self: *Engine) void {
-        for (self.scratchStack.items) |*slot| {
+        for (self.scratchStack.items) |slot| {
             slot.ast.deinit();
             self.allocator.free(slot.source);
+            self.allocator.destroy(slot);
         }
         self.scratchStack.deinit(self.allocator);
         self.cache.deinit();
@@ -207,13 +210,16 @@ pub const Engine = struct {
             const source = try self.loader.load(self.allocator, name);
             errdefer self.allocator.free(source);
             var parser = parserMod.Parser.init(self.allocator, name, source);
-            const ast = parser.parse() catch |err| {
+            var ast = parser.parse() catch |err| {
                 if (parser.lastError) |diag| self.lastError = diag;
-                self.allocator.free(source);
                 return err;
             };
-            try self.scratchStack.append(self.allocator, .{ .ast = ast, .source = source });
-            return &self.scratchStack.items[self.scratchStack.items.len - 1].ast;
+            errdefer ast.deinit();
+            const slot = try self.allocator.create(ScratchSlot);
+            errdefer self.allocator.destroy(slot);
+            slot.* = .{ .ast = ast, .source = source };
+            try self.scratchStack.append(self.allocator, slot);
+            return &slot.ast;
         }
         if (self.cache.get(name)) |cached| {
             return cached;
@@ -292,9 +298,9 @@ pub const Engine = struct {
     fn popScratchTo(self: *Engine, base: usize) void {
         while (self.scratchStack.items.len > base) {
             const slot = self.scratchStack.pop() orelse break;
-            var ast = slot.ast;
-            ast.deinit();
+            slot.ast.deinit();
             self.allocator.free(slot.source);
+            self.allocator.destroy(slot);
         }
     }
 
@@ -701,7 +707,7 @@ test "Engine concurrent render with invalidation is safe" {
     };
     var stop = std.atomic.Value(bool).init(false);
     var threads: [4]std.Thread = undefined;
-    for (&threads) |*th| th.* = std.Thread.spawn(.{}, Worker.run, .{ &engine, &stop }) catch return;
+    for (&threads) |*th| th.* = std.Thread.spawn(.{}, Worker.run, .{ &engine, &stop }) catch |err| return err;
     var k: usize = 0;
     while (k < 20) : (k += 1) {
         engine.invalidate("base.html");

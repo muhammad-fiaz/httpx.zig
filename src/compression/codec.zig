@@ -20,6 +20,7 @@ const flate = std.compress.flate;
 const zstdMod = @import("zstd");
 const brotliMod = @import("brotli");
 const parseMod = @import("../common/parse.zig");
+const z = @import("zigantic");
 
 pub const Error = error{
     UnsupportedEncoding,
@@ -27,6 +28,7 @@ pub const Error = error{
     OutOfMemory,
     DecompressedTooLarge,
     NotAcceptable,
+    InvalidConfig,
 };
 
 pub const MAX_DECOMPRESSED_SIZE: usize = 64 * 1024 * 1024;
@@ -59,10 +61,11 @@ pub const Encoding = enum {
     }
 };
 
-pub const ParsedEncoding = struct {
-    encoding: Encoding,
-    q: f32 = 1.0,
-};
+const ParsedEncodingSchema = z.objectOf(.{
+    .encoding = z.enumType(Encoding, .{}),
+    .q = z.withDefault(z.probability(f32, .{}), 1.0),
+}, .{});
+pub const ParsedEncoding = ParsedEncodingSchema.Value;
 
 fn parseQuality(text: []const u8) f32 {
     if (text.len == 0) return 0;
@@ -228,20 +231,15 @@ fn preference(e: Encoding) u8 {
 pub const defaultBrotliQuality: u32 = 5;
 
 /// Typed compression settings. Every field has a default, so `.{}` is valid.
-pub const Config = struct {
-    /// zstd compression level: 1 (fastest) through 22 (best), negative for the
-    /// fast modes. Clamped by the package to its supported range.
-    zstdLevel: i32 = zstdMod.CLEVEL_DEFAULT,
-    /// Brotli quality, 0 (fastest) through 11 (best ratio).
-    brotliQuality: u32 = defaultBrotliQuality,
-    /// Brotli sliding-window size in bits.
-    brotliWindowBits: u32 = brotliMod.defaultWindow,
-    /// When true, `compressWithConfig` reports `.identity` instead of the
-    /// requested coding whenever the codec failed to shrink the payload. HTTP
-    /// permits sending an unencoded body whatever the client offered, and
-    /// advertising `Content-Encoding` for bytes that grew is a net loss.
-    preferSmaller: bool = true,
-};
+/// zstd level 1..22 (negative selects fast modes), Brotli quality 0..11,
+/// and window 10..24 bits. The codec clamps out-of-range values.
+pub const ConfigSchema = z.objectOf(.{
+    .zstdLevel = z.withDefault(z.integer(i32, .{}), zstdMod.CLEVEL_DEFAULT),
+    .brotliQuality = z.withDefault(z.integer(u32, .{ .min = 0, .max = 11 }), defaultBrotliQuality),
+    .brotliWindowBits = z.withDefault(z.integer(u32, .{ .min = 10, .max = 24 }), brotliMod.defaultWindow),
+    .preferSmaller = z.withDefault(z.boolean(.{}), true),
+}, .{});
+pub const Config = ConfigSchema.Value;
 
 /// Outcome of a compression attempt.
 ///
@@ -275,6 +273,10 @@ pub fn compress(allocator: Allocator, encoding: Encoding, data: []const u8) ![]u
 /// With `Config.preferSmaller` the result may be `.identity` even though a
 /// real coding was requested and succeeded; `result.encoding` is authoritative.
 pub fn compressWithConfig(allocator: Allocator, encoding: Encoding, data: []const u8, config: Config) !Compressed {
+    var scratch: [4096]u8 = undefined;
+    const issue = z.checkFirst(ConfigSchema, config, &scratch, .{}) catch
+        return Error.InvalidConfig;
+    if (issue != null) return Error.InvalidConfig;
     if (encoding == .identity) {
         return .{ .encoding = .identity, .bytes = try allocator.dupe(u8, data) };
     }

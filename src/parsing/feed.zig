@@ -4,45 +4,49 @@
 //! with `std.json`; feed semantics (field mapping) stay in HTTPX.
 
 const std = @import("std");
+const jsonMedia = @import("../common/json.zig");
 const Allocator = std.mem.Allocator;
 const dom = @import("dom.zig");
 const xml = @import("xml.zig");
+const z = @import("zigantic");
 
 pub const FeedKind = enum { rss, atom, jsonFeed, unknown };
 
-pub const FeedEntry = struct {
-    title: []const u8 = "",
-    link: []const u8 = "",
-    id: []const u8 = "",
-    description: []const u8 = "",
-    content: []const u8 = "",
-    published: []const u8 = "",
-    updated: []const u8 = "",
-    author: []const u8 = "",
-};
+const FeedEntrySchema = z.objectOf(.{
+    .title = z.withDefault(z.string(.{}), ""),
+    .link = z.withDefault(z.string(.{}), ""),
+    .id = z.withDefault(z.string(.{}), ""),
+    .description = z.withDefault(z.string(.{}), ""),
+    .content = z.withDefault(z.string(.{}), ""),
+    .published = z.withDefault(z.string(.{}), ""),
+    .updated = z.withDefault(z.string(.{}), ""),
+    .author = z.withDefault(z.string(.{}), ""),
+}, .{});
+pub const FeedEntry = FeedEntrySchema.Value;
 
-pub const Feed = struct {
-    allocator: Allocator,
-    kind: FeedKind,
-    title: []const u8 = "",
-    link: []const u8 = "",
-    description: []const u8 = "",
-    language: []const u8 = "",
-    entries: []FeedEntry = &.{},
-    /// Owned strings (JSON field values are duped because syntax-tree text
-    /// borrows tree memory that dies with the tree; RSS/Atom field slices
-    /// borrow the caller's source buffer instead).
-    owned: [][]const u8 = &.{},
+const FeedSchema = z.objectOf(.{
+    .kind = z.enumType(FeedKind, .{}),
+    .title = z.withDefault(z.string(.{}), ""),
+    .link = z.withDefault(z.string(.{}), ""),
+    .description = z.withDefault(z.string(.{}), ""),
+    .language = z.withDefault(z.string(.{}), ""),
+    .entries = z.withDefault(z.array(FeedEntrySchema, .{}), &.{}),
+    // Owned strings (JSON field values are duped because syntax-tree text
+    // borrows tree memory that dies with the tree; RSS/Atom field slices
+    // borrow the caller's source buffer instead).
+    .owned = z.withDefault(z.array(z.string(.{}), .{}), &.{}),
+}, .{});
+pub const Feed = FeedSchema.Value;
 
-    pub fn deinit(self: *Feed) void {
-        for (self.owned) |s| self.allocator.free(s);
-        if (self.owned.len > 0) self.allocator.free(self.owned);
-        self.allocator.free(self.entries);
-    }
-};
+/// Releases the memory a parsed feed owns.
+pub fn deinitFeed(feed: *Feed, allocator: Allocator) void {
+    for (feed.owned) |s| allocator.free(s);
+    if (feed.owned.len > 0) allocator.free(@constCast(feed.owned));
+    allocator.free(@constCast(feed.entries));
+}
 
 pub fn parse(allocator: Allocator, src: []const u8, contentType: ?[]const u8) !Feed {
-    const isJson = if (contentType) |ct| std.mem.indexOf(u8, ct, "json") != null else std.mem.startsWith(u8, std.mem.trim(u8, src, " \t\r\n"), "{");
+    const isJson = if (contentType) |ct| jsonMedia.isJsonMediaType(ct) else std.mem.startsWith(u8, std.mem.trim(u8, src, " \t\r\n"), "{");
     if (isJson) {
         return parseJsonFeed(allocator, src);
     }
@@ -67,7 +71,6 @@ pub fn parse(allocator: Allocator, src: []const u8, contentType: ?[]const u8) !F
 
 fn parseRss(allocator: Allocator, tree: *const dom.Tree) !Feed {
     var f = Feed{
-        .allocator = allocator,
         .kind = .rss,
     };
 
@@ -121,7 +124,6 @@ fn parseRss(allocator: Allocator, tree: *const dom.Tree) !Feed {
 
 fn parseAtom(allocator: Allocator, tree: *const dom.Tree) !Feed {
     var f = Feed{
-        .allocator = allocator,
         .kind = .atom,
     };
 
@@ -179,7 +181,7 @@ fn parseJsonFeed(allocator: Allocator, src: []const u8) !Feed {
         owned.deinit(allocator);
     }
 
-    var f = Feed{ .allocator = allocator, .kind = .jsonFeed };
+    var f = Feed{ .kind = .jsonFeed };
     if (try objString(allocator, &owned, root, "title")) |v| f.title = v;
     if (try objString(allocator, &owned, root, "description")) |v| f.description = v;
     if (try objString(allocator, &owned, root, "language")) |v| f.language = v;
@@ -313,7 +315,7 @@ test "json feed parses title, link, and items" {
         \\}
     ;
     var f = try parse(a, src, "application/feed+json");
-    defer f.deinit();
+    defer deinitFeed(&f, a);
     try std.testing.expectEqual(FeedKind.jsonFeed, f.kind);
     try std.testing.expectEqualStrings("Café \"News\"", f.title);
     try std.testing.expectEqualStrings("https://example.com/", f.link);
@@ -337,13 +339,13 @@ test "json feed parses title, link, and items" {
 test "json feed tolerates missing fields and empty items" {
     const a = std.testing.allocator;
     var f = try parse(a, "{}", "application/json");
-    defer f.deinit();
+    defer deinitFeed(&f, a);
     try std.testing.expectEqual(FeedKind.jsonFeed, f.kind);
     try std.testing.expectEqualStrings("", f.title);
     try std.testing.expectEqual(@as(usize, 0), f.entries.len);
 
     var g = try parse(a, "{\"title\": \"T\", \"items\": []}", null);
-    defer g.deinit();
+    defer deinitFeed(&g, a);
     try std.testing.expectEqualStrings("T", g.title);
     try std.testing.expectEqual(@as(usize, 0), g.entries.len);
 }
@@ -355,10 +357,18 @@ test "json feed rejects malformed input" {
     try std.testing.expectError(error.InvalidFeed, parse(a, "{\"a\": }", "application/json"));
 }
 
+test "feed content type uses parsed JSON media types, not substrings" {
+    const a = std.testing.allocator;
+    const rss = "<?xml version=\"1.0\"?><rss version=\"2.0\"><channel><title>RSS</title></channel></rss>";
+    var f = try parse(a, rss, "application/not-json");
+    defer deinitFeed(&f, a);
+    try std.testing.expectEqual(FeedKind.rss, f.kind);
+}
+
 test "json feed surrogate pairs decode to astral characters" {
     const a = std.testing.allocator;
     var f = try parse(a, "{\"title\": \"\\uD83D\\uDE00\", \"items\": []}", "application/json");
-    defer f.deinit();
+    defer deinitFeed(&f, a);
     try std.testing.expectEqualStrings("😀", f.title);
 }
 
@@ -378,7 +388,7 @@ test "json feed tolerates numbers, null, booleans, and nested structures" {
         \\}
     ;
     var f = try parse(a, src, "application/json");
-    defer f.deinit();
+    defer deinitFeed(&f, a);
     // Only object elements become entries; scalars are ignored, not fatal.
     try std.testing.expectEqual(@as(usize, 2), f.entries.len);
     try std.testing.expectEqualStrings("Has number", f.entries[0].title);

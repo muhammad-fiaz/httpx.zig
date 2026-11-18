@@ -1,7 +1,9 @@
 # WebSocket Example
 
-WebSocket handshake and framing primitives (`httpx.websocket`, RFC 6455).
-See `examples/websocketServer.zig`.
+Low-level RFC 6455 handshake and frame primitives from
+`httpx.websocket.protocol`. Most applications should use the high-level
+[server](/examples/websocket-server) and [client](/examples/websocket-client)
+instead.
 
 ```zig
 // Compute Sec-WebSocket-Accept for an upgrade response.
@@ -10,16 +12,16 @@ httpx.websocket.computeAccept("dGhlIHNhbXBsZSBub25jZQ==", &accept);
 
 // Encode a server-to-client text frame header.
 var hdr: [10]u8 = undefined;
-const n = httpx.websocket.Frame.buildFrameHeader(&hdr, true, .text, 5, null);
+const n = httpx.websocket.protocol.Frame.buildFrameHeader(&hdr, true, .text, 5, null);
 _ = n;
 
 // Decode a frame header.
-const parsed = try httpx.websocket.Frame.parseFrameHeader(raw);
+const parsed = try httpx.websocket.protocol.Frame.parseFrameHeader(raw);
 const frameHdr = parsed.hdr; // fin, opcode, masked, payloadLen, maskKey
 ```
 
-Opcodes live on `httpx.websocket.Frame.Opcode` (`.text`, `.binary`,
-`.close`, `.ping`, `.pong`); `applyMask` masks payloads in place.
+Opcodes live on `httpx.websocket.Opcode` (`.text`, `.binary`, `.close`,
+`.ping`, `.pong`); `protocol.Frame.applyMask` masks payloads in place.
 
 ## Expected Output
 
@@ -27,15 +29,17 @@ Opcodes live on `httpx.websocket.Frame.Opcode` (`.text`, `.binary`,
 (no output - framing primitives only; RFC 6455 accept for "dGhlIHNhbXBsZSBub25jZQ==" is "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
 ```
 
-This snippet produces no printed output; frame header lengths and accept bytes vary with inputs. The RFC 6455 test vector above is fixed. See `examples/websocketServer.zig` (`run-websocket-server`) for the runnable server.
+The RFC 6455 test vector above is fixed. For a live echo session, run the
+server and client examples.
 
 ## Run
 
 ```bash
 zig build run-websocket-server
+zig build run-websocket-client
 ```
 
-## What to Verify
+## Related
 
-- The browser client page returns 200.
-- Handshake accept keys match the RFC 6455 test vector.
+* [Guide: WebSockets](/guide/websockets)
+* [API: WebSocket](/api/websocket)

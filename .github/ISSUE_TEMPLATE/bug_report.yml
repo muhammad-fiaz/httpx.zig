@@ -54,8 +54,8 @@ body:
     id: httpx-version
     attributes:
       label: httpx.zig Version
-      description: What version of httpx.zig are you using? (e.g. 0.2.2, main branch commit)
-      placeholder: 0.2.2
+      description: What version of httpx.zig are you using? (e.g. 0.2.4, main branch commit)
+      placeholder: 0.2.4
     validations:
       required: true
 

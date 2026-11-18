@@ -33,8 +33,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 1,
+        .limits = .{ .maxConnections = 1 },
     });
     defer server.deinit();
 
@@ -46,7 +45,7 @@ pub fn main() !void {
 
     const thread = try server.start();
 
-    // Client request to verify keep-alive on the server
+    // Client request to verify HTTP/1.1 on the server
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 

@@ -25,7 +25,7 @@ pub const Stat = struct {
     isDir: bool,
 };
 
-const cFs = struct {
+pub const cFs = struct {
     pub const HANDLE = if (isWin) std.os.windows.HANDLE else c_int;
     pub const INVALID_HANDLE_VALUE: HANDLE = if (isWin) @ptrFromInt(std.math.maxInt(usize)) else -1;
     pub const BOOL = enum(c_int) { FALSE = 0, TRUE = 1 };
@@ -37,6 +37,25 @@ const cFs = struct {
     pub const OPEN_EXISTING: u32 = 3;
     pub const CREATE_ALWAYS: u32 = 2;
     pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+
+    pub const INVALID_HANDLE: HANDLE = INVALID_HANDLE_VALUE;
+
+    pub extern "kernel32" fn CreateFileW(
+        lpFileName: [*:0]const u16,
+        dwDesiredAccess: u32,
+        dwShareMode: u32,
+        lpSecurityAttributes: ?*anyopaque,
+        dwCreationDisposition: u32,
+        dwFlagsAndAttributes: u32,
+        hTemplateFile: ?HANDLE,
+    ) callconv(.winapi) HANDLE;
+
+    pub extern "kernel32" fn SetFilePointerEx(
+        hFile: HANDLE,
+        liDistanceToMove: i64,
+        lpDistanceToMoveHigh: ?*i64,
+        dwMoveMethod: u32,
+    ) callconv(.winapi) BOOL;
 
     pub extern "kernel32" fn CreateFileA(
         lpFileName: [*:0]const u8,
@@ -155,7 +174,7 @@ pub fn writeFile(path: []const u8, content: []const u8) !void {
 /// Reads the entire file at `path` into a newly allocated buffer.
 /// Rejects directories and files larger than `maxBytes`.
 pub fn readFileLimited(allocator: Allocator, path: []const u8, maxBytes: usize) ![]u8 {
-    const stat = statPath(null, path) orelse return error.FileNotFound;
+    const stat = statPath(path) orelse return error.FileNotFound;
     if (stat.isDir) return error.IsDir;
     if (stat.size > maxBytes) return error.FileTooBig;
 
@@ -199,8 +218,10 @@ pub fn readFileAlloc(allocator: Allocator, path: []const u8) ![]u8 {
 }
 
 /// Returns stat metadata for the file or directory at `path`.
-pub fn statPath(io: ?std.Io, path: []const u8) ?Stat {
-    _ = io;
+///
+/// This helper is synchronous by design and does not take an `Io` context;
+/// it is used from startup paths that must not thread one through.
+pub fn statPath(path: []const u8) ?Stat {
     var buf: [1024:0]u8 = undefined;
     if (path.len >= buf.len) return null;
     @memcpy(buf[0..path.len], path);
@@ -301,7 +322,7 @@ pub fn statPath(io: ?std.Io, path: []const u8) ?Stat {
 
 /// Returns true if a file or directory exists at `path`.
 pub fn fileExists(path: []const u8) bool {
-    return statPath(null, path) != null;
+    return statPath(path) != null;
 }
 
 /// Deletes the file at `path`.
@@ -326,7 +347,7 @@ test "fs write, read, stat, delete" {
     try writeFile(testPath, "Hello Canonical FS!");
     try std.testing.expect(fileExists(testPath));
 
-    const st = statPath(null, testPath);
+    const st = statPath(testPath);
     try std.testing.expect(st != null);
     try std.testing.expectEqual(@as(u64, 19), st.?.size);
     try std.testing.expect(!st.?.isDir);

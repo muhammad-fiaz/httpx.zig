@@ -5,19 +5,18 @@ routes (see `examples/healthCheck.zig`).
 
 ```zig
 fn healthHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{ .status = "healthy" });
+    return ctx.json(.{ .status = "healthy" });
 }
 
 fn readyHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{ .status = "ready" });
+    return ctx.json(.{ .status = "ready" });
 }
 
-try server.get("/healthz", healthHandler);
-try server.get("/readyz", readyHandler);
+try server.get("/health", .{ .handler = healthHandler });
+try server.get("/ready", .{ .handler = readyHandler });
 ```
 
-`httpx.health.Status` (`.healthy`, `.ready`, ...) renders standard JSON
-bodies via `jsonBody()` with matching HTTP status codes.
+Both routes return JSON with the matching 200 status.
 
 ## Expected Output
 
@@ -36,8 +35,3 @@ The port number varies per run; the JSON bodies match the registered probe handl
 ```bash
 zig build run-health-check
 ```
-
-## What to Verify
-
-- `GET /healthz` returns 200 (liveness: the process is running).
-- `GET /readyz` returns 200 (readiness: ready to accept traffic).

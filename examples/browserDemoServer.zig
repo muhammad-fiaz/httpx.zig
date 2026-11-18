@@ -8,7 +8,7 @@ const htmlV1 =
     \\<html lang="en">
     \\<head>
     \\  <meta charset="UTF-8">
-    \\  <title>httpx.zig Live Demo</title>
+    \\  <title>httpx.zig</title>
     \\  <style>
     \\    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0b0f19; color: #f1f5f9; padding: 2rem; margin: 0; }
     \\    .card { max-width: 650px; margin: 2rem auto; background: #1e293b; border-radius: 16px; padding: 2.5rem; box-shadow: 0 10px 25px rgba(0,0,0,0.5); border: 1px solid #334155; }
@@ -57,7 +57,7 @@ const htmlV2 =
     \\<html lang="en">
     \\<head>
     \\  <meta charset="UTF-8">
-    \\  <title>httpx.zig Live Demo (Hot-Reloaded)</title>
+    \\  <title>httpx.zig (Hot-Reloaded)</title>
     \\  <style>
     \\    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0b0f19; color: #f1f5f9; padding: 2rem; margin: 0; }
     \\    .card { max-width: 650px; margin: 2rem auto; background: #1e293b; border-radius: 16px; padding: 2.5rem; box-shadow: 0 10px 25px rgba(0,0,0,0.5); border: 2px solid #22c55e; }
@@ -101,7 +101,7 @@ fn indexHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
 }
 
 fn statusHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{
+    return ctx.json(.{
         .status = "online",
         .engine = "httpx.zig",
         .protocols = [_][]const u8{ "HTTP/1.1", "HTTP/2", "HTTP/3", "QUIC", "TLS 1.2", "TLS 1.3" },
@@ -129,7 +129,7 @@ fn robotsHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
 
 fn triggerReloadHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     currentVersion.store(2, .release);
-    return ctx.renderJson(.{ .reloaded = true, .version = 2 });
+    return ctx.json(.{ .reloaded = true, .version = 2 });
 }
 
 pub fn main() !void {
@@ -141,7 +141,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .maxConnections = 5,
+        .limits = .{ .maxConnections = 5 },
     });
     defer server.deinit();
 
@@ -154,7 +154,7 @@ pub fn main() !void {
     try server.post("/api/trigger-reload", triggerReloadHandler);
 
     const port = server.localPort();
-    std.debug.print("Demo server listening on http://127.0.0.1:{d}\n", .{port});
+    std.debug.print("Listening on http://127.0.0.1:{d}\n", .{port});
 
     const ServerThread = struct {
         fn run(s: *httpx.Server) void {

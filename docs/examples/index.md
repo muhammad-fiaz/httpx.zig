@@ -5,7 +5,7 @@ This section contains practical `httpx.zig` demo programs for client, server, mi
 ## How to Use
 
 1. Open an example page.
-2. Review the `Demo Program` snippet.
+2. Review the Example snippet.
 3. Run the matching command from the `Run` section.
 4. Verify behavior with the checklist.
 
@@ -35,6 +35,7 @@ zig build run-http3-client -Dtarget=aarch64-macos
 - [SOCKS5h Proxy](/examples/socks5-proxy): Route requests through a SOCKS5h proxy with remote DNS resolution.
 - [Simplified API Aliases](/examples/simplified-api-aliases): Use short top-level helper APIs with local loopback success mode by default.
 - [Simple Server](/examples/simple-server): Start a minimal HTTP server.
+- [Testing Server](/examples/testing-server): Exercise the real client against a local production server with routes, dynamic handlers, multiple instances, and request capture.
 - [Thread Pool / Async Server](/examples/async-server-example): Start a concurrent HTTP server with thread pool connection dispatching.
 - [Router Example](/examples/router-example): Route params and grouped endpoints.
 - [Middleware Example](/examples/middleware-example): Chain middleware with shared behavior.
@@ -48,12 +49,18 @@ zig build run-http3-client -Dtarget=aarch64-macos
 - [HTTP/3 Example](/examples/http3-example): HTTP/3, QPACK, and QUIC primitives.
 - [HTTP/3 Client Runtime](/examples/http3-client-runtime): End-to-end high-level HTTP/3 client request against a local UDP loopback server.
 - [HTTP/3 Server Runtime](/examples/http3-server-runtime): End-to-end high-level HTTP/3 server route consumed by a local HTTP/3 client over UDP.
+- [HTTP/3 0-RTT](/examples/http3-0rtt): TLS 1.3 session-ticket resumption with 0-RTT early data over HTTP/3.
+- [Connectivity](/examples/connectivity): High-level TCP reachability checks through `net.connectivity` and the client convenience methods.
 - [HTTP/2 Advanced](/examples/http2-advanced): HTTP/2 production features (SETTINGS enforcement, GOAWAY/RST_STREAM, HPACK security, trailers).
 - [HTTP/3 Advanced](/examples/http3-advanced): HTTP/3 production features (QPACK stream instructions, QUIC stream cancellation, transport parameters).
 - [TCP Local](/examples/tcp-local): Local TCP listener/client round trip.
 - [UDP Local](/examples/udp-local): Local UDP transport demo.
-- [WebSocket Example](/examples/websocket-example): Read upgrade headers, handshake keys, and process frame inputs.
-- [WebSocket Server](/examples/websocket-server): WebSocket handshake response plus frame encoding/decoding primitives.
+- [WebSocket Example](/examples/websocket-example): Low-level RFC 6455 handshake and frame primitives.
+- [WebSocket Server](/examples/websocket-server): Full-duplex echo over a real HTTP connection takeover.
+- [WebSocket Client](/examples/websocket-client): `ws://` client with authentication, echo, and close handshake.
+- [Custom Signals](/examples/custom-signals): Per-server signal masks, application hooks, and multi-server graceful shutdown.
+- [Manual Signals](/examples/manual-signals): Application-owned signal subscription that drives server shutdown directly.
+- [Server Signals](/examples/server-signals): Automatic Ctrl+C / SIGTERM handling with a bounded drain deadline.
 - [Multipart Form Data](/examples/multipart-example): Build and parse multipart payloads with text fields and file uploads.
 - [Session Pattern](/examples/session-example): Cookie-backed sessions without a built-in server-side store.
 - [Metrics and Observability](/examples/metrics-example): Aggregate total requests, status codes, latency times, and success rates.

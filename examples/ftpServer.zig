@@ -8,7 +8,7 @@ pub fn main() !void {
     const io = std.Io.Threaded.global_single_threaded.io();
 
     var server = try httpx.protocols.ftp.Server.init(allocator, io, .{
-        .host = "0.0.0.0",
+        .host = "127.0.0.1",
         .port = 0,
         .user = "demo",
         .password = "password",

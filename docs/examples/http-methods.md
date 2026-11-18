@@ -1,7 +1,8 @@
 # HTTP Methods
 
-All standard HTTP methods over the URL-first client (`GET`, `POST`, `PUT`,
-`PATCH`, `DELETE`, `HEAD`, `OPTIONS`, `TRACE`, `CONNECT`).
+HTTP verbs with dedicated helpers on the URL-first client (`GET`, `POST`,
+`PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`); `TRACE` and `CONNECT` go
+through `client.request(url, .{ .method = .TRACE })`.
 
 ## Method Properties
 

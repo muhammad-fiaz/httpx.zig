@@ -1,7 +1,7 @@
-//! Production TLS 1.3 handshake driver for QUIC (RFC 9001).
+//! Production TLS 1.3 handshake Handshake for QUIC (RFC 9001).
 //!
-//! Where the loopback `TlsHandshakeDriver` in `connection.zig` uses empty
-//! certificates and fixed keys, this driver runs REAL handshakes: the
+//! Where the loopback `TlsHandshake` in `connection.zig` uses empty
+//! certificates and fixed keys, this Handshake runs REAL handshakes: the
 //! client offers ALPN `h3` with SNI and verifies the server chain against
 //! system/custom trust; the server selects `h3` and signs with its real
 //! P-256 identity; both sides exchange Finished and the server confirms
@@ -18,14 +18,14 @@
 //!     flow-control windows, stream limits, and connection IDs; absent
 //!     values keep compiled-in defaults.
 //!   * Retry/token validation and QUIC version negotiation (v1 and v2)
-//!     live in `connection.zig`; the TLS driver itself is
+//!     live in `connection.zig`; the TLS Handshake itself is
 //!     version-independent.
 //!   * ACK tracking, PTO/loss recovery, and NewReno congestion control
 //!     live in `connection.zig`, `lossRecovery.zig`, and
 //!     `congestionControl.zig`; key updates are handled there, connection
 //!     migration is not wired yet.
 //!
-//! Thread-safety: thread-confined per connection (one driver per side).
+//! Thread-safety: thread-confined per connection (one Handshake per side).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -47,27 +47,36 @@ const clockMod = @import("../../common/clock.zig");
 const addressMod = @import("../../net/address.zig");
 
 const sessionMod = @import("../tls/tlsSession.zig");
+const z = @import("zigantic");
 
-pub const ClientConfig = struct {
-    /// Server hostname: SNI (DNS names) + chain hostname check + ticket binding.
-    host: []const u8,
-    verify: transportTls.VerifyMode = .caBundle,
-    /// Extra/custom CA PEM trusted in addition to system roots.
-    caPem: ?[]const u8 = null,
-    /// Resumption session with 0-RTT allowance
-    session: ?*const sessionMod.ClientSession = null,
-    earlyData: bool = false,
-    /// Output pointer to capture new session ticket from server
-    sessionOut: ?*sessionMod.ClientSession = null,
-};
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
 
-pub const ServerConfig = struct {
-    certChainPem: []const u8,
-    privateKeyPem: []const u8,
-    ticketKeys: ?sessionMod.TicketKeys = null,
-    maxEarlyData: u32 = 0,
-    replayCache: ?*sessionMod.ReplayCache = null,
-};
+/// Handshake configuration. `role` selects the side; client fields and
+/// server-identity fields coexist so `.{}` plus the relevant fields is
+/// the single constructor form for both roles.
+const ConfigSchema = z.objectOf(.{
+    .role = z.withDefault(z.enumType(connMod.Role, .{}), .client),
+    .host = z.withDefault(z.string(.{ .min = 1 }), "127.0.0.1"),
+    .verify = z.withDefault(z.enumType(transportTls.VerifyMode, .{}), .caBundle),
+    .caPem = z.optional(z.string(.{ .min = 1 })),
+    .session = z.optional(typedSchema(*const sessionMod.ClientSession)),
+    .earlyData = z.withDefault(z.boolean(.{}), false),
+    .sessionOut = z.optional(typedSchema(*sessionMod.ClientSession)),
+    .certChainPem = z.withDefault(z.string(.{}), ""),
+    .privateKeyPem = z.withDefault(z.string(.{}), ""),
+    .ticketKeys = z.optional(typedSchema(sessionMod.TicketKeys)),
+    .maxEarlyData = z.withDefault(z.integer(u32, .{}), 0),
+    .replayCache = z.optional(typedSchema(*sessionMod.ReplayCache)),
+}, .{});
+pub const Config = ConfigSchema.Value;
 
 /// Precise handshake failure cause, preserved across the TlsDriver seam.
 pub const Detail = enum {
@@ -77,8 +86,8 @@ pub const Detail = enum {
     handshakeFailed,
 };
 
-/// Production handshake driver state (one per connection side).
-pub const Driver = struct {
+/// Production handshake Handshake state (one per connection side).
+pub const Handshake = struct {
     allocator: Allocator,
     role: connMod.Role,
     engine: tlsEngine.Engine,
@@ -96,10 +105,10 @@ pub const Driver = struct {
     /// seam only carries `connMod.Error`; this preserves the loud,
     /// specific reason across it).
     detail: Detail = .none,
-    /// Latched on any driver failure. Pump loops poll this to fail FAST
+    /// Latched on any Handshake failure. Pump loops poll this to fail FAST
     /// (precise cause via `detail`) instead of burning the whole
     /// deadline after the handshake is already doomed. Set and read on
-    /// the owner thread only (the driver never runs on pump threads).
+    /// the owner thread only (the Handshake never runs on pump threads).
     failed: bool = false,
     // Client policy (unused on server role).
     host: []const u8 = "",
@@ -112,35 +121,35 @@ pub const Driver = struct {
     certChainPem: []const u8 = "",
     privateKeyPem: []const u8 = "",
 
-    pub fn initClient(io: std.Io, allocator: Allocator, cfg: ClientConfig) Driver {
+    pub fn init(allocator: Allocator, io: std.Io, cfg: Config) Handshake {
+        var eng = tlsEngine.Engine.init(allocator, io, .{ .role = switch (cfg.role) {
+            .client => tlsEngine.Role.client,
+            .server => tlsEngine.Role.server,
+        } });
+        eng.ticketKeys = cfg.ticketKeys;
+        eng.maxEarlyData = cfg.maxEarlyData;
+        eng.replayCache = cfg.replayCache;
         return .{
             .allocator = allocator,
-            .role = .client,
-            .engine = tlsEngine.Engine.initClient(io, allocator, .{}),
+            .role = cfg.role,
+            .engine = eng,
             .host = cfg.host,
             .verify = cfg.verify,
             .caPem = cfg.caPem,
             .session = cfg.session,
             .earlyData = cfg.earlyData,
             .sessionOut = cfg.sessionOut,
-        };
-    }
-
-    pub fn initServer(io: std.Io, allocator: Allocator, cfg: ServerConfig) Driver {
-        var eng = tlsEngine.Engine.initServer(io, allocator, .{});
-        eng.ticketKeys = cfg.ticketKeys;
-        eng.maxEarlyData = cfg.maxEarlyData;
-        eng.replayCache = cfg.replayCache;
-        return .{
-            .allocator = allocator,
-            .role = .server,
-            .engine = eng,
             .certChainPem = cfg.certChainPem,
             .privateKeyPem = cfg.privateKeyPem,
         };
     }
 
-    pub fn deinit(self: *Driver) void {
+    /// Wires this handshake onto a connection. No raw field poking needed.
+    pub fn attach(self: *Handshake, conn: *Connection) void {
+        conn.tls = .{ .ctx = self, .start = clientStart, .onData = onData };
+    }
+
+    pub fn deinit(self: *Handshake) void {
         self.engine.deinit();
         self.flight.deinit(self.allocator);
         self.incoming.deinit(self.allocator);
@@ -156,12 +165,13 @@ pub const Driver = struct {
     fn buildLocalTransportParams(a: Allocator, conn: *Connection) ![]u8 {
         const cfg = conn.cfg;
         const p = paramsMod.Params{
-            .maxIdleTimeoutMs = cfg.maxIdleTimeoutMs,
+            .maxIdleMs = cfg.maxIdleMs,
             .maxUdpPayloadSize = @intCast(cfg.maxUdpPayload),
+            .disableActiveMigration = cfg.disableActiveMigration,
             .initialMaxData = cfg.initialMaxData,
-            .initialMaxStreamDataBidiLocal = 65536,
-            .initialMaxStreamDataBidiRemote = 65536,
-            .initialMaxStreamDataUni = 65536,
+            .initialMaxStreamDataBidiLocal = cfg.initialMaxStreamDataBidiLocal,
+            .initialMaxStreamDataBidiRemote = cfg.initialMaxStreamDataBidiRemote,
+            .initialMaxStreamDataUni = cfg.initialMaxStreamDataUni,
             .initialMaxStreamsBidi = conn.maxStreamsBidiLocal,
             .initialMaxStreamsUni = conn.maxStreamsUniLocal,
         };
@@ -241,7 +251,7 @@ pub const Driver = struct {
         conn.sendWindowUni = p.initialMaxStreamDataUni;
         conn.maxStreamsBidiRemote = p.initialMaxStreamsBidi;
         conn.maxStreamsUniRemote = p.initialMaxStreamsUni;
-        conn.recovery.cfg.maxAckDelayMs = p.maxAckDelayMs;
+        conn.recovery.cfg.maxAckMs = p.maxAckMs;
         conn.peerParams = p;
     }
 
@@ -278,12 +288,11 @@ pub const Driver = struct {
     }
 
     fn sniFor(host: []const u8) ?[]const u8 {
-        var probe = addressMod.Address{ .family = .ip4, .port = 0 };
-        return if (probe.parseIp(host)) |_| null else |_| host;
+        return if (addressMod.Address.parseIp(host)) |_| null else |_| host;
     }
 
     pub fn clientStart(ctx: ?*anyopaque, conn: *Connection, nowMs: u64) connMod.Error!void {
-        const d: *Driver = @ptrCast(@alignCast(ctx.?));
+        const d: *Handshake = @ptrCast(@alignCast(ctx.?));
         const tp = buildLocalTransportParams(conn.allocator, conn) catch
             return connMod.Error.OutOfMemory;
         defer conn.allocator.free(tp);
@@ -326,7 +335,7 @@ pub const Driver = struct {
     }
 
     pub fn onData(ctx: ?*anyopaque, conn: *Connection, data: []const u8, nowMs: u64) connMod.Error!void {
-        const d: *Driver = @ptrCast(@alignCast(ctx.?));
+        const d: *Handshake = @ptrCast(@alignCast(ctx.?));
         if (d.role == .client) {
             clientOnData(d, conn, data, nowMs) catch |e| {
                 d.failed = true;
@@ -340,7 +349,7 @@ pub const Driver = struct {
         }
     }
 
-    fn clientOnData(d: *Driver, conn: *Connection, data: []const u8, nowMs: u64) connMod.Error!void {
+    fn clientOnData(d: *Handshake, conn: *Connection, data: []const u8, nowMs: u64) connMod.Error!void {
         const a = conn.allocator;
         d.incoming.appendSlice(a, data) catch return connMod.Error.OutOfMemory;
         d.peerFlight.appendSlice(a, data) catch return connMod.Error.OutOfMemory;
@@ -460,7 +469,7 @@ pub const Driver = struct {
         }
     }
 
-    fn serverOnData(d: *Driver, conn: *Connection, data: []const u8, nowMs: u64) connMod.Error!void {
+    fn serverOnData(d: *Handshake, conn: *Connection, data: []const u8, nowMs: u64) connMod.Error!void {
         const a = conn.allocator;
         if (d.flightDone) {
             // Post-flight: only the client's Finished is expected.
@@ -536,7 +545,7 @@ pub const Driver = struct {
             // Transport close (0x1C) on the Initial space: Initial keys
             // are installed (acceptInitial ran) while application keys
             // never exist at this point, and a 0x1D application close is
-            // forbidden before 1-RTT. Best effort: the driver error
+            // forbidden before 1-RTT. Best effort: the Handshake error
             // below is the backstop.
             conn.queueControlFrame(.{ .connectionClose = .{
                 .errorCode = 0x178,
@@ -674,28 +683,34 @@ fn parseOfferedAlpn(a: Allocator, body: []const u8) ![][]const u8 {
 /// flights must reach the wire without waiting for peer traffic first,
 /// or both sides idle forever. Pumps NEVER block: the reader thread
 /// owns all waiting, so this is purely feed + flush on the owner thread.
-pub fn feedPumped(
-    ep: *Endpoint,
-    pump: *transportMod.Pump,
-    dest: ?std.Io.net.IpAddress,
-    quantumMs: u64,
-    nowMs: u64,
-) !void {
+const PumpConfigSchema = z.objectOf(.{
+    .ep = typedSchema(*Endpoint),
+    .pump = typedSchema(*transportMod.Pump),
+    .dest = z.optional(typedSchema(std.Io.net.IpAddress)),
+    .quantumMs = z.withDefault(z.positiveInt(u64, .{}), 100),
+    .nowMs = typedSchema(u64),
+}, .{});
+pub const PumpConfig = PumpConfigSchema.Value;
+
+pub fn feedPumped(cfg: PumpConfig) !void {
+    const ep = cfg.ep;
+    const pump = cfg.pump;
+    const dest = cfg.dest;
+    const quantumMs = cfg.quantumMs;
+    const nowMs = cfg.nowMs;
     if (try pump.next(quantumMs)) |d| {
         // Free with the PUMP's allocator (it duped these bytes) — never
         // the connection's: the two are independently chosen and mixing
         // them corrupts the heap.
         defer pump.allocator.free(d.data);
-        ep.peer = d.from;
-        ep.conn.receiveDatagram(d.data, nowMs) catch |e| switch (e) {
+        _ = ep.receiveFrom(d.data, d.from, nowMs) catch |e| switch (e) {
             error.Draining => return e,
             // Drop bad datagrams and keep serving the connection.
             else => {},
         };
         while (try pump.next(0)) |extra| {
             defer pump.allocator.free(extra.data);
-            ep.peer = extra.from;
-            ep.conn.receiveDatagram(extra.data, nowMs) catch |e| switch (e) {
+            _ = ep.receiveFrom(extra.data, extra.from, nowMs) catch |e| switch (e) {
                 error.Draining => return e,
                 else => {},
             };
@@ -718,19 +733,39 @@ pub fn feedPumped(
 /// Server side of a live handshake over an already-started pump:
 /// bootstraps Initial keys from the first datagram's DCID, then pumps
 /// until `.established` (client Finished verified) or the deadline
-/// passes. `driver` (nullable) is polled for fast failure. The pump is
+/// passes. `hs` (nullable) is polled for fast failure. The pump is
 /// NOT stopped here — the caller owns its lifetime (handshake, then
 /// request exchange, then stop).
-pub fn serveHandshake(serverEp: *Endpoint, pump: *transportMod.Pump, driver: ?*Driver, deadlineMs: u64) !void {
+const ServeConfigSchema = z.objectOf(.{
+    .ep = typedSchema(*Endpoint),
+    .pump = typedSchema(*transportMod.Pump),
+    .hs = z.optional(typedSchema(*Handshake)),
+    .deadlineMs = z.withDefault(z.integer(u64, .{}), 15_000),
+}, .{});
+pub const ServeConfig = ServeConfigSchema.Value;
+
+pub fn serve(cfg: ServeConfig) !void {
+    const serverEp = cfg.ep;
+    const pump = cfg.pump;
+    const hs = cfg.hs;
+    const deadlineMs = cfg.deadlineMs;
+    // A server may reuse its listening Endpoint while replacing the
+    // per-connection QUIC state. Start the new connection with no route
+    // inherited from the previous peer; after bootstrap, receiveFrom pins
+    // this connection to its first source address.
+    if (serverEp.conn.role == .server and serverEp.conn.state == .initial) {
+        serverEp.peer = null;
+        serverEp.candidatePeer = null;
+    }
     const start: u64 = @intCast(clockMod.monotonicMillis(serverEp.io));
     var booted = false;
     while (true) {
         const now: u64 = @intCast(clockMod.monotonicMillis(serverEp.io));
         if (now -| start > deadlineMs) return error.HandshakeTimeout;
-        // Driver-doomed handshakes fail fast with a mappable error (the
-        // precise cause stays on `driver.detail`); only the truly quiet
+        // Handshake-doomed handshakes fail fast with a mappable error (the
+        // precise cause stays on `Handshake.detail`); only the truly quiet
         // peer burns the deadline.
-        if (driver) |d| {
+        if (hs) |d| {
             if (d.failed) return error.HandshakeFailed;
         }
         const remain = deadlineMs -| (now -| start);
@@ -742,13 +777,12 @@ pub fn serveHandshake(serverEp: *Endpoint, pump: *transportMod.Pump, driver: ?*D
             defer pump.allocator.free(d.data);
             const parsed = packetMod.parseLongHeader(d.data) catch continue;
             if (parsed.header.type != .initial) continue;
-            serverEp.peer = d.from;
             try serverEp.conn.acceptInitial(parsed.header.dcid);
-            serverEp.conn.receiveDatagram(d.data, now) catch continue;
+            _ = serverEp.receiveFrom(d.data, d.from, now) catch continue;
             booted = true;
             continue;
         }
-        try feedPumped(serverEp, pump, null, @min(remain, 100), now);
+        try feedPumped(.{ .ep = serverEp, .pump = pump, .quantumMs = @min(remain, 100), .nowMs = now });
         if (serverEp.conn.state == .established) return;
     }
 }
@@ -758,12 +792,14 @@ const hsTestKeyPem = @embedFile("../tls/testdata/localhostKey.pem");
 
 test "live handshake over real udp loopback establishes both ends" {
     const a = std.testing.allocator;
-    var ctx = @import("../../sockets/tcp.zig").IoContext.init(a) catch return;
+    var ctx = try @import("../../sockets/tcp.zig").IoContext.init(a);
     defer ctx.deinit();
 
-    var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
     defer cliConn.deinit();
-    var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+    var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+        .role = .server,
+    });
     defer srvConn.deinit();
 
     var cliEp = try transportMod.Endpoint.init(a, ctx.io, cliConn, .{});
@@ -772,12 +808,12 @@ test "live handshake over real udp loopback establishes both ends" {
     defer srvEp.deinit();
     const sport = srvEp.localPort();
 
-    var cliDrv = Driver.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{ .host = "127.0.0.1", .caPem = hsTestCertPem });
+    var cliDrv = Handshake.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client, .host = "127.0.0.1", .caPem = hsTestCertPem });
     defer cliDrv.deinit();
-    var srvDrv = Driver.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{ .certChainPem = hsTestCertPem, .privateKeyPem = hsTestKeyPem });
+    var srvDrv = Handshake.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server, .certChainPem = hsTestCertPem, .privateKeyPem = hsTestKeyPem });
     defer srvDrv.deinit();
-    cliConn.tls = .{ .ctx = &cliDrv, .start = Driver.clientStart, .onData = Driver.onData };
-    srvConn.tls = .{ .ctx = &srvDrv, .start = Driver.clientStart, .onData = Driver.onData };
+    cliConn.tls = .{ .ctx = &cliDrv, .start = Handshake.clientStart, .onData = Handshake.onData };
+    srvConn.tls = .{ .ctx = &srvDrv, .start = Handshake.clientStart, .onData = Handshake.onData };
 
     var cliPump: transportMod.Pump = .{};
     try cliPump.start(&cliEp, a);
@@ -803,12 +839,12 @@ test "live handshake over real udp loopback establishes both ends" {
 
 test "live retry handshake over real udp loopback establishes both ends" {
     const a = std.testing.allocator;
-    var ctx = @import("../../sockets/tcp.zig").IoContext.init(a) catch return;
+    var ctx = try @import("../../sockets/tcp.zig").IoContext.init(a);
     defer ctx.deinit();
 
-    var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
     defer cliConn.deinit();
-    var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{ .retry = true });
+    var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server, .retry = true });
     defer srvConn.deinit();
 
     var cliEp = try transportMod.Endpoint.init(a, ctx.io, cliConn, .{});
@@ -817,12 +853,12 @@ test "live retry handshake over real udp loopback establishes both ends" {
     defer srvEp.deinit();
     const sport = srvEp.localPort();
 
-    var cliDrv = Driver.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{ .host = "127.0.0.1", .caPem = hsTestCertPem });
+    var cliDrv = Handshake.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client, .host = "127.0.0.1", .caPem = hsTestCertPem });
     defer cliDrv.deinit();
-    var srvDrv = Driver.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{ .certChainPem = hsTestCertPem, .privateKeyPem = hsTestKeyPem });
+    var srvDrv = Handshake.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server, .certChainPem = hsTestCertPem, .privateKeyPem = hsTestKeyPem });
     defer srvDrv.deinit();
-    cliConn.tls = .{ .ctx = &cliDrv, .start = Driver.clientStart, .onData = Driver.onData };
-    srvConn.tls = .{ .ctx = &srvDrv, .start = Driver.clientStart, .onData = Driver.onData };
+    cliConn.tls = .{ .ctx = &cliDrv, .start = Handshake.clientStart, .onData = Handshake.onData };
+    srvConn.tls = .{ .ctx = &srvDrv, .start = Handshake.clientStart, .onData = Handshake.onData };
 
     var cliPump: transportMod.Pump = .{};
     try cliPump.start(&cliEp, a);
@@ -851,10 +887,10 @@ test "live retry handshake over real udp loopback establishes both ends" {
 pub fn performHandshakeWithEarlyData(
     clientEp: *Endpoint,
     clientPump: *transportMod.Pump,
-    clientDriver: ?*Driver,
+    clientDriver: ?*Handshake,
     serverEp: ?*Endpoint,
     serverPump: ?*transportMod.Pump,
-    serverDriver: ?*Driver,
+    serverDriver: ?*Handshake,
     dest: std.Io.net.IpAddress,
     deadlineMs: u64,
     earlyStream: ?struct { sid: u64, data: []const u8 },
@@ -885,15 +921,14 @@ pub fn performHandshakeWithEarlyData(
                 defer spump.allocator.free(d.data);
                 const parsed = packetMod.parseLongHeader(d.data) catch continue;
                 if (parsed.header.type != .initial) continue;
-                sep.peer = d.from;
                 try sep.conn.acceptInitial(parsed.header.dcid);
-                sep.conn.receiveDatagram(d.data, now) catch continue;
+                _ = sep.receiveFrom(d.data, d.from, now) catch continue;
                 serverBooted = true;
                 continue;
             }
-            try feedPumped(sep, spump, null, @min(remain, 100), now);
+            try feedPumped(.{ .ep = sep, .pump = spump, .dest = null, .quantumMs = @min(remain, 100), .nowMs = now });
         }
-        try feedPumped(clientEp, clientPump, dest, @min(remain, 100), now);
+        try feedPumped(.{ .ep = clientEp, .pump = clientPump, .dest = dest, .quantumMs = @min(remain, 100), .nowMs = now });
         if (clientEp.conn.state == .established) {
             if (serverEp) |sep| {
                 if (sep.conn.state == .established) return;
@@ -907,10 +942,10 @@ pub fn performHandshakeWithEarlyData(
 pub fn performHandshake(
     clientEp: *Endpoint,
     clientPump: *transportMod.Pump,
-    clientDriver: ?*Driver,
+    clientDriver: ?*Handshake,
     serverEp: ?*Endpoint,
     serverPump: ?*transportMod.Pump,
-    serverDriver: ?*Driver,
+    serverDriver: ?*Handshake,
     dest: std.Io.net.IpAddress,
     deadlineMs: u64,
 ) !void {
@@ -919,7 +954,7 @@ pub fn performHandshake(
 
 test "peer transport parameters apply to connection windows" {
     const a = std.testing.allocator;
-    var conn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    var conn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
     defer conn.deinit();
 
     const putCid = struct {
@@ -940,7 +975,7 @@ test "peer transport parameters apply to connection windows" {
     p.initialMaxStreamDataUni = 256 << 10;
     p.initialMaxStreamsBidi = 64;
     p.initialMaxStreamsUni = 8;
-    p.maxAckDelayMs = 42;
+    p.maxAckMs = 42;
 
     const fakeIscid = [_]u8{ 0xAA, 0xBB, 0xCC, 0xDD, 0x01, 0x02, 0x03, 0x04 };
     const wrongCid = (@as([8]u8, @splat(0x11)));
@@ -952,7 +987,7 @@ test "peer transport parameters apply to connection windows" {
     try putCid(&block, a, 0x00, conn.origDcid[0..conn.origDcidLen]);
     try putCid(&block, a, 0x0F, &fakeIscid);
 
-    try Driver.applyPeerTransportParams(conn, block.items, false);
+    try Handshake.applyPeerTransportParams(conn, block.items, false);
     try std.testing.expectEqual(@as(u64, 2 << 20), conn.maxDataRemote);
     // These limits apply to streams with different initiators.
     try std.testing.expectEqual(@as(u64, 1 << 20), conn.sendWindowBidiPeerInitiated);
@@ -960,7 +995,7 @@ test "peer transport parameters apply to connection windows" {
     try std.testing.expectEqual(@as(u64, 256 << 10), conn.sendWindowUni);
     try std.testing.expectEqual(@as(u64, 64), conn.maxStreamsBidiRemote);
     try std.testing.expectEqual(@as(u64, 8), conn.maxStreamsUniRemote);
-    try std.testing.expectEqual(@as(u64, 42), conn.recovery.cfg.maxAckDelayMs);
+    try std.testing.expectEqual(@as(u64, 42), conn.recovery.cfg.maxAckMs);
     try std.testing.expect(conn.peerParams != null);
 
     // Our locally initiated stream uses the peer's bidi-remote allowance,
@@ -975,10 +1010,10 @@ test "peer transport parameters apply to connection windows" {
     defer srvBlock.deinit(a);
     try paramsMod.encode(&srvBlock, a, p);
     try putCid(&srvBlock, a, 0x0F, &fakeIscid);
-    try Driver.applyPeerTransportParams(conn, srvBlock.items, true);
+    try Handshake.applyPeerTransportParams(conn, srvBlock.items, true);
     try std.testing.expectError(
         connMod.Error.TransportParameterError,
-        Driver.applyPeerTransportParams(conn, block.items, true),
+        Handshake.applyPeerTransportParams(conn, block.items, true),
     );
 
     // A forged originalDestinationConnectionId is rejected.
@@ -989,7 +1024,7 @@ test "peer transport parameters apply to connection windows" {
     try putCid(&bad, a, 0x0F, &fakeIscid);
     try std.testing.expectError(
         connMod.Error.TransportParameterError,
-        Driver.applyPeerTransportParams(conn, bad.items, false),
+        Handshake.applyPeerTransportParams(conn, bad.items, false),
     );
 
     // A retrySourceConnectionId without a Retry is rejected.
@@ -1001,28 +1036,30 @@ test "peer transport parameters apply to connection windows" {
     try putCid(&rsc, a, 0x10, &wrongCid);
     try std.testing.expectError(
         connMod.Error.TransportParameterError,
-        Driver.applyPeerTransportParams(conn, rsc.items, false),
+        Handshake.applyPeerTransportParams(conn, rsc.items, false),
     );
 }
 
 test "server closes unknown alpn with no_application_protocol" {
     const a = std.testing.allocator;
-    var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+    var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+        .role = .server,
+    });
     defer srvConn.deinit();
     // Initial keys + validated address so the close packet can fly.
     try srvConn.installInitialKeys();
     srvConn.addressValidated = true;
-    var srvDrv = Driver.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{ .certChainPem = hsTestCertPem, .privateKeyPem = hsTestKeyPem });
+    var srvDrv = Handshake.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server, .certChainPem = hsTestCertPem, .privateKeyPem = hsTestKeyPem });
     defer srvDrv.deinit();
-    srvConn.tls = .{ .ctx = &srvDrv, .start = Driver.clientStart, .onData = Driver.onData };
+    srvConn.tls = .{ .ctx = &srvDrv, .start = Handshake.clientStart, .onData = Handshake.onData };
 
     // A ClientHello offering only HTTP/1.1, no h3.
-    var tmp = tlsEngine.Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var tmp = tlsEngine.Engine.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client });
     defer tmp.deinit();
     const ch = try tmp.produceClientHello(&.{"http/1.1"}, &.{}, "localhost", null);
     defer a.free(ch);
 
-    const r = Driver.onData(&srvDrv, srvConn, ch, 1000);
+    const r = Handshake.onData(&srvDrv, srvConn, ch, 1000);
     try std.testing.expectError(connMod.Error.TlsDriverFailed, r);
     try std.testing.expect(srvDrv.failed);
     try std.testing.expectEqual(Detail.alpnMismatch, srvDrv.detail);
@@ -1035,7 +1072,7 @@ test "server closes unknown alpn with no_application_protocol" {
 
 test "live QUIC 0-RTT resumption over real udp loopback sends early data and establishes" {
     const a = std.testing.allocator;
-    var ctx = @import("../../sockets/tcp.zig").IoContext.init(a) catch return;
+    var ctx = try @import("../../sockets/tcp.zig").IoContext.init(a);
     defer ctx.deinit();
 
     const tk = sessionMod.TicketKeys{ .current = (@as([32]u8, @splat(0x5A))) };
@@ -1055,9 +1092,11 @@ test "live QUIC 0-RTT resumption over real udp loopback sends early data and est
     var sessionCaptured = false;
 
     {
-        var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+        var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
         defer cliConn.deinit();
-        var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+        var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+            .role = .server,
+        });
         defer srvConn.deinit();
 
         var cliEp = try transportMod.Endpoint.init(a, ctx.io, cliConn, .{});
@@ -1066,14 +1105,16 @@ test "live QUIC 0-RTT resumption over real udp loopback sends early data and est
         defer srvEp.deinit();
         const sport = srvEp.localPort();
 
-        var cliDrv = Driver.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{
+        var cliDrv = Handshake.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+            .role = .client,
             .host = "127.0.0.1",
             .caPem = hsTestCertPem,
             .sessionOut = &savedSession,
         });
         defer cliDrv.deinit();
 
-        var srvDrv = Driver.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{
+        var srvDrv = Handshake.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+            .role = .server,
             .certChainPem = hsTestCertPem,
             .privateKeyPem = hsTestKeyPem,
             .ticketKeys = tk,
@@ -1082,8 +1123,8 @@ test "live QUIC 0-RTT resumption over real udp loopback sends early data and est
         });
         defer srvDrv.deinit();
 
-        cliConn.tls = .{ .ctx = &cliDrv, .start = Driver.clientStart, .onData = Driver.onData };
-        srvConn.tls = .{ .ctx = &srvDrv, .start = Driver.clientStart, .onData = Driver.onData };
+        cliConn.tls = .{ .ctx = &cliDrv, .start = Handshake.clientStart, .onData = Handshake.onData };
+        srvConn.tls = .{ .ctx = &srvDrv, .start = Handshake.clientStart, .onData = Handshake.onData };
 
         var cliPump: transportMod.Pump = .{};
         try cliPump.start(&cliEp, a);
@@ -1102,7 +1143,7 @@ test "live QUIC 0-RTT resumption over real udp loopback sends early data and est
         while (tries < 20 and savedSession.ticket.len == 0) : (tries += 1) {
             const now2: u64 = @intCast(clockMod.monotonicMillis(cliEp.io));
             _ = srvEp.flush(null) catch {};
-            try feedPumped(&cliEp, &cliPump, dest, 50, now2);
+            try feedPumped(.{ .ep = &cliEp, .pump = &cliPump, .dest = dest, .quantumMs = 50, .nowMs = now2 });
         }
 
         if (savedSession.ticket.len > 0) {
@@ -1115,9 +1156,11 @@ test "live QUIC 0-RTT resumption over real udp loopback sends early data and est
 
     // 2. Resumed Connection: Client uses savedSession and sends 0-RTT early data
     {
-        var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+        var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
         defer cliConn.deinit();
-        var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+        var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+            .role = .server,
+        });
         defer srvConn.deinit();
 
         var cliEp = try transportMod.Endpoint.init(a, ctx.io, cliConn, .{});
@@ -1126,7 +1169,8 @@ test "live QUIC 0-RTT resumption over real udp loopback sends early data and est
         defer srvEp.deinit();
         const sport = srvEp.localPort();
 
-        var cliDrv = Driver.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{
+        var cliDrv = Handshake.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+            .role = .client,
             .host = "127.0.0.1",
             .caPem = hsTestCertPem,
             .session = &savedSession,
@@ -1134,7 +1178,8 @@ test "live QUIC 0-RTT resumption over real udp loopback sends early data and est
         });
         defer cliDrv.deinit();
 
-        var srvDrv = Driver.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{
+        var srvDrv = Handshake.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+            .role = .server,
             .certChainPem = hsTestCertPem,
             .privateKeyPem = hsTestKeyPem,
             .ticketKeys = tk,
@@ -1143,8 +1188,8 @@ test "live QUIC 0-RTT resumption over real udp loopback sends early data and est
         });
         defer srvDrv.deinit();
 
-        cliConn.tls = .{ .ctx = &cliDrv, .start = Driver.clientStart, .onData = Driver.onData };
-        srvConn.tls = .{ .ctx = &srvDrv, .start = Driver.clientStart, .onData = Driver.onData };
+        cliConn.tls = .{ .ctx = &cliDrv, .start = Handshake.clientStart, .onData = Handshake.onData };
+        srvConn.tls = .{ .ctx = &srvDrv, .start = Handshake.clientStart, .onData = Handshake.onData };
 
         var cliPump: transportMod.Pump = .{};
         try cliPump.start(&cliEp, a);
@@ -1184,7 +1229,7 @@ test "live QUIC 0-RTT resumption over real udp loopback sends early data and est
 
 test "peer transport parameter defaults replace stale send credit" {
     const a = std.testing.allocator;
-    var conn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    var conn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
     defer conn.deinit();
     conn.maxDataRemote = 4096;
     conn.sendWindowBidiPeerInitiated = 2048;
@@ -1196,7 +1241,7 @@ test "peer transport parameter defaults replace stale send credit" {
     var wire = std.ArrayList(u8).empty;
     defer wire.deinit(a);
     try paramsMod.encode(&wire, a, .{}); // absent initial limits default to zero
-    try Driver.applyPeerTransportParams(conn, wire.items, false);
+    try Handshake.applyPeerTransportParams(conn, wire.items, false);
 
     try std.testing.expectEqual(@as(u64, 0), conn.maxDataRemote);
     try std.testing.expectEqual(@as(u64, 0), conn.sendWindowBidiPeerInitiated);
@@ -1206,17 +1251,39 @@ test "peer transport parameter defaults replace stale send credit" {
     try std.testing.expectEqual(@as(u64, 0), conn.maxStreamsUniRemote);
 }
 
+test "disable active migration is advertised and enforced" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var local = try connMod.Connection.init(a, io, .{ .disableActiveMigration = true });
+    defer local.deinit();
+    const localWire = try Handshake.buildLocalTransportParams(a, local);
+    defer a.free(localWire);
+    try std.testing.expect((try paramsMod.decode(localWire)).disableActiveMigration);
+
+    try std.testing.expectError(connMod.Error.InvalidState, local.initiatePathValidation(1000));
+
+    var peerBlocked = try connMod.Connection.init(a, io, .{});
+    defer peerBlocked.deinit();
+    var peerWire = std.ArrayList(u8).empty;
+    defer peerWire.deinit(a);
+    try paramsMod.encode(&peerWire, a, .{ .disableActiveMigration = true });
+    try Handshake.applyPeerTransportParams(peerBlocked, peerWire.items, false);
+    try std.testing.expectError(connMod.Error.InvalidState, peerBlocked.initiatePathValidation(1000));
+}
+
 test "the initial keys are discarded once the handshake moves on" {
     // RFC 9001 Section 4.9.1: a client discards the Initial keys when it
     // first sends a Handshake packet and a server discards them when it
     // first processes one. After that no Initial packet may be sent.
     const a = std.testing.allocator;
-    var ctx = @import("../../sockets/tcp.zig").IoContext.init(a) catch return;
+    var ctx = try @import("../../sockets/tcp.zig").IoContext.init(a);
     defer ctx.deinit();
 
-    var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
     defer cliConn.deinit();
-    var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+    var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+        .role = .server,
+    });
     defer srvConn.deinit();
 
     var cliEp = try transportMod.Endpoint.init(a, ctx.io, cliConn, .{});
@@ -1225,12 +1292,12 @@ test "the initial keys are discarded once the handshake moves on" {
     defer srvEp.deinit();
     const sport = srvEp.localPort();
 
-    var cliDrv = Driver.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{ .host = "127.0.0.1", .caPem = hsTestCertPem });
+    var cliDrv = Handshake.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .client, .host = "127.0.0.1", .caPem = hsTestCertPem });
     defer cliDrv.deinit();
-    var srvDrv = Driver.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{ .certChainPem = hsTestCertPem, .privateKeyPem = hsTestKeyPem });
+    var srvDrv = Handshake.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server, .certChainPem = hsTestCertPem, .privateKeyPem = hsTestKeyPem });
     defer srvDrv.deinit();
-    cliConn.tls = .{ .ctx = &cliDrv, .start = Driver.clientStart, .onData = Driver.onData };
-    srvConn.tls = .{ .ctx = &srvDrv, .start = Driver.clientStart, .onData = Driver.onData };
+    cliConn.tls = .{ .ctx = &cliDrv, .start = Handshake.clientStart, .onData = Handshake.onData };
+    srvConn.tls = .{ .ctx = &srvDrv, .start = Handshake.clientStart, .onData = Handshake.onData };
 
     var cliPump: transportMod.Pump = .{};
     try cliPump.start(&cliEp, a);

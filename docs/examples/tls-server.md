@@ -1,8 +1,8 @@
 # TLS Server Example
 
-Demonstrates the custom TLS server implementation built from scratch. Shows TLS configuration with ECDSA certificate/key PEM files, ALPN negotiation, HTTP/1.1 and HTTP/2 over TLS, and TLS client handshake with HTTP request/response.
+Demonstrates a TLS server using ECDSA certificate/key PEM files, served through the direct `httpx.Server` API with the TLS identity passed in the `.tls` config.
 
-## Features Demonstrated
+## Covers
 
 - TLS server with ECDSA P-256 certificates (custom implementation)
 - ALPN negotiation for protocol selection (h2 or http/1.1 over TLS)
@@ -10,16 +10,11 @@ Demonstrates the custom TLS server implementation built from scratch. Shows TLS 
 - HTTP request/response over TLS 1.3
 - HTTP/2 ALPN detection
 
-## Demo Program
+## Example
 
 ```zig
 const std = @import("std");
 const httpx = @import("httpx");
-const tls = httpx.protocols.tls;
-
-fn helloHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.text("Hello from TLS server!");
-}
 
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -27,48 +22,80 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    // Start a local TLS listener with a self-signed identity.
-    // (See examples/tlsServer.zig for the runnable version.)
-    var tlsListener = try httpx.tls.Listener.init(allocator, io, .{
+    const cert =
+        \\-----BEGIN CERTIFICATE-----
+        \\MIICPDCCAeKgAwIBAgIUIaIP30+IolyKqY2rJ3BfBKxmjS8wCgYIKoZIzj0EAwIw
+        \\XDELMAkGA1UEBhMCVVMxETAPBgNVBAgMCExvb3BiYWNrMREwDwYDVQQHDAhMb29w
+        \\YmFjazETMBEGA1UECgwKSFRUUFggRGVtbzESMBAGA1UEAwwJMTI3LjAuMC4xMB4X
+        \\DTI2MTExMTE1MzQ0NloXDTM2MTEwODE1MzQ0NlowXDELMAkGA1UEBhMCVVMxETAP
+        \\BgNVBAgMCExvb3BiYWNrMREwDwYDVQQHDAhMb29wYmFjazETMBEGA1UECgwKSFRU
+        \\UFggRGVtbzESMBAGA1UEAwwJMTI3LjAuMC4xMFkwEwYHKoZIzj0CAQYIKoZIzj0D
+        \\AQcDQgAEUKzjhE9LkhCVh6okzC/1wyJbSLM3+1PJeV7q+0F7qMM7kcfqbdY2EuAj
+        \\kshw68ObUH+RoIkN5S/FIs4cyLsAjaOBgTB/MB0GA1UdDgQWBBSvfg3xo5kQlX1y
+        \\GkkonFKZ88JrlTAfBgNVHSMEGDAWgBSvfg3xo5kQlX1yGkkonFKZ88JrlTAPBgNV
+        \\HRMBAf8EBTADAQH/MCwGA1UdEQQlMCOCCWxvY2FsaG9zdIcEfwAAAYcQAAAAAAAA
+        \\AAAAAAAAAAAAATAKBggqhkjOPQQDAgNIADBFAiBt0pmSlq3mxXRzzyz2NBe6Sc1L
+        \\ULxJMml96rS0XSbVoAIhAM8a0xJ+MZ1Tt4T/bVtVPCOHDYkUVNsqHcWBjO8CeroI
+        \\-----END CERTIFICATE-----
+    ;
+
+    const key =
+        \\-----BEGIN PRIVATE KEY-----
+        \\MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgI/MhkJ2rgmNOojla
+        \\sfGBI3RA2kOPETl53RBm/n5XTc2hRANCAARQrOOET0uSEJWHqiTML/XDIltIszf7
+        \\U8l5Xur7QXuowzuRx+pt1jYS4COSyHDrw5tQf5GgiQ3lL8UizhzIuwCN
+        \\-----END PRIVATE KEY-----
+    ;
+
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .defaultIdentity = .{
-            .certChainPem = @embedFile("cert.pem"),
-            .privateKeyPem = @embedFile("key.pem"),
+        .limits = .{ .maxConnections = 2 },
+        .tls = .{
+            .certificatePem = cert,
+            .privateKeyPem = key,
         },
     });
-    defer tlsListener.deinit();
+    defer server.deinit();
 
-    const port = tlsListener.localPort();
-    std.debug.print("TLS server running on 127.0.0.1:{d}\n", .{port});
-    std.debug.print("TLS listener initialized successfully on port {d}.\n", .{port});
-    std.debug.print("TLS server configuration verified.\n", .{});
+    try server.get("/", .{ .handler = handler });
+
+    const port = server.localPort();
+    const thread = try server.start();
+    defer {
+        server.requestShutdown();
+        thread.join();
+    }
+
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
+
+    var urlBuf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&urlBuf, "https://127.0.0.1:{d}/", .{port});
+    var res = try client.get(url, .{ .tls = .{ .verify = .none, .allowTruncation = true }, .timeoutMs = 15_000 });
+    defer res.deinit();
+    std.debug.print("GET / -> {d} {s}\n", .{ res.status, res.body });
+}
+
+fn handler(_: *httpx.router.Context) anyerror!httpx.router.Response {
+    return .{
+        .status = 200,
+        .body = "Hello from TLS server!",
+        .contentType = "text/plain; charset=utf-8",
+    };
 }
 ```
 
 ## Expected Output
 
 ```text
-TLS server running on 127.0.0.1:54321
-TLS listener initialized successfully on port 54321.
-TLS server configuration verified.
+GET / -> 200 Hello from TLS server!
 ```
 
-The ephemeral loopback port varies per run; certificate material and handshake details vary by deployment. Loopback only with a self-signed identity, no external service required. The `helloHandler` serves `Hello from TLS server!` with status 200 when the listener runs.
+The ephemeral loopback port varies per run; certificate material and handshake details vary by deployment. Loopback only with a self-signed identity, no external service required.
 
 ## Run
 
 ```bash
 zig build run-tls-server
 ```
-
-## Checklist
-
-- [x] Server starts with TLS enabled using ECDSA P-256 certificates
-- [x] Certificate and key PEM files are loaded
-- [x] TLS handshake completes successfully (TLS 1.3)
-- [x] ALPN negotiates h2 or http/1.1
-- [x] HTTP/2 is detected via ALPN
-- [x] HTTP request over TLS returns 200 OK
-- [x] Uses TLS 1.3 cipher suites on the native server path
-- [x] Record-level fragmentation works correctly

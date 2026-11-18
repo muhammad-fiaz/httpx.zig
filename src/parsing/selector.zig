@@ -56,6 +56,7 @@ pub const ParsedSelector = struct {
         self.arena.deinit();
     }
 };
+pub const Selector = ParsedSelector;
 
 pub const SelectorError = error{
     OutOfMemory,

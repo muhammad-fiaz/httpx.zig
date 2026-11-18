@@ -8,41 +8,43 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 
 ### Client Operations (URL-first)
 
-- `client.fetch(url, options)` — **primary unified fetch operation** (methods, typed JSON, headers, body)
-- `client.get / post / put / patch / delete / head / options / trace / connect / request(url, options)`
-- `client.getAll(urls)` — fetch multiple URLs concurrently
-- `client.requestAll(requests)` — perform multiple custom requests concurrently
-- `client.checkConnectivity(options)` — connectivity probe using client I/O
-- Additional operations: `client.download`, `client.graphql`, `client.lookupFileInfo`, `client.updateFile`, `httpx.client.download.verifyFile`, `client.fetchSitemap`, `client.resolve`, `client.resolveUrl`
+- `client.request(url, options)` - generic request; `.method` defaults to GET
+- `client.fetch(url, options)` - Fetch-style convenience using the native client transport
+- `client.get / post / put / patch / delete / head / options / request(url, options)`
+- `client.isOnline(options)` - boolean TCP reachability check using the client's own I/O backend
+- `client.checkConnectivity(options)` - detailed `ConnectivityResult` (`isOnline()`, endpoint, family, latency); see `net.connectivity`
+- `client.checkHosts(hosts, options)` - detailed check for textual IP endpoints such as `"10.0.0.5:443"`
+- Additional operations: `client.download`, `client.graphql`, `client.lookupFileInfo`, `client.updateFile`, `httpx.client.download.verifyFile`, `client.resolve`, `client.resolveUrl`
+- Parsing shortcuts: `client.document.fetch` (auto-detected), `client.html.fetch`, `client.xml.fetch`, `client.feed.fetch`, `client.robots.fetch`, `client.sitemap.fetch`
 
 ### Client Lifecycle
 
-- `httpx.Client.init(allocator, io, config)` — initialize client with allocator, io, and configuration (or `.{}` for defaults)
+- `httpx.Client.init(allocator, io, .{})` - initialize a client with secure defaults and optional client-wide settings
 - `client.close()` — purge the connection pool; `client.reset()` — close + clear DNS cache
 
 ### Server Lifecycle
 
 - `httpx.Server.init(allocator, io, config)` — initialize server with allocator, io, and configuration (or `.{}` for defaults)
 - `server.run()` — blocking loop; `server.start()` — background thread
-- `server.requestShutdown()` / `server.stop()` / `server.pause()` / `server.resumeAccepting()`
+- `server.requestShutdown()` / `server.stop()` / `server.shutdown()` / `server.pause()` / `server.resumeAccepting()`
 - `server.localPort()` — actual bound port
+- `.signals = .{}` — automatic Ctrl+C / `SIGTERM` handling with a bounded drain deadline; `.signals = .{ .enabled = false }` transfers ownership to the application
 
 ### Inline Configuration
 
 - Client settings: passed as the final `.{}` argument to `httpx.Client.init` (protocols, timeouts, redirects, retries, pool, proxy, TLS, DNS cache)
 - Server settings: passed as the final `.{}` argument to `httpx.Server.init` (host, port, strategy, body limits, protocols, docs, TLS, watcher, templates, logging)
 - Per-request settings: passed as the final `.{}` argument to request methods (headers, query, body/json/form/text, auth, timeouts, proxy, TLS)
-- `httpx.HttpVersion` �?" protocol version (`.auto`, `.http10`, `.http11`, `.http2`, `.http3`)
+- `httpx.HttpVersion` — protocol version (`.auto`, `.http10`, `.http11`, `.http2`, `.http3`)
 - `portStrategy` accepts `.incremental`, `.strict`, or `.exit`
 
 ### Server Types
 
 - `httpx.Server`, `httpx.Router`, `httpx.router.Context`, `httpx.router.Response`
-- `httpx.tls.Listener`, `httpx.tls.ListenerConfig`, `httpx.tls.Request`, `httpx.tls.Response`
+- `httpx.tls.TicketKeys`, `httpx.tls.ClientAuthMode`
 
 ### Concurrency Helpers
 
-- `client.getAll(urls)` / `client.requestAll(reqs)`
 - `httpx.concurrency.Pool` / `httpx.concurrency.Queue` (`src/concurrency/`)
 
 ### Network Helpers
@@ -57,6 +59,7 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 - `httpx.clock.millisNow(io)` / `monotonicMillis(io)` / `sleepMillis(io, ms)` — wall-clock, monotonic, and sleep helpers
 - `httpx.Uri.parse(...)` — RFC 3986 URI parsing
 - `httpx.quic.varint` — QUIC variable-length integers
+- `httpx.env` — process environment and `.env` helpers
 
 ### DNS Cache
 
@@ -64,12 +67,27 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 
 ### WebSocket
 
-- `httpx.websocket.Handshake.computeAccept / buildUpgradeRequest / validateUpgradeResponse`
-- `httpx.websocket.Frame.parseFrameHeader / buildFrameHeader / applyMask / generateKey`
+- `httpx.websocket.connect(allocator, io, url, .{})` / `httpx.websocket.Client.init(allocator, io, .{}).connect(url)`
+- `httpx.websocket.accept(ctx, .{})` — server upgrade + session takeover
+- `httpx.websocket.Session.sendText / sendBinary / receiveText / receiveBinary / ping / pong / close`
+- `httpx.websocket.protocol.Handshake.computeAccept / buildUpgradeRequest / validateUpgradeResponse`
+- `httpx.websocket.protocol.Frame.parseFrameHeader / buildFrameHeader / applyMask / generateKey`
+
+### Signals
+
+- `httpx.signals.register(context, notifyFn, .{})` / `Subscription.unregister()`
+- `httpx.signals.Kind`, `Event`, `Mask`, `supported`
+- Server hooks: `.signals = .{ .onSignal = hook, .ctx = &state }`
 
 ## API Groups
 
+- [Constructors and Options](/api/constructors)
 - [Client API](/api/client)
+- [Authentication API](/api/auth)
+- [Downloads API](/api/downloads)
+- [Parsing API](/api/parsing)
+- [Logging API](/api/logging)
+- [Documentation UI API](/api/ui)
 - [Concurrency API](/api/concurrency)
 - [Core API](/api/core)
 - [DNS API](/api/dns)
@@ -79,6 +97,8 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 - [Protocol API](/api/protocol)
 - [Router API](/api/router)
 - [Server API](/api/server)
+- [Signals API](/api/signals)
+- [WebSocket API](/api/websocket)
 - [TLS API](/api/tls)
 - [Utilities API](/api/utils)
 

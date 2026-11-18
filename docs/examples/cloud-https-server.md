@@ -17,7 +17,7 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 fn indexHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{
+    return ctx.json(.{
         .status = "ok",
         .service = "cloud-https-api",
         .version = "1.0.0",
@@ -25,7 +25,7 @@ fn indexHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
 }
 
 fn healthHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{ .status = "healthy" });
+    return ctx.json(.{ .status = "healthy" });
 }
 
 pub fn main() !void {
@@ -38,9 +38,8 @@ pub fn main() !void {
         .host = "127.0.0.1",
         .port = 8080,
         .portStrategy = .incremental,
-        .maxConnections = 10000,
-        .http2 = true,
-        .http3 = false,
+        .limits = .{ .maxConnections = 10000 },
+        .protocols = .{ .http2 = true, .http3 = false },
         .keepAlive = true,
     });
     defer server.deinit();

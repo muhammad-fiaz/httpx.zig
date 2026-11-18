@@ -14,8 +14,7 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
-
-    std.debug.print("==> HTTPX Streaming HTML Parser Demo\n\n", .{});
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     const chunkedHtml =
         \\<!DOCTYPE html>
@@ -31,9 +30,8 @@ pub fn main() !void {
 
     var reader = std.Io.Reader.fixed(chunkedHtml);
 
-    var p = httpx.parsing.Parser.init(allocator, .{});
     // Parse stream with a 1 MB limit
-    var doc = try p.parseStream(&reader, 1024 * 1024);
+    var doc = try httpx.parsing.init(allocator, io, .{}).parseStream(&reader, 1024 * 1024);
     defer doc.deinit();
 
     const title = try doc.title();
@@ -41,8 +39,6 @@ pub fn main() !void {
 
     if (try doc.selectFirst(".stream-content p")) |pNode| {
         const text = try pNode.text();
-        std.debug.print("Stream Content Paragraph: '{s}'\n", .{text});
+        std.debug.print("Stream content paragraph: '{s}'\n", .{text});
     }
-
-    std.debug.print("\nStreaming HTML verification successful.\n", .{});
 }

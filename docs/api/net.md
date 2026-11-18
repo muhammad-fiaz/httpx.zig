@@ -7,13 +7,14 @@ macOS (`src/sockets/`, `src/net/`).
 
 | Platform | TCP | UDP | TLS | Notes |
 |----------|-----|-----|-----|-------|
-| Linux | ✅ | ✅ | ✅ | `MSG_NOSIGNAL` prevents SIGPIPE on broken connections |
-| Windows | ✅ | ✅ | ✅ | Winsock-native connects with full error mapping |
-| macOS | ✅ | ✅ | ✅ | |
+| Linux | Yes | Yes | Yes | `MSG_NOSIGNAL` prevents SIGPIPE on broken connections |
+| Windows | Yes | Yes | Yes | Winsock-native connects with full error mapping |
+| macOS | Yes | Yes | Yes | |
 
 ## TCP (`httpx.tcp`)
 
-Cross-platform stream socket abstraction (`Socket`, `Listener`, `IoContext`).
+Cross-platform stream sockets (`listen` for the listening side, `connect`
+for the client side; use `std.Io.Threaded.global_single_threaded.io()` in tests).
 
 ### Basic Usage
 
@@ -43,11 +44,11 @@ std.debug.print("{s}\n", .{buf[0..n]});
 | `Socket.isAlive()` | Local close-guard state |
 | `Socket.netSocketHandle()` | Raw handle for tuning |
 | `setTimeouts(sock, ms)` / `setNoDelay(sock)` / `setKeepAlive(sock, idleSecs)` | Socket tuning |
-| `Listener.bind(io, port)` / `bindAddress(io, addr)` | Bind (`0` = ephemeral) |
+| `httpx.tcp.listen(allocator, io, .{ .port = 0 })` / `... .{ .address = addr }` | Bind (`0` = ephemeral) |
 | `Listener.accept(listener, io)` | Accept one connection |
 | `Listener.localPort(listener)` | Actual bound port |
 | `Listener.close(listener, io)` | Close listener |
-| `IoContext.init(gpa)` / `deinit()` | Runtime IO context for tests and tools |
+| `io` | `std.Io` | Explicit I/O, obtained as `std.Io.Threaded.global_single_threaded.io()` |
 
 ### Connect Errors
 
@@ -59,12 +60,12 @@ std.debug.print("{s}\n", .{buf[0..n]});
 | `PermissionDenied` | Operation not permitted |
 | `Unexpected` | Unmapped platform error |
 
-## UDP (`httpx.udp.UdpSocket`)
+## UDP (`httpx.udp`)
 
 Connectionless datagrams (used by DNS/QUIC/custom protocols).
 
 ```zig
-var sock = try httpx.udp.UdpSocket.bind(io, 0);
+var sock = try httpx.udp.init(allocator, io, .{});
 defer sock.close();
 try sock.sendTo(&dest, "ping");
 const msg = try sock.receive(&buf);
@@ -72,7 +73,7 @@ const msg = try sock.receive(&buf);
 
 | Method | Description |
 |--------|-------------|
-| `bind(io, port)` | Bind `0.0.0.0:port` (`0` = ephemeral) |
+| `init(allocator, io, .{})` / `init(allocator, io, .{ .port = 53 })` | Bind `0.0.0.0:port` (`0` = ephemeral); `.{}` is the default |
 | `bindIp6(io, port)` | Bind `[::]:port` for IPv6 peers |
 | `bindAddress(io, addr)` | Bind an explicit IPv4 or IPv6 `Address` |
 | `sendTo(dest, data)` / `send(data)` | Send (explicit or default destination) |
@@ -88,12 +89,12 @@ surface the flag, so truncated datagrams are still returned there.
 
 - `Address.loopback4(port)` / `loopback6(port)` / `unspecified4(port)` / `unspecified6(port)`
 - `Address.parse(text, defaultPort)` — split `host[:port]`
-- `address.parseIp(text)` — IP-literal to `Address`
+- `Address.parseIp(text)` — IP-literal to `Address` (no instance needed)
 - `format` / `formatBuf` / `formatWithPort` / `toString` / `toStd` / `fromStd`
 
 DNS resolution goes through `client.resolve(...)`, `httpx.net.resolve.Resolver`,
 and the client DNS cache (`.dnsCache` in the `Client.init` options); SOCKS/proxy dialing via
-`httpx.socks5` / `httpx.proxy`; reachability via `httpx.connectivity`.
+`httpx.socks5` / `httpx.proxy`; reachability via `httpx.net.connectivity`.
 
 ## See Also
 

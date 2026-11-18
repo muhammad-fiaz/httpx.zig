@@ -8,7 +8,7 @@
 | 0.1.x   | :warning: migrate to 0.2.x |
 | < 0.1.5 | :x: |
 
-v0.2.3 (and the 0.2.x series) brings major new improvements. Versions in the
+v0.2.4 (and the 0.2.x series) brings major new improvements. Versions in the
 0.1.x line are legacy: please migrate to 0.2.x for better performance,
 stronger security defaults, and ongoing fixes. Versions below 0.1.5 are
 considered end-of-life and will not receive security fixes or updates.
@@ -33,8 +33,8 @@ considered end-of-life and will not receive security fixes or updates.
 
 - **CRLF injection defense** in header values and request paths
 - **Path traversal rejection** in static file serving and template loading (safe relative-path resolution)
-- **Request size limits** via `max_body` configuration (default 8 MB)
-- **Connection limits** via `max_connections` to prevent resource exhaustion
+- **Request size limits** via `maxBody` configuration (default 8 MB)
+- **Connection limits** via `maxConnections` to prevent resource exhaustion
 
 ### Authentication & Authorization
 
@@ -114,7 +114,7 @@ When reporting a vulnerability, please include:
 When using `httpx.zig` in production:
 
 1. **Always use HTTPS** in production (avoid `.verify = .none` in production)
-2. **Set `max_connections`** to prevent resource exhaustion
+2. **Set `maxConnections`** to prevent resource exhaustion
 3. **Enable rate limiting** for public-facing endpoints
 4. **Use the Helmet middleware** to set security headers
 5. **Validate and sanitize** all user input before processing

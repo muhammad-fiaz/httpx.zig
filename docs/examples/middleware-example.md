@@ -14,7 +14,7 @@ fn auth(ctx: *httpx.router.Context, next: httpx.router.NextFn) anyerror!httpx.ro
 }
 
 fn secure(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{ .message = "secure route" });
+    return ctx.json(.{ .message = "secure route" });
 }
 
 pub fn main() !void {
@@ -56,8 +56,3 @@ The port number varies per run; unauthenticated requests against the `auth` snip
 ```bash
 zig build run-helmet-server
 ```
-
-## What to Verify
-
-- Unauthenticated requests return 401.
-- Security headers appear on responses.

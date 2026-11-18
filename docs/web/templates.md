@@ -26,7 +26,7 @@ tests, arithmetic (`+ - * / // % **`), comparisons
 `is not`), logic (`and or not`), concatenation (`~`), parentheses,
 ternary (`x if cond else y`), and calls.
 
-Operator precedence follows Jinja/Python: `or` < `and` < `not` <
+Operator precedence follows standard Jinja syntax: `or` < `and` < `not` <
 comparisons/`in`/`is` < `~` < `+ -` < `* / // %` < `**` (right-associative,
 tighter than unary minus, so `-2**2 == -4` and `2**3**2 == 512`).
 
@@ -303,10 +303,10 @@ pub fn main() !void {
 
 ## Security: HTML escaping
 
-Template variables are HTML-escaped by default (`&` → `&amp;`, `<` → `&lt;`,
-`>` → `&gt;`, `"` → `&quot;`, `'` → `&#39;`). Bypass escaping only for
+Template variables are HTML-escaped by default (`&` -> `&amp;`, `<` -> `&lt;`,
+`>` -> `&gt;`, `"` -> `&quot;`, `'` -> `&#39;`). Bypass escaping only for
 trusted markup with `templates.raw(...)` (see above). Rendered output is
-capped (`.maxOutputBytes`, default 64 MiB), macro nesting is bounded
+capped (`.maxOutput`, default 64 MiB), macro nesting is bounded
 (`.maxMacroDepth`), and `range()` sequences are capped
 (`.maxRangeItems`).
 
@@ -404,7 +404,6 @@ whitespace control, and autoescaping. Deliberate boundaries:
 * Zig values convert structurally (structs, slices, arrays, optionals);
   Zig functions are not callable from templates — expose behavior
   through `addGlobal` instead.
-* `{% do %}` and `{% trans %}` are not implemented.
 * `format` supports `%s %d %i %u %f %c %x %X %o %%` with width,
   precision, and flags; `%e/%g` reject explicit precision.
 

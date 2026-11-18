@@ -11,6 +11,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const dom = @import("dom.zig");
 const ts = @import("treesitter");
+const z = @import("zigantic");
 const Tree = dom.Tree;
 const Node = dom.Node;
 const Attribute = dom.Attribute;
@@ -492,14 +493,15 @@ fn pointForOffsetTs(source: []const u8, offset: usize) ts.Point {
 }
 
 /// Limits for the HTML parser.
-pub const Limits = struct {
-    maxInputSize: usize = 64 * 1024 * 1024,
-    maxNodes: u32 = dom.MAX_NODES,
-    maxDepth: u32 = dom.MAX_DEPTH,
-    maxAttrs: u32 = 256,
-    maxAttrValue: usize = 8192,
-    maxTextBlock: usize = 4 * 1024 * 1024,
-};
+pub const LimitsSchema = z.objectOf(.{
+    .maxInputSize = z.withDefault(z.positiveInt(usize, .{}), 64 * 1024 * 1024),
+    .maxNodes = z.withDefault(z.integer(u32, .{ .min = 1, .max = dom.MAX_NODES }), dom.MAX_NODES),
+    .maxDepth = z.withDefault(z.integer(u32, .{ .min = 1, .max = dom.MAX_DEPTH }), dom.MAX_DEPTH),
+    .maxAttrs = z.withDefault(z.positiveInt(u32, .{}), 256),
+    .maxAttrValue = z.withDefault(z.positiveInt(usize, .{}), 8192),
+    .maxTextBlock = z.withDefault(z.positiveInt(usize, .{}), 4 * 1024 * 1024),
+}, .{});
+pub const Limits = LimitsSchema.Value;
 
 pub const ParseError = error{
     OutOfMemory,
@@ -507,6 +509,7 @@ pub const ParseError = error{
     TooDeep,
     TooManyAttributes,
     InputTooLarge,
+    InvalidLimits,
 };
 
 /// HTML void elements — never have children per the HTML5 spec.
@@ -523,6 +526,10 @@ const RAW_TEXT_ELEMENTS = std.StaticStringMap(void).initComptime(.{
 });
 
 pub fn parse(arena: Allocator, htmlSrc: []const u8, limits: Limits) ParseError!Tree {
+    var scratch: [4096]u8 = undefined;
+    const issue = z.checkFirst(LimitsSchema, limits, &scratch, .{}) catch
+        return error.InvalidLimits;
+    if (issue != null) return error.InvalidLimits;
     if (htmlSrc.len > limits.maxInputSize) return error.InputTooLarge;
     var tree = try Tree.initCapacity(arena, @min(htmlSrc.len / 16 + 4, limits.maxNodes));
     errdefer tree.deinit(arena);

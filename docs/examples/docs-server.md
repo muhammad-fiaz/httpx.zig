@@ -9,11 +9,11 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 pub const stdOptions: std.Options = .{
-    .unexpected_error_tracing = false,
+    .unexpectedErrorTracing = false,
 };
 
 fn listItemsHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{
+    return ctx.json(.{
         .items = &[_]struct { id: u32, name: []const u8, price: f64 }{
             .{ .id = 101, .name = "Pro Router Widget", .price = 49.99 },
             .{ .id = 102, .name = "Async SSE Streamer", .price = 19.99 },
@@ -25,7 +25,7 @@ fn listItemsHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
 
 fn getItemHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const itemId = ctx.param("id") orelse "0";
-    return ctx.renderJson(.{
+    return ctx.json(.{
         .id = itemId,
         .name = "Queried Item",
         .status = "available",
@@ -52,7 +52,7 @@ fn homePageHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
         \\<body>
         \\  <div class="card">
         \\    <h1>httpx.zig</h1>
-         \\    <p>Actively developed HTTP/1.x, HTTP/2, HTTP/3 client &amp; server for Zig.</p>
+        \\    <p>Actively developed HTTP/1.x, HTTP/2, HTTP/3 client &amp; server for Zig.</p>
         \\    <div>
         \\      <span class="badge">HTTP/1.1</span>
         \\      <span class="badge">HTTP/2</span>
@@ -85,17 +85,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = true,
-        .docs = .{
-            .title = "HTTPX Modern API Suite",
-            .version = "0.2.0",
-            .description = "Full-featured native HTTP server with OpenAPI & GraphQL documentation.",
-            .swagger = .{ .enabled = true, .route = "/docs", .title = "Swagger UI" },
-            .redoc = .{ .enabled = true, .route = "/redoc", .title = "ReDoc" },
-            .scalar = .{ .enabled = true, .route = "/scalar", .title = "Scalar Reference" },
-            .graphiql = .{ .enabled = true, .route = "/graphiql", .graphqlEndpoint = "/graphql", .title = "GraphiQL IDE" },
-        },
-        .maxConnections = 5,
+        .limits = .{ .maxConnections = 5 },
         .logging = .{},
     });
     defer server.deinit();
@@ -103,6 +93,51 @@ pub fn main() !void {
     try server.get("/", homePageHandler);
     try server.get("/api/items", listItemsHandler);
     try server.get("/api/items/{id}", getItemHandler);
+    var docs = httpx.docs.init(allocator, io, &server.router);
+    try docs.mount(.{
+        .title = "HTTPX Modern API Suite",
+        .version = httpx.version,
+        .description = "Full-featured native HTTP server with OpenAPI & GraphQL documentation.",
+        .swagger = .{
+            .enabled = true,
+            .route = "/docs",
+            .title = "Swagger UI",
+            .docExpansion = .full,
+            .deepLinking = true,
+            .displayRequestDuration = true,
+            .filter = true,
+            .persistAuthorization = true,
+            .tryItOutEnabled = true,
+            .defaultModelsExpandDepth = 2,
+        },
+        .redoc = .{
+            .enabled = true,
+            .route = "/redoc",
+            .title = "ReDoc",
+            .hideDownloadButton = true,
+            .requiredPropsFirst = true,
+            .sortPropsAlphabetically = true,
+            .expandResponses = "200,201",
+        },
+        .scalar = .{
+            .enabled = true,
+            .route = "/scalar",
+            .title = "Scalar Reference",
+            .theme = "default",
+            .darkMode = false,
+            .hideDownloadButton = true,
+            .showSidebar = true,
+        },
+        .graphiql = .{
+            .enabled = true,
+            .route = "/graphiql",
+            .graphqlEndpoint = "/graphql",
+            .title = "GraphiQL IDE",
+            .defaultQuery = "query { __typename }",
+            .editorTheme = "vs-dark",
+        },
+    });
+    defer docs.deinit();
 
     const port = server.localPort();
     std.debug.print("[INFO] Server started on http://127.0.0.1:{d}\n", .{port});
@@ -125,7 +160,6 @@ pub fn main() !void {
 
     server.requestShutdown();
     t.join();
-    httpx.docs.unmount();
     std.debug.print("Docs server verification completed successfully.\n", .{});
 }
 ```

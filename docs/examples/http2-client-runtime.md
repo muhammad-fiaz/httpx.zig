@@ -27,8 +27,3 @@ Status is 200 on success against the loopback h2c server; URL/port vary per run.
 ```bash
 zig build run-http2-client
 ```
-
-## What to Verify
-
-- The local loopback server receives an HTTP/2 preface, SETTINGS, HEADERS, and DATA flow.
-- The client decodes HTTP/2 response headers/body into a standard `Response`.

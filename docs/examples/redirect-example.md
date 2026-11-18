@@ -3,7 +3,7 @@
 Demonstrates redirect configuration with `followRedirects` and
 `maxRedirects` on the client and per-request overrides.
 
-## Demo Program
+## Example
 
 ```zig
 var client = httpx.Client.init(allocator, io, .{
@@ -34,9 +34,3 @@ Values reflect the client config shown above and vary if `maxRedirects` / `follo
 ```
 zig build run-redirect
 ```
-
-## Checklist
-
-- [x] Default client follows redirects up to `maxRedirects`
-- [x] `.followRedirects = false` disables following per request
-- [x] 307/308 preserve the method; 301/302/303 may rewrite POST to GET

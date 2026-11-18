@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const z = @import("zigantic");
 
 pub const WatchEventKind = enum {
     created,
@@ -44,39 +45,69 @@ pub const ReloadStrategy = enum {
     }
 };
 
-pub const WatchEvent = struct {
-    path: []const u8,
-    oldPath: ?[]const u8 = null,
-    kind: WatchEventKind,
-    strategy: ReloadStrategy = .warmReload,
-    isDirectory: bool = false,
-    timestampMs: i64,
-};
+const WatchEventSchema = z.objectOf(.{
+    .path = z.string(.{ .min = 1 }),
+    .oldPath = z.optional(z.string(.{ .min = 1 })),
+    .kind = z.enumType(WatchEventKind, .{}),
+    .strategy = z.withDefault(z.enumType(ReloadStrategy, .{}), .warmReload),
+    .isDirectory = z.withDefault(z.boolean(.{}), false),
+    .timestampMs = z.withDefault(z.integer(i64, .{}), 0),
+}, .{});
+pub const WatchEvent = WatchEventSchema.Value;
 
+/// A watcher event that owns its path strings.
+///
+/// The event payload itself is the shared `WatchEvent` schema, so the event
+/// fields are declared exactly once; this type only adds the owned buffers
+/// the borrowed view points into.
 pub const OwnedWatchEvent = struct {
-    path: []u8,
-    oldPath: ?[]u8 = null,
-    kind: WatchEventKind,
-    strategy: ReloadStrategy = .warmReload,
-    isDirectory: bool = false,
-    timestampMs: i64,
+    /// Owned copy of the path. `event.path` borrows from it.
+    pathBuf: []u8,
+    /// Owned copy of the previous path, for rename events.
+    oldPathBuf: ?[]u8 = null,
+    /// The borrowed view of this event.
+    event: WatchEvent,
 
-    pub fn deinit(self: *OwnedWatchEvent, allocator: Allocator) void {
-        allocator.free(self.path);
-        if (self.oldPath) |op| {
-            allocator.free(op);
-        }
+    /// Copies `path`/`oldPath` into allocator-owned memory and builds the
+    /// borrowed view that points at them.
+    pub fn init(
+        allocator: Allocator,
+        path: []const u8,
+        oldPath: ?[]const u8,
+        kind: WatchEventKind,
+        strategy: ReloadStrategy,
+        isDirectory: bool,
+        timestampMs: i64,
+    ) !OwnedWatchEvent {
+        const pathBuf = try allocator.dupe(u8, path);
+        errdefer allocator.free(pathBuf);
+        const oldPathBuf: ?[]u8 = if (oldPath) |op| try allocator.dupe(u8, op) else null;
+        return .{
+            .pathBuf = pathBuf,
+            .oldPathBuf = oldPathBuf,
+            .event = .{
+                .path = pathBuf,
+                .oldPath = oldPathBuf,
+                .kind = kind,
+                .strategy = strategy,
+                .isDirectory = isDirectory,
+                .timestampMs = timestampMs,
+            },
+        };
     }
 
+    /// Releases the owned buffers.
+    pub fn deinit(self: *OwnedWatchEvent, allocator: Allocator) void {
+        allocator.free(self.pathBuf);
+        if (self.oldPathBuf) |op| {
+            allocator.free(op);
+        }
+        self.* = undefined;
+    }
+
+    /// The borrowed view of this event.
     pub fn asView(self: *const OwnedWatchEvent) WatchEvent {
-        return .{
-            .path = self.path,
-            .oldPath = self.oldPath,
-            .kind = self.kind,
-            .strategy = self.strategy,
-            .isDirectory = self.isDirectory,
-            .timestampMs = self.timestampMs,
-        };
+        return self.event;
     }
 };
 

@@ -25,6 +25,7 @@ const hpackMod = @import("hpack.zig");
 const streamMod = @import("stream.zig");
 const http1Semantics = @import("../http1/semantics.zig");
 const parseMod = @import("../../common/parse.zig");
+const versionInfo = @import("../../common/version.zig");
 
 const FrameHeader = frameMod.FrameHeader;
 const FrameType = frameMod.FrameType;
@@ -143,7 +144,7 @@ pub const Session = struct {
 
     /// END_STREAM flag carried by an in-progress HEADERS/CONTINUATION chain.
     continuationEndStream: bool = false,
-    maxHeaderBlockBytes: usize = DEFAULT_MAX_HEADER_BLOCK_BYTES,
+    maxHeaderBlock: usize = DEFAULT_MAX_HEADER_BLOCK_BYTES,
     /// Last stream ID accepted by the peer's most recent GOAWAY.
     goawayLastStream: ?u31 = null,
 
@@ -480,7 +481,7 @@ pub const Session = struct {
     }
 
     fn handleHeadersStart(self: *Session, sid: u31, block: []const u8, endHeaders: bool, endStream: bool, selfDependency: bool) Error!void {
-        if (block.len > self.maxHeaderBlockBytes) return self.connError(.enhanceYourCalm);
+        if (block.len > self.maxHeaderBlock) return self.connError(.enhanceYourCalm);
 
         var st: *Stream = undefined;
         // A discarded block is still decoded: the HPACK context is
@@ -573,7 +574,7 @@ pub const Session = struct {
         const st = self.continuationStream orelse return self.connError(.protocolError);
         if (st.id != sid) return self.connError(.protocolError);
         const accumulated = st.headerBlock.?.items.len;
-        if (block.len > self.maxHeaderBlockBytes -| accumulated) return self.connError(.enhanceYourCalm);
+        if (block.len > self.maxHeaderBlock -| accumulated) return self.connError(.enhanceYourCalm);
         st.headerBlock.?.appendSlice(self.allocator, block) catch return Error.OutOfMemory;
         if (!endHeaders) return;
 
@@ -758,21 +759,11 @@ pub const Session = struct {
     }
 
     /// RFC 9110 token characters, the only ones allowed in a field name.
-    fn isTokenChar(c: u8) bool {
-        return switch (c) {
-            '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.' => true,
-            '0'...'9' => true,
-            'A'...'Z' => true,
-            '^', '_', '`', '|', '~' => true,
-            'a'...'z' => true,
-            else => false,
-        };
-    }
+    /// Shared with every other protocol layer via `common/parse.zig`.
+    const isTokenChar = parseMod.isTokenChar;
 
     /// RFC 9110 field-value characters: visible ASCII, space, and HTAB.
-    fn isFieldValueChar(c: u8) bool {
-        return c == '\t' or (c >= 0x20 and c != 0x7F);
-    }
+    const isFieldValueChar = parseMod.isFieldValueChar;
 
     /// An HTTP method is a non-empty token (RFC 9110 Section 9.1).
     fn isTokenValue(value: []const u8) bool {
@@ -784,13 +775,7 @@ pub const Session = struct {
     }
 
     /// URI scheme syntax (RFC 3986 Section 3.1).
-    fn isScheme(value: []const u8) bool {
-        if (value.len == 0 or !std.ascii.isAlphabetic(value[0])) return false;
-        for (value[1..]) |c| {
-            if (!std.ascii.isAlphanumeric(c) and c != '+' and c != '-' and c != '.') return false;
-        }
-        return true;
-    }
+    const isScheme = parseMod.isValidScheme;
 
     /// Validates one decoded header list against the RFC 9113 rules for
     /// requests, responses, and trailers.
@@ -877,15 +862,10 @@ pub const Session = struct {
                     if (std.ascii.isUpper(c)) return false;
                 }
                 // Connection-specific fields are forbidden (RFC 9113 8.2.2).
-                if (std.mem.eql(u8, f.name, "connection") or
-                    std.mem.eql(u8, f.name, "keep-alive") or
-                    std.mem.eql(u8, f.name, "proxy-connection") or
-                    std.mem.eql(u8, f.name, "transfer-encoding") or
-                    std.mem.eql(u8, f.name, "upgrade"))
-                {
+                if (parseMod.isConnectionSpecific(f.name)) {
                     return false;
                 }
-                if (std.mem.eql(u8, f.name, "te") and !std.ascii.eqlIgnoreCase(f.value, "trailers")) {
+                if (std.mem.eql(u8, f.name, "te") and !parseMod.isTeTrailers(f.value)) {
                     return false;
                 }
                 if (std.mem.eql(u8, f.name, "host")) {
@@ -1183,13 +1163,7 @@ pub const Session = struct {
 
     /// Connection-specific fields that MUST NOT appear in an HTTP/2
     /// message (RFC 9113 Section 8.2.2).
-    fn isHopByHop(name: []const u8) bool {
-        return std.ascii.eqlIgnoreCase(name, "connection") or
-            std.ascii.eqlIgnoreCase(name, "keep-alive") or
-            std.ascii.eqlIgnoreCase(name, "proxy-connection") or
-            std.ascii.eqlIgnoreCase(name, "transfer-encoding") or
-            std.ascii.eqlIgnoreCase(name, "upgrade");
-    }
+    const isHopByHop = parseMod.isConnectionSpecific;
 
     /// Normalizes outgoing fields for HTTP/2: names are lowercased
     /// (RFC 9113 Section 8.2.1) and connection-specific fields are
@@ -2392,7 +2366,7 @@ test "header list validation rejects malformed method, scheme, authority and Hos
 test "continued header blocks are rejected before exceeding configured budget" {
     var session = try Session.init(std.testing.allocator, .server, .{});
     defer session.deinit();
-    session.maxHeaderBlockBytes = 5;
+    session.maxHeaderBlock = 5;
 
     try session.handleHeadersStart(1, "1234", false, false, false);
     try std.testing.expectError(Error.ProtocolViolation, session.handleContinuation(1, "56", true));
@@ -2756,7 +2730,7 @@ test "sensitive headers are never placed in the dynamic table" {
     try std.testing.expectEqualStrings("authorization", res.fields[4].name);
     try std.testing.expectEqualStrings("Bearer secret-token", res.fields[4].value);
     for (dec.dyn.entries.items) |e| {
-        try std.testing.expect(!std.mem.eql(u8, e.name, "authorization"));
+        try std.testing.expect(!std.mem.eql(u8, e.nameOf(), "authorization"));
     }
 }
 
@@ -2772,7 +2746,7 @@ test "outgoing header names are lowercased and hop-by-hop fields dropped" {
         .{ .name = ":scheme", .value = "https" },
         .{ .name = ":path", .value = "/" },
         .{ .name = ":authority", .value = "example.test" },
-        .{ .name = "User-Agent", .value = "httpx" },
+        .{ .name = "User-Agent", .value = "httpx/" ++ versionInfo.defaultInfo.version },
         .{ .name = "Connection", .value = "close" },
     };
     try client.sendHeaders(1, &fields, true);

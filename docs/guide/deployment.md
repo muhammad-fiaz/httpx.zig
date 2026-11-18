@@ -17,26 +17,26 @@ HTTPX is built on standards-based TCP/UDP, TLS, and HTTP abstractions. It runs i
 #### Topology A: Reverse Proxy (Recommended for Public Web)
 ```
   [Internet]
-      │ HTTPS (Port 443) / HTTP (Port 80)
-      ▼
-┌───────────────┐
-│     Nginx     │ ── TLS termination, static asset caching, DDoS buffering
-└───────────────┘
-      │ HTTP (Port 8080 or Unix Socket)
-      ▼
-┌───────────────┐
-│   HTTPX App   │ ── Dynamic routing, API handlers, finite SSE batches
-└───────────────┘
+      | HTTPS (Port 443) / HTTP (Port 80)
+      v
++---------------+
+|     Nginx     | -- TLS termination, static asset caching, DDoS buffering
++---------------+
+      | HTTP (Port 8080 or Unix Socket)
+      v
++---------------+
+|   HTTPX App   | -- Dynamic routing, API handlers, finite SSE batches
++---------------+
 ```
 
 #### Topology B: Direct Standalone TLS / HTTPS
 ```
   [Internet]
-      │ HTTPS (Port 8443 or Port 443 with bind capabilities)
-      ▼
-┌───────────────────────┐
-│ HTTPX (httpx.tls.Listener) │ ── Native Zig TLS 1.3 engine (+ std.crypto.tls HTTPS client)
-└───────────────────────┘
+      | HTTPS (Port 8443 or Port 443 with bind capabilities)
+      v
++-----------------------+
+| HTTPX (httpx.Server) | -- Native Zig TLS 1.3 engine (+ std.crypto.tls HTTPS client)
++-----------------------+
 ```
 
 ---
@@ -73,14 +73,14 @@ pub fn main() !void {
 }
 
 fn healthCheck(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{ .status = "healthy", .timestamp = std.time.timestamp() });
+    return ctx.json(.{ .status = "healthy", .timestamp = std.time.timestamp() });
 }
 
 fn dataHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     // Forwarded headers are honored only when the peer matches trustedProxies.
     const clientIp = ctx.remoteAddress() orelse "unknown";
     const scheme = ctx.scheme(); // "https" or "http"
-    return ctx.renderJson(.{
+    return ctx.json(.{
         .clientIp = clientIp,
         .scheme = scheme,
         .data = "Production payload",

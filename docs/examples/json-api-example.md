@@ -7,7 +7,7 @@ Typed JSON over the URL-first client: fetch with `client.fetch`, decode with
 ```zig
 const Posted = struct { name: []const u8, role: []const u8 };
 
-var post = try client.fetch("https://httpbun.com/post", .{
+var post = try client.request("https://httpbun.com/post", .{
     .method = .POST,
     .json = .{ .name = "Alice", .role = "admin" },
 });
@@ -20,7 +20,7 @@ if (echo.json) |back| std.debug.print("name={s} role={s}\n", .{ back.name, back.
 ```
 
 Server side, parse request bodies with `ctx.json(T)` and render with
-`ctx.renderJson(value)`.
+`ctx.json(value)`.
 
 ## Expected Output
 
@@ -35,8 +35,3 @@ The printed values reflect whatever JSON the server echoes back; names, roles, a
 ```bash
 zig build run-post-json
 ```
-
-## What to Verify
-
-- POST returns 200 with the echoed JSON body.
-- Typed decoding ignores unknown fields.

@@ -7,24 +7,21 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 pub fn main() !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var holder = httpx.Address{ .family = .ip4, .port = 0 };
-    var addr = try holder.parseIp("127.0.0.1");
-    addr.port = 0;
-    var listener = try httpx.tcp.Listener.bindAddress(io, &addr);
+    var addr = httpx.Address.loopback4(0);
+    var listener = try httpx.tcp.listen(allocator, io, .{ .address = httpx.Address.loopback4(0) });
     defer listener.close(io);
     const port = listener.localPort();
     std.debug.print("listening on 127.0.0.1:{d}\n", .{port});
     addr.port = port;
 
-    const ServerCtx = struct {
-        listener: *httpx.tcp.Listener,
-        io: std.Io,
-    };
     const Th = struct {
-        fn run(ctx: *ServerCtx) void {
-            var accepted = ctx.listener.accept(ctx.io) catch return;
+        fn run(lst: *httpx.tcp.Listener, ioIn: std.Io) void {
+            var accepted = lst.accept(ioIn) catch return;
             defer accepted.close();
             var inBuf: [64]u8 = undefined;
             const n = accepted.read(&inBuf) catch return;
@@ -33,8 +30,7 @@ pub fn main() !void {
             }
         }
     };
-    var ctx = ServerCtx{ .listener = &listener, .io = io };
-    const thread = try std.Thread.spawn(.{}, Th.run, .{&ctx});
+    const thread = try std.Thread.spawn(.{}, Th.run, .{ &listener, io });
     defer thread.join();
 
     var client = try httpx.tcp.connectAddress(io, &addr);

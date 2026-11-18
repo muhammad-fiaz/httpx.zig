@@ -1,7 +1,7 @@
 # Server-Sent Events (SSE)
 
-HTTPX implements the WHATWG Server-Sent Events format: `httpx.sse.Event.Writer`
-serializes event blocks, and `httpx.sse.Event.Parser` parses an inbound
+HTTPX implements the WHATWG Server-Sent Events format: `httpx.sse.Writer`
+serializes event blocks, and `httpx.sse.Parser` parses an inbound
 `text/event-stream` body.
 
 ## Server SSE Handler
@@ -14,20 +14,20 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 fn liveFeedHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    var out = std.ArrayList(u8).empty;
-    var writer = httpx.sse.Event.Writer.init(ctx.allocator);
-    try writer.writeEvent(&out, &.{"Client connected to live feed"}, "connected", 0, null);
+    var writer = httpx.sse.Writer.init(ctx.allocator, ctx.io, .{});
+    defer writer.deinit();
+    try writer.writeEvent(&.{"Client connected to live feed"}, .{ .event = "connected", .id = 0 });
 
     var count: u32 = 1;
     while (count <= 10) : (count += 1) {
         var buf: [64]u8 = undefined;
         const msg = try std.fmt.bufPrint(&buf, "Heartbeat count: {d}", .{count});
-        try writer.writeEvent(&out, &.{msg}, "tick", count, null);
+        try writer.writeEvent(&.{msg}, .{ .event = "tick", .id = count });
     }
 
     return .{
         .status = 200,
-        .body = out.items,
+        .body = writer.buffered(),
         .contentType = "text/event-stream; charset=utf-8",
         .headers = &.{.{ .name = "Cache-Control", .value = "no-cache" }},
     };

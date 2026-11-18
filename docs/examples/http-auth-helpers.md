@@ -12,7 +12,7 @@ fn bearerHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     if (!std.mem.eql(u8, token, "demo-token")) {
         return ctx.textStatus(401, "invalid bearer token");
     }
-    return ctx.renderJson(.{ .kind = "bearer", .ok = true });
+    return ctx.json(.{ .kind = "bearer", .ok = true });
 }
 
 fn basicHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
@@ -22,7 +22,7 @@ fn basicHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     if (!std.mem.eql(u8, auth.username, "demo")) {
         return ctx.textStatus(401, "invalid basic credentials");
     }
-    return ctx.renderJson(.{ .kind = "basic", .ok = true });
+    return ctx.json(.{ .kind = "basic", .ok = true });
 }
 ```
 
@@ -62,8 +62,3 @@ Status codes are fixed per scenario (404/500/401/200); payload values reflect th
 ```bash
 zig build run-auth-and-errors
 ```
-
-## What to Verify
-
-- Missing bearer token returns 401; valid token returns 200.
-- Basic auth round-trips through `ctx.basicAuth()`.

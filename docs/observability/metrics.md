@@ -71,13 +71,13 @@ HTTPX provides lightweight, lock-free snapshots to inspect metrics without heap 
 const snap = server.snapshot();
 std.debug.print("Uptime: {d}ms\n", .{snap.uptimeMs});
 std.debug.print("Total requests: {d}\n", .{snap.requestsTotal});
-std.debug.print("Error rate: {d:.2}%\n", .{snap.errorRate() * 100.0});
+std.debug.print("Error rate: {d:.2}%\n", .{httpx.metrics.serverErrorRate(snap) * 100.0});
 std.debug.print("Throughput: {d:.2} req/sec\n", .{snap.requestsPerSecond()});
 std.debug.print("Active connections: {d}\n", .{snap.activeConnections});
 
 // Raw metrics snapshot
 const m_snap = server.metricsSnapshot();
-std.debug.print("Avg latency: {d:.3}ms\n", .{m_snap.averageLatencyMs()});
+std.debug.print("Avg latency: {d:.3}ms\n", .{httpx.metrics.averageLatencyMs(m_snap)});
 ```
 
 ## Standalone Registry

@@ -25,7 +25,6 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
     });
     defer server.deinit();
     try server.router.add(.HEAD, "/sample-local-pdf.pdf", pdfHandler, .{});
@@ -38,7 +37,6 @@ pub fn main() !void {
 
     var urlBuf: [64]u8 = undefined;
     const sampleUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/sample-local-pdf.pdf", .{port});
-    std.debug.print("==> Inspecting remote file info without downloading: {s}\n", .{sampleUrl});
 
     const info = client.lookupFileInfo(sampleUrl, .{}) catch |err| {
         std.debug.print("Lookup handled: {s}\n", .{@errorName(err)});

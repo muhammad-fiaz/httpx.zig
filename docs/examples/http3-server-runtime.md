@@ -1,13 +1,12 @@
 # HTTP/3 Server Runtime Example
 
-HTTP/3 server routes with the high-level server runtime (`.http3 = true`).
+HTTP/3 server routes with the high-level server runtime (`.protocols = .{ .http3 = true }`).
 
 ```zig
 var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 0,
-    .http3 = true,
-    .http2 = false,
+    .protocols = .{ .http3 = true, .http2 = false },
 });
 defer server.deinit();
 
@@ -33,8 +32,3 @@ Status is 200 on success; port, stream IDs, and body path vary by route. See `ex
 ```bash
 zig build run-http3-client
 ```
-
-## What to Verify
-
-- The server speaks HTTP/3 to capable clients.
-- Routes dispatch identically across HTTP versions.

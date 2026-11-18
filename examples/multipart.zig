@@ -6,9 +6,11 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 fn postHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
+    var form = try ctx.multipart(.{});
+    defer form.deinit();
     return .{
         .status = 200,
-        .body = try std.fmt.allocPrint(ctx.allocator, "{{\"received_bytes\":{d}}}", .{ctx.body.len}),
+        .body = try std.fmt.allocPrint(ctx.allocator, "{{\"received_bytes\":{d},\"fields\":{d}}}", .{ ctx.body.len, form.fields.len }),
         .contentType = "application/json",
     };
 }
@@ -22,8 +24,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 1,
+        .limits = .{ .maxConnections = 1 },
     });
     defer server.deinit();
     try server.router.add(.POST, "/post", postHandler, .{});
@@ -41,10 +42,12 @@ pub fn main() !void {
 
     var response = try client.post(url, .{
         .multipart = .{
-            .name = "upload",
-            .filename = "hello.txt",
-            .contentType = "text/plain",
-            .data = fileData,
+            .fields = .{
+                .{ .name = "note", .value = "greeting" },
+            },
+            .files = .{
+                .{ .name = "upload", .filename = "hello.txt", .contentType = "text/plain", .data = fileData },
+            },
         },
     });
     defer response.deinit();

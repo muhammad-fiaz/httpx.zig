@@ -16,6 +16,7 @@
 //!   - RFC 7301 — TLS Application-Layer Protocol Negotiation (ALPN)
 
 const std = @import("std");
+const z = @import("zigantic");
 
 pub const Error = error{
     /// Text is not a recognized version identifier.
@@ -99,75 +100,47 @@ pub const HttpVersion = enum {
     }
 };
 
-/// High-level protocol configuration with independent toggles.
-pub const ProtocolConfig = struct {
-    http10: bool = true,
-    http11: bool = true,
-    http2: bool = true,
-    http3: bool = false,
-    preferred: ?HttpVersion = null,
-    min: ?HttpVersion = null,
-    max: ?HttpVersion = null,
-    fallback: bool = true,
-
-    pub fn isEnabled(self: ProtocolConfig, v: HttpVersion) bool {
-        return switch (v) {
-            .auto => true,
-            .http10 => self.http10,
-            .http11 => self.http11,
-            .http2 => self.http2,
-            .http3 => self.http3,
-        };
-    }
-
-    pub fn toCapabilities(self: ProtocolConfig) Capabilities {
-        return .{
-            .http10 = self.http10,
-            .http11 = self.http11,
-            .http2 = self.http2,
-            .http3 = self.http3,
-        };
-    }
-};
-
 // Capability model
 
 /// What this build/runtime can actually establish. Compile-time feature
 /// availability belongs here so the selector never advertises a disabled
 /// protocol as available.
-pub const Capabilities = struct {
-    http10: bool = true,
-    http11: bool = true,
-    http2: bool = false,
-    http3: bool = false,
+const CapabilitiesSchema = z.objectOf(.{
+    .http10 = z.withDefault(z.boolean(.{}), true),
+    .http11 = z.withDefault(z.boolean(.{}), true),
+    .http2 = z.withDefault(z.boolean(.{}), false),
+    .http3 = z.withDefault(z.boolean(.{}), false),
+}, .{});
+pub const Capabilities = CapabilitiesSchema.Value;
 
-    pub fn supports(self: *const Capabilities, v: HttpVersion) bool {
-        return switch (v) {
-            .auto => true,
-            .http10 => self.http10,
-            .http11 => self.http11,
-            .http2 => self.http2,
-            .http3 => self.http3,
-        };
-    }
+/// True when `caps` can run `v`.
+pub fn supports(caps: Capabilities, v: HttpVersion) bool {
+    return switch (v) {
+        .auto => true,
+        .http10 => caps.http10,
+        .http11 => caps.http11,
+        .http2 => caps.http2,
+        .http3 => caps.http3,
+    };
+}
 
-    /// Best available concrete protocol by preference order.
-    pub fn bestAvailable(self: *const Capabilities) ?HttpVersion {
-        const order = [_]HttpVersion{ .http3, .http2, .http11, .http10 };
-        for (order) |v| {
-            if (self.supports(v)) return v;
-        }
-        return null;
+/// Best available concrete protocol by preference order.
+pub fn bestAvailable(caps: Capabilities) ?HttpVersion {
+    const order = [_]HttpVersion{ .http3, .http2, .http11, .http10 };
+    for (order) |v| {
+        if (supports(caps, v)) return v;
     }
-};
+    return null;
+}
 
 /// Outcome of negotiation: the single protocol the connection will run.
-pub const Negotiation = struct {
-    active: HttpVersion,
-    /// True when ALPN decided the outcome (client must verify it offered
-    /// the returned identifier; server must have selected it).
-    viaAlpn: bool = false,
-};
+const NegotiationSchema = z.objectOf(.{
+    .active = z.enumType(HttpVersion, .{}),
+    // True when ALPN decided the outcome (client must verify it offered
+    // the returned identifier; server must have selected it).
+    .viaAlpn = z.withDefault(z.boolean(.{}), false),
+}, .{});
+pub const Negotiation = NegotiationSchema.Value;
 
 /// Resolves the requested version against capabilities.
 ///
@@ -178,12 +151,12 @@ pub const Negotiation = struct {
 ///                              otherwise the best capability available.
 pub fn negotiate(
     requested: HttpVersion,
-    caps: *const Capabilities,
+    caps: Capabilities,
     /// Wire-level ALPN identifier selected by TLS/QUIC, if any.
     alpnSelected: ?[]const u8,
 ) Error!Negotiation {
     if (requested != .auto) {
-        if (!caps.supports(requested)) return Error.VersionUnsupported;
+        if (!supports(caps, requested)) return Error.VersionUnsupported;
         // If ALPN ran, its result constrains us: an explicit request that
         // contradicts the negotiated ALPN is a mismatch, not a downgrade.
         if (alpnSelected) |sel| {
@@ -199,10 +172,10 @@ pub fn negotiate(
     // auto path
     if (alpnSelected) |sel| {
         const v = HttpVersion.fromWire(sel) orelse return Error.NegotiationFailed;
-        if (!caps.supports(v)) return Error.NegotiationFailed;
+        if (!supports(caps, v)) return Error.NegotiationFailed;
         return .{ .active = v, .viaAlpn = true };
     }
-    const best = caps.bestAvailable() orelse return Error.NegotiationFailed;
+    const best = bestAvailable(caps) orelse return Error.NegotiationFailed;
     return .{ .active = best };
 }
 
@@ -278,53 +251,53 @@ test "invalid version strings error, never fall back" {
 test "negotiate: auto picks best capability" {
     var caps = Capabilities{};
     // Default build: HTTP/1 only.
-    try std.testing.expectEqual(HttpVersion.http11, (try negotiate(.auto, &caps, null)).active);
+    try std.testing.expectEqual(HttpVersion.http11, (try negotiate(.auto, caps, null)).active);
 
     caps.http2 = true;
-    try std.testing.expectEqual(HttpVersion.http2, (try negotiate(.auto, &caps, null)).active);
+    try std.testing.expectEqual(HttpVersion.http2, (try negotiate(.auto, caps, null)).active);
 
     caps.http3 = true;
-    try std.testing.expectEqual(HttpVersion.http3, (try negotiate(.auto, &caps, null)).active);
+    try std.testing.expectEqual(HttpVersion.http3, (try negotiate(.auto, caps, null)).active);
 }
 
 test "negotiate: ALPN result wins for auto" {
     var caps = Capabilities{ .http2 = true };
     caps.http11 = true;
     // Server selects h2 even though our best would be h2 anyway...
-    const n = try negotiate(.auto, &caps, "h2");
+    const n = try negotiate(.auto, caps, "h2");
     try std.testing.expectEqual(HttpVersion.http2, n.active);
     try std.testing.expect(n.viaAlpn);
     // ...and can also pick http/1.1 when only that overlaps.
-    const n2 = try negotiate(.auto, &caps, "http/1.1");
+    const n2 = try negotiate(.auto, caps, "http/1.1");
     try std.testing.expectEqual(HttpVersion.http11, n2.active);
     try std.testing.expect(n2.viaAlpn);
 }
 
 test "negotiate: explicit identity when supported" {
-    var caps = Capabilities{ .http2 = true, .http3 = true };
-    try std.testing.expectEqual(HttpVersion.http3, (try negotiate(.http3, &caps, null)).active);
-    try std.testing.expectEqual(HttpVersion.http2, (try negotiate(.http2, &caps, null)).active);
-    try std.testing.expectEqual(HttpVersion.http11, (try negotiate(.http11, &caps, null)).active);
-    try std.testing.expectEqual(HttpVersion.http10, (try negotiate(.http10, &caps, null)).active);
+    const caps = Capabilities{ .http2 = true, .http3 = true };
+    try std.testing.expectEqual(HttpVersion.http3, (try negotiate(.http3, caps, null)).active);
+    try std.testing.expectEqual(HttpVersion.http2, (try negotiate(.http2, caps, null)).active);
+    try std.testing.expectEqual(HttpVersion.http11, (try negotiate(.http11, caps, null)).active);
+    try std.testing.expectEqual(HttpVersion.http10, (try negotiate(.http10, caps, null)).active);
 }
 
 test "negotiate: explicit never silently downgrades" {
     const caps = Capabilities{}; // h1-only build
-    try std.testing.expectError(Error.VersionUnsupported, negotiate(.http2, &caps, null));
-    try std.testing.expectError(Error.VersionUnsupported, negotiate(.http3, &caps, null));
+    try std.testing.expectError(Error.VersionUnsupported, negotiate(.http2, caps, null));
+    try std.testing.expectError(Error.VersionUnsupported, negotiate(.http3, caps, null));
 }
 
 test "negotiate: explicit contradicted by ALPN is a hard failure" {
     var caps = Capabilities{ .http2 = true, .http11 = true };
     caps.http11 = true;
     // We asked for h2 but the server ALPN-selected http/1.1: refuse.
-    try std.testing.expectError(Error.VersionUnsupported, negotiate(.http2, &caps, "http/1.1"));
+    try std.testing.expectError(Error.VersionUnsupported, negotiate(.http2, caps, "http/1.1"));
 }
 
 test "negotiate: unknown ALPN result fails loudly" {
     const caps = Capabilities{};
-    try std.testing.expectError(Error.NegotiationFailed, negotiate(.auto, &caps, "spdy/3.1"));
-    try std.testing.expectError(Error.NegotiationFailed, negotiate(.auto, &caps, "h4"));
+    try std.testing.expectError(Error.NegotiationFailed, negotiate(.auto, caps, "spdy/3.1"));
+    try std.testing.expectError(Error.NegotiationFailed, negotiate(.auto, caps, "h4"));
 }
 
 test "capabilities: nothing available yields negotiation failure" {
@@ -334,8 +307,8 @@ test "capabilities: nothing available yields negotiation failure" {
         .http2 = false,
         .http3 = false,
     };
-    try std.testing.expect(caps.bestAvailable() == null);
-    try std.testing.expectError(Error.NegotiationFailed, negotiate(.auto, &caps, null));
+    try std.testing.expect(bestAvailable(caps) == null);
+    try std.testing.expectError(Error.NegotiationFailed, negotiate(.auto, caps, null));
 }
 
 test "rank ordering prefers h3 > h2 > h1.1 > h1.0" {

@@ -11,16 +11,15 @@ try server.get("/healthz", healthHandler);
 try server.get("/readyz", readyHandler);
 
 fn healthHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{ .status = "healthy" });
+    return ctx.json(.{ .status = "healthy" });
 }
 
 fn readyHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{ .status = "ready" });
+    return ctx.json(.{ .status = "ready" });
 }
 ```
 
-`httpx.health.Status` (`.healthy`, `.ready`, ...) renders standard JSON
-bodies via `jsonBody()` with matching HTTP status codes.
+Both routes return JSON with the matching 200 status.
 
 ## Expected Output
 
@@ -36,8 +35,3 @@ Bodies follow the format printed by the `healthz`/`readyz` handlers (`{d} {s}` w
 ```bash
 zig build run-health-check
 ```
-
-## What to Verify
-
-- `GET /healthz` returns 200 `{"status":"healthy"}`.
-- `GET /readyz` returns 200 `{"status":"ready"}`.

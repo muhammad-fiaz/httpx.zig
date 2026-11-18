@@ -8,7 +8,7 @@ const httpx = @import("httpx");
 
 fn getUser(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const id = ctx.param("id") orelse "unknown";
-    return ctx.renderJson(.{ .id = id });
+    return ctx.json(.{ .id = id });
 }
 
 fn createUser(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
@@ -50,8 +50,3 @@ Statuses, bodies, and ids vary with the request path and handler logic.
 ```bash
 zig build run-custom-server
 ```
-
-## What to Verify
-
-- `GET /users/42` returns `id=42`.
-- `POST /users` returns `201 created`.

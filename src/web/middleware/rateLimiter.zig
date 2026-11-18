@@ -21,6 +21,7 @@
 //!   - IETF Draft draft-ietf-httpapi-ratelimit-headers
 
 const std = @import("std");
+const jsonMod = @import("../../common/json.zig");
 const Allocator = std.mem.Allocator;
 const sync = @import("../../common/sync.zig");
 const clock = @import("../../common/clock.zig");
@@ -30,6 +31,7 @@ const Response = routerMod.Response;
 const Header = routerMod.Header;
 const NextFn = routerMod.NextFn;
 const MiddlewareFn = routerMod.MiddlewareFn;
+const z = @import("zigantic");
 
 pub const RateLimitError = error{
     OutOfMemory,
@@ -56,16 +58,13 @@ pub const RateLimitDimension = enum {
 };
 
 /// Policy configuration specifying limits, time windows, burst capacity, and memory bounds.
-pub const RateLimitPolicy = struct {
-    /// Maximum allowed requests per window.
-    limit: u32 = 100,
-    /// Time window in milliseconds over which `limit` requests refill (e.g. 60_000 for 1 minute).
-    windowMs: i64 = 60_000,
-    /// Maximum burst capacity. If 0, burst defaults to `limit`.
-    burst: u32 = 0,
-    /// Inactivity TTL in milliseconds after which an idle key is purged from memory.
-    ttlMs: i64 = 300_000,
-};
+const RateLimitPolicySchema = z.objectOf(.{
+    .limit = z.withDefault(z.nonNegativeInt(u32, .{}), 100),
+    .windowMs = z.withDefault(z.positiveInt(i64, .{}), 60_000),
+    .burst = z.withDefault(z.nonNegativeInt(u32, .{}), 0),
+    .ttlMs = z.withDefault(z.nonNegativeInt(i64, .{}), 300_000),
+}, .{});
+pub const RateLimitPolicy = RateLimitPolicySchema.Value;
 
 /// Detailed result of evaluating a rate limit check.
 pub const RateLimitResult = struct {
@@ -91,7 +90,7 @@ pub const RateLimitResult = struct {
         headers[1] = .{ .name = "X-RateLimit-Limit", .value = limitStr };
         headers[2] = .{ .name = "X-RateLimit-Remaining", .value = "0" };
         headers[3] = .{ .name = "X-RateLimit-Reset", .value = resetStr };
-        headers[4] = .{ .name = "Content-Type", .value = "application/json; charset=utf-8" };
+        headers[4] = .{ .name = "Content-Type", .value = jsonMod.applicationJsonUtf8 };
 
         const body = try std.fmt.allocPrint(
             allocator,
@@ -134,10 +133,11 @@ pub const RateLimiter = struct {
     lastSweepMs: i64 = 0,
 
     /// Canonical configuration: explicit fields override defaults per field.
-    pub const Config = struct {
-        policy: RateLimitPolicy = .{},
-        maxEntries: usize = 10_000,
-    };
+    const ConfigSchema = z.objectOf(.{
+        .policy = z.withDefault(RateLimitPolicySchema, .{}),
+        .maxEntries = z.withDefault(z.positiveInt(usize, .{}), 10_000),
+    }, .{});
+    pub const Config = ConfigSchema.Value;
 
     /// Creates a new RateLimiter. `.{}` yields a 100 req/min limiter.
     pub fn init(allocator: Allocator, io: std.Io, config: Config) RateLimiter {
@@ -147,7 +147,7 @@ pub const RateLimiter = struct {
             .allocator = allocator,
             .io = io,
             .defaultPolicy = p,
-            .maxEntries = @max(1, config.maxEntries),
+            .maxEntries = config.maxEntries,
             .buckets = std.StringHashMap(BucketEntry).init(allocator),
             .lastSweepMs = clock.monotonicMillis(io),
         };

@@ -6,17 +6,17 @@ HTTPX features a centralized, robust DNS resolution subsystem supporting IPv4 (A
 
 ```text
 Request Hostname -> DNS Cache Lookup
-                    │
-                    ├── Valid cached entry found?
-                    │      Yes: Return cached address list
-                    │      No:  Check for in-flight query (Single-Flight)
-                    │             │
-                    │             ├── Existing query active?
-                    │             │     Yes: Await in-flight result (No stampede)
-                    │             │     No:  Invoke OS Resolver (getaddrinfo)
-                    │             │            │
-                    │             │            ├── Store in DNS Cache with TTL
-                    │             │            └── Return candidate Address list
+                    |
+                    +-- Valid cached entry found?
+                    |      Yes: Return cached address list
+                    |      No:  Check for in-flight query (Single-Flight)
+                    |             |
+                    |             +-- Existing query active?
+                    |             |     Yes: Await in-flight result (No stampede)
+                    |             |     No:  Invoke OS Resolver (getaddrinfo)
+                    |             |            |
+                    |             |            +-- Store in DNS Cache with TTL
+                    |             |            +-- Return candidate Address list
 ```
 
 ## Protocol Features

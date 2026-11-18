@@ -20,24 +20,21 @@ const addressMod = @import("../../net/address.zig");
 const netResolve = @import("../../net/resolve.zig");
 const tlsClientMod = @import("../tls/tlsClient.zig");
 const tlsTransport = @import("../tls/tlsTransport.zig");
+const z = @import("zigantic");
 
-pub const Options = struct {
-    host: []const u8,
-    port: u16 = 21,
-    user: []const u8 = "anonymous",
-    password: []const u8 = "anonymous@",
-    /// Explicit FTPS (AUTH TLS). See module docs.
-    secure: bool = false,
-    /// How the server certificate is verified for FTPS control/data.
-    tlsVerify: tlsTransport.VerifyMode = .caBundle,
-    /// Extra/custom CA PEM trusted for the FTPS server chain (in addition
-    /// to system trust when `tlsVerify == .caBundle`).
-    tlsCaPem: ?[]const u8 = null,
-    /// `true` (default) negotiates `PROT P`: data connections are
-    /// TLS-protected. `false` negotiates `PROT C`: only the control
-    /// connection is protected and data flows in cleartext.
-    protPrivate: bool = true,
-};
+const cHostMax = 256;
+
+const OptionsSchema = z.objectOf(.{
+    .host = z.string(.{ .min = 1, .max = cHostMax }),
+    .port = z.withDefault(z.integer(u16, .{}), 21),
+    .user = z.withDefault(z.string(.{}), "anonymous"),
+    .password = z.withDefault(z.string(.{}), "anonymous@"),
+    .secure = z.withDefault(z.boolean(.{}), false),
+    .tlsVerify = z.withDefault(z.enumType(tlsTransport.VerifyMode, .{}), .caBundle),
+    .tlsCaPem = z.optional(z.string(.{})),
+    .protPrivate = z.withDefault(z.boolean(.{}), true),
+}, .{});
+pub const Options = OptionsSchema.Value;
 
 pub const Reply = struct {
     code: u16,
@@ -245,12 +242,14 @@ pub const Client = struct {
 
     /// Initialize an FTP client connected using the provided allocator and IO engine.
     pub fn init(allocator: Allocator, io: std.Io, opts: Options) FtpError!Client {
-        if (opts.host.len == 0 or opts.host.len > cHostMax) return FtpError.ProtocolError;
+        var scratch: [4096]u8 = undefined;
+        const issue = z.checkFirst(OptionsSchema, opts, &scratch, .{}) catch
+            return FtpError.ProtocolError;
+        if (issue != null) return FtpError.ProtocolError;
 
         // Connect by attempting IP literal parsing first, then falling back to hostname resolution
         var sock: ?tcp.Socket = null;
-        var holder = addressMod.Address{ .family = .ip4, .port = 0 };
-        if (holder.parseIp(opts.host)) |addr| {
+        if (addressMod.Address.parseIp(opts.host)) |addr| {
             var a = addr;
             a.port = opts.port;
             sock = tcp.connectAddress(io, &a) catch null;
@@ -313,8 +312,8 @@ pub const Client = struct {
     }
 
     /// Explicit FTPS upgrade (RFC 4217) on the live control connection:
-    /// `AUTH TLS` (234, fail closed otherwise) → TLS handshake with no
-    /// ALPN (FTP is not HTTP) → `PBSZ 0` → `PROT P/C`. Never proceeds in
+    /// `AUTH TLS` (234, fail closed otherwise) -> TLS handshake with no
+    /// ALPN (FTP is not HTTP) -> `PBSZ 0` -> `PROT P/C`. Never proceeds in
     /// plaintext once `secure` was requested.
     fn upgradeTls(self: *Client, opts: Options) FtpError!void {
         const auth = try self.command("AUTH TLS");
@@ -350,8 +349,6 @@ pub const Client = struct {
         self.allocator.free(pr.text);
         self.protPrivate = opts.protPrivate;
     }
-
-    const cHostMax = 256;
 
     pub fn deinit(self: *Client) void {
         if (self.tlsClient) |*owner| {
@@ -592,8 +589,7 @@ pub const Client = struct {
 
     fn dataTo(self: *Client, port: u16) FtpError!tcp.Socket {
         const host = self.hostCopy[0..self.hostLen];
-        var holder = addressMod.Address{ .family = .ip4, .port = 0 };
-        if (holder.parseIp(host)) |addr| {
+        if (addressMod.Address.parseIp(host)) |addr| {
             var a = addr;
             a.port = port;
             return tcp.connectAddress(self.ctrl.io, &a) catch FtpError.ConnectFailed;
@@ -614,8 +610,7 @@ pub const Client = struct {
     fn dataToPasv(self: *Client, ip: [4]u8, port: u16) FtpError!tcp.Socket {
         var text: [15]u8 = undefined;
         const host = std.fmt.bufPrint(&text, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] }) catch return FtpError.MalformedPasv;
-        var base = addressMod.Address{ .family = .ip4, .port = 0 };
-        var addr = base.parseIp(host) catch return FtpError.MalformedPasv;
+        var addr = addressMod.Address.parseIp(host) catch return FtpError.MalformedPasv;
         addr.port = port;
         return tcp.connectAddress(self.ctrl.io, &addr) catch FtpError.ConnectFailed;
     }

@@ -10,24 +10,26 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const mime = @import("../../utils/mime.zig");
+const mime = @import("../../common/mime.zig");
 const sync = @import("../../common/sync.zig");
+const z = @import("zigantic");
 
 /// A single web asset (HTML, template, CSS, JS, image, font, etc.).
-pub const Asset = struct {
-    /// Normalized logical web path (e.g. "index.html", "css/app.css").
-    path: []const u8,
-    /// Immutable byte content.
-    content: []const u8,
-    /// MIME content type (e.g. "text/html; charset=utf-8").
-    contentType: []const u8,
-    /// Strong ETag for conditional HTTP requests (e.g. "\"a1b2c3d4\"").
-    etag: []const u8,
-    /// Modification timestamp in nanoseconds.
-    mtimeNs: i128 = 0,
-    /// True if embedded in binary memory; false if loaded from disk.
-    isEmbedded: bool = true,
-};
+const AssetSchema = z.objectOf(.{
+    // Normalized logical web path (e.g. "index.html", "css/app.css").
+    .path = z.string(.{ .min = 1 }),
+    // Immutable byte content.
+    .content = z.string(.{}),
+    // MIME content type (e.g. "text/html; charset=utf-8").
+    .contentType = z.string(.{ .min = 1 }),
+    // Strong ETag for conditional HTTP requests (e.g. "\"a1b2c3d4\"").
+    .etag = z.string(.{}),
+    // Modification timestamp in nanoseconds.
+    .mtimeNs = z.withDefault(z.integer(i128, .{}), 0),
+    // True if embedded in binary memory; false if loaded from disk.
+    .isEmbedded = z.withDefault(z.boolean(.{}), true),
+}, .{});
+pub const Asset = AssetSchema.Value;
 
 /// Thread-safe registry for embedded production assets and filesystem fallback.
 pub const AssetStore = struct {
@@ -181,16 +183,16 @@ pub fn registerEmbedded(
     try store.register(path, content, contentType);
 }
 
-/// One entry of a build-generated embedded directory manifest: a logical
-/// web path plus the bytes embedded for it (typically via `@embedFile`).
-/// Manifests are generated deterministically sorted by `build.zig` helpers,
-/// so registration order never depends on filesystem enumeration order.
-pub const EmbeddedFile = struct {
-    path: []const u8,
-    content: []const u8,
-};
+/// One entry of an explicit embedded-file manifest: a logical web path plus
+/// the bytes embedded for it (typically via `@embedFile`). The manifest is
+/// declared in user code, one entry per file.
+pub const EmbeddedFileSchema = z.objectOf(.{
+    .path = z.string(.{ .min = 1 }),
+    .content = z.string(.{}),
+}, .{});
+pub const EmbeddedFile = EmbeddedFileSchema.Value;
 
-/// Registers a whole build-generated manifest with one call. MIME types
+/// Registers a whole explicit embedded-file manifest with one call. MIME types
 /// resolve through the shared MIME system unless an entry needs an
 /// override, in which case register that path individually afterwards.
 pub fn registerEmbeddedDir(allocator: Allocator, files: []const EmbeddedFile) !void {

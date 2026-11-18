@@ -16,22 +16,22 @@ pub fn main() !void {
 
     var server = try httpx.Server.init(allocator, io, .{
         .port = 8080,
-        .enableDocs = true,
-        .docs = .{
-            .title = "Inventory API",
-            .version = "1.0.0",
-            .description = "Automated OpenAPI generation with HTTPX",
-        },
     });
     defer server.deinit();
-
     try server.get("/api/items", itemsHandler);
+    var docs = httpx.docs.init(allocator, io, &server.router);
+    try docs.mount(.{
+        .title = "Inventory API",
+        .version = "1.0.0",
+        .description = "Automated OpenAPI generation with HTTPX",
+    });
+    defer docs.deinit();
 
     server.run();
 }
 
 fn itemsHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{
+    return ctx.json(.{
         .items = [_]struct { id: u32, name: []const u8 }{
             .{ .id = 1, .name = "Widget" },
             .{ .id = 2, .name = "Gadget" },

@@ -14,8 +14,7 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
-
-    std.debug.print("==> HTTPX HTML DOM Transformation & Serialization Demo\n\n", .{});
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     const initialHtml =
         \\<div class="card" id="user-1">
@@ -24,8 +23,7 @@ pub fn main() !void {
         \\</div>
     ;
 
-    var p = httpx.parsing.Parser.init(allocator, .{});
-    var doc = try p.parseHtml(initialHtml);
+    var doc = try httpx.parsing.init(allocator, io, .{}).parseHtml(initialHtml);
     defer doc.deinit();
 
     std.debug.print("Original HTML:\n{s}\n\n", .{initialHtml});
@@ -47,7 +45,5 @@ pub fn main() !void {
 
     // 4. Serialize back to HTML
     const serialized = try doc.serialize();
-    std.debug.print("Transformed & Serialized HTML (with XSS escaping):\n{s}\n", .{serialized});
-
-    std.debug.print("\nTransformation verification successful.\n", .{});
+    std.debug.print("Transformed HTML:\n{s}\n", .{serialized});
 }

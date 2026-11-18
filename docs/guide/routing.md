@@ -71,7 +71,7 @@ const api = server.router.group("/api", .{});
 const users = api.group("/users", .{});
 try users.get("/", listUsers, .{});
 try users.get("/{id:int}", getUser, .{});
-// → /api/users and /api/users/{id:int}; parent params stay visible.
+// -> /api/users and /api/users/{id:int}; parent params stay visible.
 ```
 
 Groups share a prefix (and optional middleware) without string
@@ -101,8 +101,9 @@ const staticRoutes = [_]httpx.router.RouteDecl{
     .{ .method = .GET, .path = "/files/{path:path}", .name = "files", .handler = fileHandler },
 };
 
-// Validates all routes at comptime and registers into the active router:
-try server.registerStatic(&staticRoutes);
+// Validates all routes at comptime, then registers into the active router:
+comptime httpx.router.validateRoutesComptime(&staticRoutes);
+try server.register(&staticRoutes);
 ```
 
 ### Detected Conflicts:
@@ -116,11 +117,21 @@ Any violation produces an actionable **`@compileError`** identifying the conflic
 
 ### Runtime Route Table Registration
 
-Dynamic routes discovered at runtime use `registerRouteTable(&routes)`, applying the identical validation logic and returning structured `RouteError.DuplicateRoute`, `RouteError.DuplicateName`, or `RouteError.InvalidPattern` without corrupting the active route table.
+Dynamic routes discovered at runtime use `register(&routes)`, applying the identical validation logic and returning structured `RouteError.DuplicateRoute`, `RouteError.DuplicateName`, or `RouteError.InvalidPattern` without corrupting the active route table.
 
 ## File-Based Routing Conventions
 
-`httpx.site.Site` unifies filesystem discovery with the core router:
+`httpx.Server` serves file-based websites through its `.site` option. File
+discovery, routing, and template rendering are owned by the server itself;
+the filesystem directory (development) or an explicit embedded-file
+manifest (production) is declared once:
+
+```zig
+var server = try httpx.Server.init(allocator, io, .{
+    .site = .{ .filesystem = "dist" },
+});
+```
+
 - **Static & nested**: `about/team.html` -> `/about/team`.
 - **Index files**: `index.html` -> `/`, `blog/index.html` -> `/blog`.
 - **Dynamic segments**: `users/[id].html` -> `/users/{id}`, `users/[id:int].html` -> `/users/{id:int}`.
@@ -131,7 +142,7 @@ Dynamic routes discovered at runtime use `registerRouteTable(&routes)`, applying
 
 ## Conflicts and priority
 
-- `/users/{id}` vs `/users/{name}` → registration error (`DuplicateRoute`).
+- `/users/{id}` vs `/users/{name}` -> registration error (`DuplicateRoute`).
 - `/users/me` (static) beats `/users/{id:int}` (typed) beats
   `/users/{name}` (generic) beats `/files/*rest` (wildcard).
 - Equal-specificity ties keep the first registered route (documented;
@@ -146,7 +157,7 @@ returns **405 with an `Allow` header** (e.g. `Allow: GET, POST`).
 
 ## Middleware
 
-Order is deterministic: router middleware → route middleware → handler.
+Order is deterministic: router middleware -> route middleware -> handler.
 
 ```zig
 try server.use(loggingMw);                                   // router-wide
@@ -168,13 +179,94 @@ Configured via authoritative `httpx.router.TrailingSlash`:
 
 Shared across code-based routing, file-based routing, and website serving.
 
+## Typed REST Endpoints with `Server`
+
+`httpx.Server` registers routes with the path first and an optional `.{}` options
+literal second. Typed handlers return `httpx.router.Result(T)`; raw handlers return
+`httpx.router.Response` and use the same verbs and metadata fields:
+
+```zig
+var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
+defer server.deinit();
+
+try server.get("/users/{id:int}", .{ .handler = getUser, .summary = "Get user by ID", .tags = &.{"users"} });
+try server.post("/users", .{ .handler = createUser, .summary = "Create user", .tags = &.{"users"} });
+try server.put("/users/{id:int}", .{ .handler = updateUser }); // quoted JSON keys live on the struct
+try server.delete("/users/{id:int}", .{ .handler = deleteUser });
+
+// Raw handler: same lowercase verbs, no schema derivation.
+try server.get("/health", .{ .handler = healthCheck, .summary = "Liveness" });
+try server.use(httpx.middleware.cors);
+
+server.run();
+```
+
+Handler signatures are `(*Context)` or `(*Context, RequestType)`, returning
+`!httpx.router.Result(T)` — a plain struct literal, no constructor:
+
+```zig
+const User = struct {
+    id: u64,
+    @"user-name": []const u8,
+    @"@context": []const u8,
+};
+
+fn getUser(ctx: *httpx.router.Context) !httpx.router.Result(User) {
+    const id = ctx.paramUint("id") orelse return error.BadRequest;
+    return .{ .body = .{
+        .id = id,
+        .@"user-name" = "alice",
+        .@"@context" = "https://schema.org",
+    } };
+}
+
+fn createUser(_: *httpx.router.Context, body: CreateUserRequest) !httpx.router.Result(User) {
+    return .{ .status = .created, .body = .{
+        .id = 101,
+        .@"user-name" = body.name,
+        .@"@context" = "https://schema.org",
+    } };
+}
+
+fn deleteUser(_: *httpx.router.Context) !httpx.router.Result(void) {
+    return .{ .status = .noContent };
+}
+```
+
+Every option is optional; only what you state is used:
+
+```zig
+.{ .handler = createUser, .operationId = "createUser",
+   .summary = "...", .description = "...", .tags = &.{"users"},
+   .deprecated = false, .security = &.{},
+   .params = &.{
+       .{ .name = "id", .in = .path, .required = true, .schema = httpx.rest.schemaOf(u64) },
+       .{ .name = "expand", .in = .query, .schema = httpx.rest.schemaOf(bool) },
+   },
+   .responses = &.{
+       .{ .status = 200, .description = "User found", .schema = httpx.rest.schemaOf(User) },
+       .{ .status = 404, .description = "User not found" },
+   },
+   .request = .{ .content = .json, .description = "User payload" },
+   .internal = false,
+   .mediaType = "application/vnd.api+json" }
+```
+
+JSON keys that are not Zig identifiers are declared with quoted identifiers on
+the request and response structs, so `user-name`, `@context`, `Content-Type`,
+and `123user` are decoded and encoded directly. See
+[JSON typed structs](/api/data#typed-structs) for details.
+
 ## OpenAPI
 
 Typed converters feed OpenAPI generation automatically: `/users/{id:int}`
 emits `{id, in: path, required: true, schema: {type: integer}}` unless
-`meta.params` documents the parameter explicitly.
+`.params` documents the parameter explicitly. `.responses` replaces the
+response derived from the return type, `.request` documents the JSON body, and
+`.internal = true` keeps infrastructure routes out of the document.
 
 ## WebSocket and SSE
 
 WebSocket (`/ws/{roomId}`) and SSE endpoints are plain router routes —
 no separate routing engine exists.
+

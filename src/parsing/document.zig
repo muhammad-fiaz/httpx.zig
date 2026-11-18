@@ -5,6 +5,7 @@
 //! CSS selector querying, tree mutations, incremental parsing, and streaming reader input.
 
 const std = @import("std");
+const jsonMedia = @import("../common/json.zig");
 const Allocator = std.mem.Allocator;
 const dom = @import("dom.zig");
 const Tree = dom.Tree;
@@ -19,6 +20,7 @@ const robots = @import("robots.zig");
 const sitemap = @import("sitemap.zig");
 const ts = @import("treesitter");
 const regexMod = @import("regex");
+const z = @import("zigantic");
 
 pub const Point = struct {
     row: u32 = 0,
@@ -89,10 +91,11 @@ pub const ContentKind = enum {
     unknown,
 };
 
-pub const ParserConfig = struct {
-    limits: html.Limits = .{},
-    detectContentType: bool = true,
-};
+const ParserConfigSchema = z.objectOf(.{
+    .limits = z.withDefault(html.LimitsSchema, .{}),
+    .detectContentType = z.withDefault(z.boolean(.{}), true),
+}, .{});
+pub const ParserConfig = ParserConfigSchema.Value;
 
 pub const NodeList = struct {
     allocator: Allocator,
@@ -117,6 +120,7 @@ pub const NodeList = struct {
         };
     }
 };
+pub const Nodes = NodeList;
 
 pub const NodeHandle = struct {
     tree: *const Tree,
@@ -236,14 +240,21 @@ pub const NodeHandle = struct {
         }
     }
 };
+pub const Handle = NodeHandle;
+pub const Kind = ContentKind;
 
 pub const Document = struct {
     allocator: Allocator,
     arena: std.heap.ArenaAllocator,
     tree: Tree,
+    /// Borrowed source text. `parse*` methods do not copy it, so the caller
+    /// must keep the input alive for the document's lifetime. `parseStream`
+    /// allocates the source inside `arena` and owns it.
     source: []const u8,
     kind: ContentKind,
 
+    /// Releases the DOM arena and every value returned by document methods.
+    /// Borrowed handles and extractor results become invalid.
     pub fn deinit(self: *Document) void {
         self.arena.deinit();
     }
@@ -385,32 +396,20 @@ pub const Document = struct {
         self.source = newSource;
         return changed;
     }
-
-    /// Convenience static constructors matching `Document.parseHtml(...)`
-    pub fn parseHtml(allocator: Allocator, htmlSource: []const u8) !Document {
-        const p = Parser.init(allocator, .{});
-        return p.parseHtml(htmlSource);
-    }
-
-    pub fn parseXml(allocator: Allocator, xmlSource: []const u8) !Document {
-        const p = Parser.init(allocator, .{});
-        return p.parseXml(xmlSource);
-    }
-
-    pub fn parse(allocator: Allocator, contentType: ?[]const u8, source: []const u8) !Document {
-        const p = Parser.init(allocator, .{});
-        return p.parse(source, contentType);
-    }
 };
 
 pub const Parser = struct {
     allocator: Allocator,
+    io: std.Io,
     config: ParserConfig,
 
-    pub fn init(allocator: Allocator, config: ParserConfig) Parser {
+    /// Creates a stateless parser. The parser itself allocates nothing;
+    /// returned documents own an arena backed by `allocator`.
+    pub fn init(allocator: Allocator, io: std.Io, cfg: ParserConfig) Parser {
         return .{
             .allocator = allocator,
-            .config = config,
+            .io = io,
+            .config = cfg,
         };
     }
 
@@ -514,7 +513,8 @@ test "edit vocabulary tracks points across replacement" {
 
 test "incremental update reparses and reports changed ranges" {
     const a = std.testing.allocator;
-    var doc = try Parser.init(a, .{}).parseHtml("<p>one</p>");
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var doc = try Parser.init(a, io, .{}).parseHtml("<p>one</p>");
     defer doc.deinit();
     const changed = try doc.incrementalUpdate("<p>one</p><p>two</p>");
     try std.testing.expect(changed > 0);
@@ -525,6 +525,7 @@ test "incremental update reparses and reports changed ranges" {
 
 test "document regex text search and link extraction" {
     const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
     const htmlSnippet =
         \\<html>
         \\<head><title>Test Page</title></head>
@@ -537,7 +538,7 @@ test "document regex text search and link extraction" {
         \\</html>
     ;
 
-    var doc = try Parser.init(a, .{}).parseHtml(htmlSnippet);
+    var doc = try Parser.init(a, io, .{}).parseHtml(htmlSnippet);
     defer doc.deinit();
 
     // Regex text matching
@@ -578,7 +579,7 @@ pub fn detectKind(source: []const u8, contentType: ?[]const u8) ContentKind {
         if (std.mem.indexOf(u8, ct, "html") != null) return .html;
         if (std.mem.indexOf(u8, ct, "rss") != null) return .rss;
         if (std.mem.indexOf(u8, ct, "atom") != null) return .atom;
-        if (std.mem.indexOf(u8, ct, "json") != null) return .jsonFeed;
+        if (jsonMedia.isJsonMediaType(ct)) return .jsonFeed;
         if (std.mem.indexOf(u8, ct, "xml") != null) return .xml;
     }
     const trimmed = std.mem.trim(u8, source, " \t\r\n");

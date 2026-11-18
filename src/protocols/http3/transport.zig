@@ -22,6 +22,18 @@
 //! external server `peer` is null and only our socket is pumped.
 
 const std = @import("std");
+const z = @import("zigantic");
+
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
+
 const Allocator = std.mem.Allocator;
 const quicConn = @import("../quic/connection.zig");
 const quicEp = @import("../quic/transport.zig");
@@ -34,6 +46,7 @@ const transportTls = @import("../tls/tlsTransport.zig");
 const tlsSession = @import("../tls/tlsSession.zig");
 const bodySourceMod = @import("../../common/bodySource.zig");
 const semanticsMod = @import("../http1/semantics.zig");
+const headersMod = @import("../../common/headers.zig");
 pub const BodySource = bodySourceMod.BodySource;
 pub const SliceReader = bodySourceMod.SliceReader;
 pub const CallbackReader = bodySourceMod.CallbackReader;
@@ -50,7 +63,7 @@ pub const Error = error{
     OutOfMemory,
 };
 
-pub const Header = struct { name: []const u8, value: []const u8 };
+pub const Header = headersMod.Header;
 
 pub const H3Response = struct {
     status: u16,
@@ -84,7 +97,7 @@ const RespState = struct {
     body: std.ArrayList(u8) = .empty,
     headerBytes: usize = 0,
     maxBytes: usize = 64 * 1024 * 1024,
-    maxHeaderBytes: usize = 1024 * 1024,
+    maxHeader: usize = 1024 * 1024,
     done: bool = false,
     failed: bool = false,
     overflow: bool = false,
@@ -114,14 +127,14 @@ pub const Client = struct {
     controlDone: bool = false,
     responses: std.AutoHashMap(u64, RespState),
     maxBytes: usize = 64 * 1024 * 1024,
-    maxHeaderBytes: usize = 1024 * 1024,
+    maxHeader: usize = 1024 * 1024,
     ioError: ?anyerror = null,
 
     pub fn init(allocator: Allocator, ep: *quicEp.Endpoint) Client {
         return .{
             .allocator = allocator,
             .ep = ep,
-            .h3 = h3conn.Connection.init(allocator, .client),
+            .h3 = h3conn.Connection.init(allocator, .{ .role = .client }),
             .responses = std.AutoHashMap(u64, RespState).init(allocator),
         };
     }
@@ -247,7 +260,7 @@ pub const Client = struct {
         for (fields) |f| {
             if (f.name.len > 0 and f.name[0] == ':') continue;
             r.headerBytes +|= f.name.len +| f.value.len;
-            if (r.headerBytes > r.maxHeaderBytes) {
+            if (r.headerBytes > r.maxHeader) {
                 r.overflow = true;
                 return;
             }
@@ -303,7 +316,7 @@ pub const Client = struct {
                     error.SendBlocked => {
                         _ = try self.ep.flush(dest);
                         if (pump) |p| {
-                            try quicHs.feedPumped(self.ep, p, dest, 50, nowMs);
+                            try quicHs.feedPumped(.{ .ep = self.ep, .pump = p, .dest = dest, .quantumMs = 50, .nowMs = nowMs });
                             try self.pumpQpack(nowMs);
                         } else {
                             return error.SendBlocked;
@@ -332,7 +345,7 @@ pub const Client = struct {
             if (credit == 0) {
                 _ = try self.ep.flush(dest);
                 if (pump) |p| {
-                    try quicHs.feedPumped(self.ep, p, dest, 50, nowMs);
+                    try quicHs.feedPumped(.{ .ep = self.ep, .pump = p, .dest = dest, .quantumMs = 50, .nowMs = nowMs });
                     try self.pumpQpack(nowMs);
                     if (conn.state == .closed or conn.state == .draining) return error.ConnectionClosed;
                     continue;
@@ -349,7 +362,7 @@ pub const Client = struct {
                 error.SendBlocked => {
                     _ = try self.ep.flush(dest);
                     if (pump) |p| {
-                        try quicHs.feedPumped(self.ep, p, dest, 50, nowMs);
+                        try quicHs.feedPumped(.{ .ep = self.ep, .pump = p, .dest = dest, .quantumMs = 50, .nowMs = nowMs });
                         try self.pumpQpack(nowMs);
                         if (conn.state == .closed or conn.state == .draining) return error.ConnectionClosed;
                         continue;
@@ -403,7 +416,7 @@ pub const Client = struct {
         try self.responses.put(sid, .{
             .sid = sid,
             .maxBytes = @min(maxBytes, 64 * 1024 * 1024),
-            .maxHeaderBytes = self.maxHeaderBytes,
+            .maxHeader = self.maxHeader,
         });
 
         var qextra = std.ArrayList(h3qpack.FieldLine).empty;
@@ -605,7 +618,7 @@ pub const Client = struct {
             const now: u64 = @intCast(clockMod.monotonicMillis(self.ep.io));
             if (now -| start > deadlineMs) return error.Timeout;
             const remain = deadlineMs -| (now -| start);
-            try quicHs.feedPumped(self.ep, pump, dest, @min(remain, 100), now);
+            try quicHs.feedPumped(.{ .ep = self.ep, .pump = pump, .dest = dest, .quantumMs = @min(remain, 100), .nowMs = now });
 
             // Flush encoder instructions and decoder acknowledgments
             // produced by the bytes just fed, then put them on the wire.
@@ -742,7 +755,7 @@ pub const PooledConn = struct {
     io: std.Io,
     conn: *quicConn.Connection,
     ep: quicEp.Endpoint,
-    driver: *quicHs.Driver,
+    driver: *quicHs.Handshake,
     pump: quicEp.Pump,
     client: *Client,
     dest: std.Io.net.IpAddress,
@@ -750,14 +763,18 @@ pub const PooledConn = struct {
     id: usize,
     handshakeCount: u32 = 1,
 
-    pub const ConnectOptions = struct {
-        verify: transportTls.VerifyMode = .caBundle,
-        caPem: ?[]const u8 = null,
-        session: ?*const tlsSession.ClientSession = null,
-        earlyData: bool = false,
-        sessionOut: ?*tlsSession.ClientSession = null,
-        timeoutMs: u64 = 30_000,
-    };
+    const ConnectOptionsSchema = z.objectOf(.{
+        .verify = z.withDefault(z.enumType(transportTls.VerifyMode, .{}), .caBundle),
+        .caPem = z.optional(z.string(.{ .min = 1 })),
+        .session = z.optional(typedSchema(*const tlsSession.ClientSession)),
+        .earlyData = z.withDefault(z.boolean(.{}), false),
+        .sessionOut = z.optional(typedSchema(*tlsSession.ClientSession)),
+        .timeoutMs = z.withDefault(z.integer(u64, .{}), 30_000),
+        // QUIC transport parameters. `.{}` uses the protocol defaults
+        // supplied by `quic.Connection.Config`.
+        .quic = z.withDefault(quicConn.ConfigSchema, .{}),
+    }, .{});
+    pub const ConnectOptions = ConnectOptionsSchema.Value;
 
     pub fn connect(
         allocator: Allocator,
@@ -771,14 +788,15 @@ pub const PooledConn = struct {
         const self = try allocator.create(PooledConn);
         errdefer allocator.destroy(self);
 
-        const conn = try quicConn.Connection.init(allocator, io, .client, .{});
+        const conn = try quicConn.Connection.init(allocator, io, opts.quic);
         errdefer conn.deinit();
 
         const ep = try quicEp.Endpoint.init(allocator, io, conn, .{});
 
-        const driver = try allocator.create(quicHs.Driver);
+        const driver = try allocator.create(quicHs.Handshake);
         errdefer allocator.destroy(driver);
-        driver.* = quicHs.Driver.initClient(io, allocator, .{
+        driver.* = quicHs.Handshake.init(allocator, io, .{
+            .role = .client,
             .host = host,
             .verify = opts.verify,
             .caPem = opts.caPem,
@@ -788,11 +806,7 @@ pub const PooledConn = struct {
         });
         errdefer driver.deinit();
 
-        conn.tls = .{
-            .ctx = driver,
-            .start = quicHs.Driver.clientStart,
-            .onData = quicHs.Driver.onData,
-        };
+        driver.attach(conn);
 
         const client = try allocator.create(Client);
         errdefer allocator.destroy(client);
@@ -833,6 +847,12 @@ pub const PooledConn = struct {
     }
 
     pub fn deinit(self: *PooledConn) void {
+        // Tell the peer this session is ending instead of vanishing at the
+        // transport layer: a UDP peer otherwise has to wait out its idle
+        // timeout before it can accept the next connection.
+        const nowMs: u64 = @intCast(clockMod.monotonicMillis(self.io));
+        self.conn.sendConnectionClose(0x100, "client closing", true, nowMs) catch {};
+        _ = self.ep.flush(self.dest) catch {};
         self.pump.stop();
         self.client.deinit();
         self.allocator.destroy(self.client);
@@ -856,6 +876,14 @@ pub const PooledConn = struct {
         }
 
         if (self.conn.state == .closed or self.conn.state == .closing or self.conn.state == .draining) return false;
+        // Do not hand out a session that is within one second of its QUIC
+        // idle timeout: the next pump would transition it to draining
+        // mid-request. The pool's own idle sweep uses the same 30s scale.
+        const idleMs = self.conn.effectiveIdleTimeoutMs();
+        if (idleMs != 0) {
+            const margin = @min(idleMs, 1_000);
+            if (nowMs -| self.conn.lastActivityMs >= idleMs - margin) return false;
+        }
         if (self.client.h3.fatalError != null) return false;
         if (self.client.h3.goawayReceived or self.client.h3.goawaySent) return false;
         if (self.client.ioError != null) return false;
@@ -932,7 +960,7 @@ test "http3 response collector caps header bytes and copies fields" {
     var endpoint: quicEp.Endpoint = undefined;
     var client = Client.init(a, &endpoint);
     defer client.deinit();
-    try client.responses.put(0, .{ .sid = 0, .maxHeaderBytes = 8 });
+    try client.responses.put(0, .{ .sid = 0, .maxHeader = 8 });
 
     const fields = [_]h3qpack.FieldLine{
         .{ .name = ":status", .value = "200" },

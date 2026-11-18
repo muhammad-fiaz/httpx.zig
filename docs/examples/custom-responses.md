@@ -20,7 +20,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0, // Pick ephemeral port for testing
-        .maxConnections = 9,
+        .limits = .{ .maxConnections = 9 },
     });
     defer server.deinit();
 
@@ -34,7 +34,7 @@ pub fn main() !void {
     // 2. JSON response
     try server.get("/json", struct {
         fn handle(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-            return ctx.renderJson(.{
+            return ctx.json(.{
                 .status = "ok",
                 .version = "1.0.0",
                 .features = [_][]const u8{ "html", "json", "xml", "rss", "atom", "sitemap", "robots" },

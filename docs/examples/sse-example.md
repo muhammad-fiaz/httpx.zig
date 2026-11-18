@@ -1,17 +1,17 @@
 # Server-Sent Events (SSE) Example
 
-SSE payloads with `httpx.sse.Event.Writer`, parsed back with
-`httpx.sse.Event.Parser`. See `examples/sseServer.zig`.
+SSE payloads with `httpx.sse.Writer`, parsed back with
+`httpx.sse.Parser`. See `examples/sseServer.zig`.
 
 ```zig
 fn sseHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    var out = std.ArrayList(u8).empty;
-    var writer = httpx.sse.Event.Writer.init(ctx.allocator);
-    try writer.writeEvent(&out, &[_][]const u8{"Connected to SSE live stream"}, "status", 1, 5000);
-    try writer.writeEvent(&out, &[_][]const u8{"First data packet"}, "message", 2, null);
+    var writer = httpx.sse.Writer.init(ctx.allocator, ctx.io, .{});
+    defer writer.deinit();
+    try writer.writeEvent(&.{"Connected to SSE live stream"}, .{ .event = "status", .id = 1, .retryMs = 5000 });
+    try writer.writeEvent(&.{"First data packet"}, .{ .event = "message", .id = 2 });
     return .{
         .status = 200,
-        .body = out.items,
+        .body = writer.buffered(),
         .contentType = "text/event-stream; charset=utf-8",
     };
 }
@@ -44,9 +44,3 @@ Statuses, event payloads, ids, retry intervals, URLs, and ports vary with the ha
 ```bash
 zig build run-sse-server
 ```
-
-## Checklist
-
-- [x] SSE events use W3C wire format (`event:`, `id:`, `data:`)
-- [x] Server returns `Content-Type: text/event-stream`
-- [x] Client receives all events in order

@@ -10,17 +10,17 @@
 
 const std = @import("std");
 const BoundedQueue = @import("queue.zig").BoundedQueue;
+const z = @import("zigantic");
 
 pub const TaskFn = *const fn (ctx: ?*anyopaque, cancel: *std.atomic.Value(bool)) anyerror!void;
 
-pub const Config = struct {
-    /// 0 => auto (CPU count clamped 1..16).
-    workers: u16 = 0,
-    /// Pending-task capacity before submission blocks (or rejects).
-    queueCapacity: u32 = 1024,
-    /// If true, automatically starts worker threads on the first submitted task.
-    autoStart: bool = true,
-};
+/// 0 workers => auto (CPU count clamped 1..16).
+const ConfigSchema = z.objectOf(.{
+    .workers = z.withDefault(z.integer(u16, .{}), 0),
+    .queueCapacity = z.withDefault(z.positiveInt(u32, .{}), 1024),
+    .autoStart = z.withDefault(z.boolean(.{}), true),
+}, .{});
+pub const Config = ConfigSchema.Value;
 
 pub const Stats = struct {
     submitted: std.atomic.Value(usize) = .init(0),
@@ -64,7 +64,11 @@ pub const Pool = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, cfg: Config) !Pool {
-        const cap: usize = @max(1, @as(usize, cfg.queueCapacity));
+        var scratch: [4096]u8 = undefined;
+        const issue = z.checkFirst(ConfigSchema, cfg, &scratch, .{}) catch
+            return error.InvalidConfig;
+        if (issue != null) return error.InvalidConfig;
+        const cap: usize = @as(usize, cfg.queueCapacity);
         var n: usize = cfg.workers;
         if (n == 0) {
             n = std.Thread.getCpuCount() catch 4;

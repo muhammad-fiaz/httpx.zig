@@ -8,15 +8,15 @@ The DNS subsystem in HTTPX provides high-level client resolution methods, struct
 
 ```text
                  httpx.Client
-                      │
-          ┌───────────┴───────────┐
-          │                       │
+                      |
+          +-----------+-----------+
+          |                       |
       Normal API            Advanced API
-          │                       │
+          |                       |
     client.resolve()      httpx.net.resolve.Resolver
-          │               httpx.net.dns.Cache
-          └───────────┬───────────┘
-                      │
+          |               httpx.net.dns.Cache
+          +-----------+-----------+
+                      |
               Canonical DNS
                 Subsystem
 ```

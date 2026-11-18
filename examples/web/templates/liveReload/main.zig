@@ -17,9 +17,11 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .watch = true,
-        .watchDir = "examples/web/templates/liveReload/templates",
-        .liveReload = true,
+        .liveReload = .{
+            .enabled = true,
+            .watch = true,
+            .watchDir = "examples/web/templates/liveReload/templates",
+        },
         .templates = .{
             .directory = "examples/web/templates/liveReload/templates",
         },
@@ -27,7 +29,7 @@ pub fn main() !void {
     defer server.deinit();
 
     try server.get("/", liveReloadHandler);
-    try server.static("/static", "examples/web/templates/liveReload/static");
+    try server.static(.{ .mount = "/static", .root = "examples/web/templates/liveReload/static" });
 
     const port = server.localPort();
     std.debug.print("Live Reload Server listening on http://127.0.0.1:{d}\n", .{port});

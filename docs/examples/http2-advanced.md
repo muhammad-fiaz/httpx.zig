@@ -45,8 +45,3 @@ Compressed sizes, outbound byte counts, and stream IDs vary by run; header names
 ```bash
 zig build run-http2-multiplex
 ```
-
-## What to Verify
-
-- Handshake synchronizes SETTINGS both ways.
-- Streams multiplex independently without head-of-line blocking.

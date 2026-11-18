@@ -12,10 +12,12 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const z = @import("zigantic");
 const frameMod = @import("frame.zig");
 const qpackMod = @import("qpack.zig");
 const varint = @import("../quic/varint.zig");
 const h3stream = @import("stream.zig");
+const versionInfo = @import("../../common/version.zig");
 
 pub const CONTROL_STREAM_TYPE: u64 = 0x00;
 pub const PUSH_STREAM_TYPE: u64 = 0x01;
@@ -222,13 +224,14 @@ pub fn buildQpackDecoderStreamPrefix(allocator: Allocator) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
-pub const PeerSettings = struct {
-    maxFieldSectionSize: u64 = 16384,
-    qpackMaxTableCapacity: u64 = 0,
-    qpackBlockedStreams: u64 = 0,
-    enableConnectProtocol: u64 = 0,
-    h3Datagram: u64 = 0,
-};
+const PeerSettingsSchema = z.objectOf(.{
+    .maxFieldSectionSize = z.withDefault(z.integer(u64, .{}), 16384),
+    .qpackMaxTableCapacity = z.withDefault(z.integer(u64, .{}), 0),
+    .qpackBlockedStreams = z.withDefault(z.integer(u64, .{}), 0),
+    .enableConnectProtocol = z.withDefault(z.integer(u64, .{}), 0),
+    .h3Datagram = z.withDefault(z.integer(u64, .{}), 0),
+}, .{});
+pub const PeerSettings = PeerSettingsSchema.Value;
 
 /// Canonical settings type (re-exported as `httpx.http3.Settings`).
 pub const Settings = PeerSettings;
@@ -315,7 +318,15 @@ pub const Connection = struct {
         code: frameMod.H3Error,
     };
 
-    pub fn init(allocator: Allocator, role: Role) Connection {
+    /// Connection configuration. One inline `.{}`: `.role` selects the
+    /// initiating or responding side; `.client` is the default.
+    pub const ConfigSchema = z.objectOf(.{
+        .role = z.withDefault(z.enumType(Role, .{}), .client),
+    }, .{});
+    pub const Config = ConfigSchema.Value;
+
+    pub fn init(allocator: Allocator, cfg: Config) Connection {
+        const role = cfg.role;
         const initiatorBit: u64 = if (role == .client) 0 else 1;
         var self = Connection{
             .allocator = allocator,
@@ -1059,7 +1070,7 @@ const ConnRec = struct {
 test "h3conn demuxes uni streams and rejects duplicates" {
     const a = std.testing.allocator;
     var rec = ConnRec{};
-    var conn = Connection.init(a, .server);
+    var conn = Connection.init(a, .{ .role = .server });
     defer conn.deinit();
     conn.cbs = rec.cbs();
 
@@ -1096,7 +1107,7 @@ test "h3conn demuxes uni streams and rejects duplicates" {
 test "h3conn routes bidi request bytes to events" {
     const a = std.testing.allocator;
     var rec = ConnRec{};
-    var conn = Connection.init(a, .server);
+    var conn = Connection.init(a, .{ .role = .server });
     defer conn.deinit();
     conn.cbs = rec.cbs();
 
@@ -1122,7 +1133,7 @@ test "h3conn routes bidi request bytes to events" {
 test "h3conn send path offsets prefixes and goaway gating" {
     const a = std.testing.allocator;
     var rec = ConnRec{};
-    var conn = Connection.init(a, .client);
+    var conn = Connection.init(a, .{ .role = .client });
     defer conn.deinit();
     conn.cbs = rec.cbs();
     var mq = MockQuic.init(a);
@@ -1178,7 +1189,7 @@ test "h3conn send path offsets prefixes and goaway gating" {
 test "h3conn reset sends offset and drops the stream" {
     const a = std.testing.allocator;
     var rec = ConnRec{};
-    var conn = Connection.init(a, .client);
+    var conn = Connection.init(a, .{ .role = .client });
     defer conn.deinit();
     conn.cbs = rec.cbs();
     var mq = MockQuic.init(a);
@@ -1204,7 +1215,7 @@ test "h3conn reset sends offset and drops the stream" {
 test "h3conn decoder acks drain concatenated" {
     const a = std.testing.allocator;
     var rec = ConnRec{};
-    var conn = Connection.init(a, .server);
+    var conn = Connection.init(a, .{ .role = .server });
     defer conn.deinit();
     conn.cbs = rec.cbs();
     conn.localSettings.qpackMaxTableCapacity = 4096;
@@ -1286,7 +1297,7 @@ test "h3conn decoder acks drain concatenated" {
 test "h3conn blocked streams retry together" {
     const a = std.testing.allocator;
     var rec = ConnRec{};
-    var conn = Connection.init(a, .server);
+    var conn = Connection.init(a, .{ .role = .server });
     defer conn.deinit();
     conn.cbs = rec.cbs();
     conn.localSettings.qpackMaxTableCapacity = 4096;
@@ -1335,7 +1346,7 @@ test "h3conn blocked streams retry together" {
 
 test "h3conn enforces the advertised qpack blocked stream limit" {
     const a = std.testing.allocator;
-    var conn = Connection.init(a, .server);
+    var conn = Connection.init(a, .{ .role = .server });
     defer conn.deinit();
     conn.localSettings.qpackMaxTableCapacity = 4096;
     conn.localSettings.qpackBlockedStreams = 1;
@@ -1375,7 +1386,7 @@ test "h3conn enforces the advertised qpack blocked stream limit" {
 
 test "h3conn closing a critical stream is fatal" {
     const a = std.testing.allocator;
-    var conn = Connection.init(a, .server);
+    var conn = Connection.init(a, .{ .role = .server });
     defer conn.deinit();
     const ctrl = try conn.buildControlStream();
     defer a.free(ctrl);
@@ -1399,7 +1410,7 @@ test "settings frame structure" {
 
 test "connection deinit releases qpack dynamic tables" {
     const a = std.testing.allocator;
-    var c = Connection.init(a, .client);
+    var c = Connection.init(a, .{ .role = .client });
     c.qenc.setMaxTableCapacity(256);
     c.qdec.setMaxTableCapacity(256);
     _ = try c.qenc.dyn.?.insert(a, "x-test", "encoder");
@@ -1409,7 +1420,7 @@ test "connection deinit releases qpack dynamic tables" {
 
 test "qpack capacity changes release the previous table" {
     const a = std.testing.allocator;
-    var c = Connection.init(a, .client);
+    var c = Connection.init(a, .{ .role = .client });
     c.qenc.setMaxTableCapacity(256);
     c.qdec.setMaxTableCapacity(256);
     _ = try c.qenc.dyn.?.insert(a, "x-old", "encoder");
@@ -1459,7 +1470,7 @@ test "request stream builds decodable request headers" {
     var qenc = qpackMod.Encoder.init(a);
     defer qenc.deinit();
     var rs = RequestStream{ .id = 0, .allocator = a, .qpack = &qenc };
-    const headers = [_]qpackMod.FieldLine{.{ .name = "user-agent", .value = "httpx" }};
+    const headers = [_]qpackMod.FieldLine{.{ .name = "user-agent", .value = "httpx/" ++ versionInfo.defaultInfo.version }};
     const encoded = try rs.buildRequestHeaders("GET", "https", "example.test", "/", &headers);
     defer a.free(encoded);
 
@@ -1497,7 +1508,7 @@ test "request stream omits scheme and path for CONNECT" {
 
 test "connection builds and processes settings" {
     const a = std.testing.allocator;
-    var conn = Connection.init(a, .client);
+    var conn = Connection.init(a, .{ .role = .client });
     defer conn.deinit();
 
     // Build control stream
@@ -1519,7 +1530,7 @@ test "connection builds and processes settings" {
 
 test "http3 rejects duplicate and forbidden settings" {
     const a = std.testing.allocator;
-    var duplicate = Connection.init(a, .client);
+    var duplicate = Connection.init(a, .{ .role = .client });
     defer duplicate.deinit();
     const dup = [_]frameMod.SettingEntry{
         .{ .id = 0x6, .value = 8192 },
@@ -1527,7 +1538,7 @@ test "http3 rejects duplicate and forbidden settings" {
     };
     try std.testing.expectError(Error.InvalidSettings, duplicate.processPeerSettings(&dup));
 
-    var forbidden = Connection.init(a, .client);
+    var forbidden = Connection.init(a, .{ .role = .client });
     defer forbidden.deinit();
     const enablePush = [_]frameMod.SettingEntry{.{ .id = 0x2, .value = 0 }};
     try std.testing.expectError(Error.InvalidSettings, forbidden.processPeerSettings(&enablePush));
@@ -1535,7 +1546,7 @@ test "http3 rejects duplicate and forbidden settings" {
 
 test "http3 control stream rejects request frames and accepts settings" {
     const a = std.testing.allocator;
-    var c = Connection.init(a, .server);
+    var c = Connection.init(a, .{ .role = .server });
     defer c.deinit();
     try std.testing.expectError(Error.InvalidSettings, c.processControlFrame(0x0, ""));
 
@@ -1556,7 +1567,7 @@ test "http3 goaway validates role and client stream parity" {
 
     var vb: [8]u8 = undefined;
 
-    var client = Connection.init(a, .client);
+    var client = Connection.init(a, .{ .role = .client });
     defer client.deinit();
     try client.processControlFrame(0x4, encoded);
     const bad = try varint.encode(&vb, 1);
@@ -1568,7 +1579,7 @@ test "http3 goaway validates role and client stream parity" {
     const regress = try varint.encode(&vb, 4);
     try std.testing.expectError(Error.ProtocolViolation, client.processControlFrame(0x7, vb[0..regress]));
 
-    var server = Connection.init(a, .server);
+    var server = Connection.init(a, .{ .role = .server });
     defer server.deinit();
     try server.processControlFrame(0x4, encoded);
     // A client GOAWAY carries a Push ID, not a stream ID; any varint is
@@ -1588,7 +1599,7 @@ test "http3 sent and received goaway identifiers are independent" {
     const encoded = try frameMod.buildSettingsPayload(a, &entries);
     defer a.free(encoded);
 
-    var client = Connection.init(a, .client);
+    var client = Connection.init(a, .{ .role = .client });
     defer client.deinit();
     try client.processControlFrame(0x4, encoded);
     var vb: [8]u8 = undefined;
@@ -1608,7 +1619,7 @@ test "http3 sent and received goaway identifiers are independent" {
 
 test "http3 discarding a request stream releases its state" {
     const a = std.testing.allocator;
-    var conn = Connection.init(a, .client);
+    var conn = Connection.init(a, .{ .role = .client });
     defer conn.deinit();
     const sid = try conn.openRequestStream();
     try std.testing.expect(conn.streams.contains(sid));
@@ -1622,7 +1633,7 @@ test "http3 client rejects server-only control frames" {
     const encoded = try frameMod.buildSettingsPayload(a, &entries);
     defer a.free(encoded);
 
-    var c = Connection.init(a, .client);
+    var c = Connection.init(a, .{ .role = .client });
     defer c.deinit();
     try c.processControlFrame(0x4, encoded);
     var vb: [8]u8 = undefined;
@@ -1633,7 +1644,7 @@ test "http3 client rejects server-only control frames" {
 
 test "connection allocates stream IDs" {
     const a = std.testing.allocator;
-    var conn = Connection.init(a, .client);
+    var conn = Connection.init(a, .{ .role = .client });
     defer conn.deinit();
 
     const s0 = conn.nextBidiStreamId();
@@ -1644,7 +1655,7 @@ test "connection allocates stream IDs" {
     try std.testing.expectEqual(@as(u64, 2), s2);
     try std.testing.expect((s0 & 3) == 0 and (s2 & 3) == 2);
 
-    var server = Connection.init(a, .server);
+    var server = Connection.init(a, .{ .role = .server });
     defer server.deinit();
     try std.testing.expectEqual(@as(u64, 1), server.nextBidiStreamId());
     try std.testing.expectEqual(@as(u64, 3), server.nextUniStreamId());
@@ -1656,7 +1667,7 @@ test "http3 connection rejects second SETTINGS frame with frameUnexpected" {
     const encoded = try frameMod.buildSettingsPayload(a, &entries);
     defer a.free(encoded);
 
-    var c = Connection.init(a, .client);
+    var c = Connection.init(a, .{ .role = .client });
     defer c.deinit();
     try c.processControlFrame(0x4, encoded);
     try std.testing.expectError(Error.ProtocolViolation, c.processControlFrame(0x4, encoded));
@@ -1669,7 +1680,7 @@ test "http3 connection rejects PRIORITY_UPDATE for client role with frameUnexpec
     const encoded = try frameMod.buildSettingsPayload(a, &entries);
     defer a.free(encoded);
 
-    var c = Connection.init(a, .client);
+    var c = Connection.init(a, .{ .role = .client });
     defer c.deinit();
     try c.processControlFrame(0x4, encoded);
 
@@ -1685,7 +1696,7 @@ test "http3 connection server rejects PRIORITY_UPDATE with non-client bidi strea
     const encoded = try frameMod.buildSettingsPayload(a, &entries);
     defer a.free(encoded);
 
-    var s = Connection.init(a, .server);
+    var s = Connection.init(a, .{ .role = .server });
     defer s.deinit();
     try s.processControlFrame(0x4, encoded);
 
@@ -1706,7 +1717,7 @@ test "http3 connection server validates MAX_PUSH_ID monotonicity and CANCEL_PUSH
     const encoded = try frameMod.buildSettingsPayload(a, &entries);
     defer a.free(encoded);
 
-    var s = Connection.init(a, .server);
+    var s = Connection.init(a, .{ .role = .server });
     defer s.deinit();
     try s.processControlFrame(0x4, encoded);
 
@@ -1744,7 +1755,7 @@ test "http3 connection server validates MAX_PUSH_ID monotonicity and CANCEL_PUSH
 
 test "http3 request stream buildTrailers encodes valid trailers and rejects pseudos/forbidden" {
     const a = std.testing.allocator;
-    var c = Connection.init(a, .client);
+    var c = Connection.init(a, .{ .role = .client });
     defer c.deinit();
 
     var rs = c.createRequestStream(0);
@@ -1775,7 +1786,7 @@ test "http3 request stream buildTrailers encodes valid trailers and rejects pseu
 
 test "h3conn reset queues QPACK stream cancellation" {
     const a = std.testing.allocator;
-    var conn = Connection.init(a, .client);
+    var conn = Connection.init(a, .{ .role = .client });
     defer conn.deinit();
     const sid = try conn.openRequestStream();
     conn.onQuicReset(sid, 0);

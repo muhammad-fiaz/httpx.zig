@@ -1,19 +1,28 @@
 # UDP Local
 
 Local UDP send/receive round trip over loopback with
-`httpx.udp.UdpSocket`.
+`httpx.udp.Socket`.
 
 ```zig
+//! Local UDP send/receive round trip over loopback with
+//! `httpx.udp.Socket`.
+//!
+//! Run with:
+//!   zig build run-udp-local
+
 const std = @import("std");
 const httpx = @import("httpx");
 
 pub fn main() !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var recvSock = try httpx.udp.UdpSocket.bind(io, 0);
+    var recvSock = try httpx.udp.init(allocator, io, .{});
     defer recvSock.close();
 
-    var sendSock = try httpx.udp.UdpSocket.bind(io, 0);
+    var sendSock = try httpx.udp.init(allocator, io, .{});
     defer sendSock.close();
 
     const recvPort = switch (recvSock.socket.address) {
@@ -42,8 +51,3 @@ The ephemeral loopback ports vary per run; the datagram payload is fixed by the 
 ```bash
 zig build run-udp-local
 ```
-
-## What to Verify
-
-- UDP bind succeeds on the local interface.
-- The datagram is sent and received on loopback.

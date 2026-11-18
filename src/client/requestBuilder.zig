@@ -27,7 +27,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const tcp = @import("../sockets/tcp.zig");
-const mimeMod = @import("../utils/mime.zig");
+const mimeMod = @import("../common/mime.zig");
+const mediaTypeMod = @import("../common/mediaType.zig");
+const headerName = @import("../common/headers.zig").names;
 const uriMod = @import("../common/uri.zig");
 const parseMod = @import("../common/parse.zig");
 const Method = @import("../common/method.zig").Method;
@@ -37,14 +39,27 @@ const writerMod = @import("../protocols/http1/writer.zig");
 const tlsTransport = @import("../protocols/tls/tlsTransport.zig");
 const tlsClientMod = @import("../protocols/tls/tlsClient.zig");
 const http2Transport = @import("../protocols/http2/transport.zig");
-const poolNs = @import("connectionPool.zig");
+const poolNs = @import("pool/connectionPool.zig");
 const Pool = poolNs.Pool;
 const tlsSession = @import("../protocols/tls/tlsSession.zig");
 const clockMod = @import("../common/clock.zig");
+const jsonMod = @import("../common/json.zig");
 const netResolve = @import("../net/resolve.zig");
 const addressMod = @import("../net/address.zig");
 const compression = @import("../compression/codec.zig");
 const dnsCacheNs = @import("../net/dns/dnsCache.zig");
+const z = @import("zigantic");
+
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
+
 pub const HttpVersion = @import("../common/httpVersion.zig").HttpVersion;
 const versionInfo = @import("../common/version.zig");
 const proxyMod = @import("../net/proxy.zig");
@@ -52,9 +67,9 @@ const socks5 = @import("../net/socks5.zig");
 const socks4 = @import("../net/socks4.zig");
 const quicConn = @import("../protocols/quic/connection.zig");
 const quicEp = @import("../protocols/quic/transport.zig");
-const quicHs = @import("../protocols/quic/handshake.zig");
 const h3Transport = @import("../protocols/http3/transport.zig");
 const bodySourceMod = @import("../common/bodySource.zig");
+const headersMod = @import("../common/headers.zig");
 pub const BodySource = bodySourceMod.BodySource;
 pub const SliceReader = bodySourceMod.SliceReader;
 pub const CallbackReader = bodySourceMod.CallbackReader;
@@ -90,8 +105,7 @@ pub fn systemLookupStrings(
 
 /// Parse one cached address string (v4 or v6) into a typed Address.
 pub fn parseAddrString(s: []const u8, port: u16) ?addressMod.Address {
-    var probe = addressMod.Address{ .family = .ip4, .port = 0 };
-    const parsed = probe.parseIp(s) catch return null;
+    const parsed = addressMod.Address.parseIp(s) catch return null;
     var r = parsed;
     r.port = port;
     return r;
@@ -100,37 +114,43 @@ pub fn parseAddrString(s: []const u8, port: u16) ?addressMod.Address {
 /// TLS verification policy for one request.
 /// Secure by construction: HTTPS defaults to system trust verification and
 /// rejects TLS truncation unless the caller explicitly opts in.
-pub const TlsOptions = struct {
-    verify: tlsTransport.VerifyMode = .caBundle,
-    /// CA bundle required when verify == .caBundle.
-    caBundle: ?*std.crypto.Certificate.Bundle = null,
-    /// PEM bundle of extra/custom CAs for the native TLS paths
-    /// (HTTP/2 over TLS). Null means system trust only.
-    caPem: ?[]const u8 = null,
-    /// Client certificate chain (PEM) presented when the server requests
-    /// mutual TLS. Requires `clientKeyPem`; only the native TLS paths
-    /// can present it.
-    clientCertPem: ?[]const u8 = null,
-    /// Client private key (PEM, P-256 ECDSA) for `clientCertPem`.
-    clientKeyPem: ?[]const u8 = null,
-    /// Only safe when the caller validates completeness via framing.
-    allowTruncation: bool = false,
-};
+pub const TlsOptionsSchema = z.objectOf(.{
+    .verify = z.withDefault(z.enumType(tlsTransport.VerifyMode, .{}), .caBundle),
+    .caBundle = z.optional(typedSchema(*std.crypto.Certificate.Bundle)),
+    .caPem = z.optional(z.string(.{ .min = 1 })),
+    .clientCertPem = z.optional(z.string(.{ .min = 1 })),
+    .clientKeyPem = z.optional(z.string(.{ .min = 1 })),
+    .allowTruncation = z.withDefault(z.boolean(.{}), false),
+}, .{});
+pub const TlsOptions = TlsOptionsSchema.Value;
 
 /// Early data (0-RTT) options for TLS 1.3 / QUIC / HTTP/3.
-pub const EarlyDataOptions = struct {
-    /// Explicit opt-in required. Default is false (safe by default).
-    enabled: bool = false,
-    /// Whether to allow replay-sensitive methods (POST, PUT, DELETE, PATCH).
-    /// Default is false (only GET, HEAD, OPTIONS are eligible).
-    allowUnsafeMethods: bool = false,
+pub const EarlyDataOptionsSchema = z.objectOf(.{
+    .enabled = z.withDefault(z.boolean(.{}), false),
+    .allowUnsafeMethods = z.withDefault(z.boolean(.{}), false),
+}, .{});
+pub const EarlyDataOptions = EarlyDataOptionsSchema.Value;
+
+/// A single HTTP header name/value pair.
+pub const HeaderSchema = headersMod.HeaderSchema;
+pub const Header = headersMod.Header;
+
+/// How a `Request` body is interpreted.
+pub const BodyKind = enum {
+    /// No body.
+    none,
+    /// Raw bytes, sent verbatim.
+    raw,
+    /// Bytes already encoded as JSON.
+    json,
+    /// Bytes already encoded as `application/x-www-form-urlencoded`.
+    form,
 };
 
-/// Per-request socket I/O timeout (milliseconds).
-pub const Header = struct { name: []const u8, value: []const u8 };
-
-pub const BodyKind = enum { none, raw, json, form };
-
+/// Low-level single request description used by `httpx.request`.
+///
+/// High-level code normally uses `httpx.Client`, which fills in the pool,
+/// DNS cache, TLS session cache, and defaults before calling the engine.
 pub const Request = struct {
     method: Method = .GET,
     url: []const u8,
@@ -138,6 +158,9 @@ pub const Request = struct {
     headers: []const Header = &.{},
     /// Appended to the URL path as ?k=v&... (values are percent-encoded).
     query: []const Header = &.{},
+    /// Explicit Content-Type header value (e.g. "application/json", "text/plain").
+    contentType: ?[]const u8 = null,
+    /// How `body` is interpreted when no `bodySource` is set.
     bodyKind: BodyKind = .none,
     /// Raw bytes for any kind; for `form` this is "k=v&k2=v2" already encoded.
     body: []const u8 = "",
@@ -173,24 +196,43 @@ pub const Request = struct {
     maxResponseSize: ?usize = null,
     /// Optional proxy URL (e.g. "socks5://127.0.0.1:1080", "socks5h://127.0.0.1:1080", "http://127.0.0.1:8080").
     proxy: ?[]const u8 = null,
+    /// QUIC transport parameters for HTTP/3 (set from the client-wide
+    /// `protocols.http3.quic` options).
+    quic: quicConn.Config = .{},
+    /// Optional cooperative cancellation flag. Checked periodically during connection,
+    /// writing, reading, and streaming loops.
+    cancel: ?*const std.atomic.Value(bool) = null,
 
+    /// Convenience constructor for a `POST` with a raw text body.
     pub fn text(url: []const u8, bodyText: []const u8) Request {
         return .{ .url = url, .method = .POST, .bodyKind = .raw, .body = bodyText };
     }
 
+    /// Convenience constructor for a request with a streaming body source.
     pub fn stream(url: []const u8, method: Method, source: BodySource) Request {
         return .{ .url = url, .method = method, .bodySource = source };
     }
 };
 
+/// Complete buffered response owned by the client allocator.
 pub const Response = struct {
     allocator: Allocator,
     status: u16,
     version: HttpVersion = .http11,
     headers: []Header,
     body: []u8,
+    /// Lazily created arena for values returned by `json`. Released by
+    /// `deinit`; never shared with another response.
+    jsonArena: ?*std.heap.ArenaAllocator = null,
 
+    /// Releases the headers, body, and any decoded JSON values owned by this
+    /// response.
     pub fn deinit(self: *Response) void {
+        if (self.jsonArena) |arena| {
+            arena.deinit();
+            self.allocator.destroy(arena);
+            self.jsonArena = null;
+        }
         for (self.headers) |h| {
             self.allocator.free(h.name);
             self.allocator.free(h.value);
@@ -199,6 +241,7 @@ pub const Response = struct {
         self.allocator.free(self.body);
     }
 
+    /// Case-insensitive header lookup; returns the first match.
     pub fn header(self: *const Response, name: []const u8) ?[]const u8 {
         for (self.headers) |h| {
             if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
@@ -206,9 +249,30 @@ pub const Response = struct {
         return null;
     }
 
-    /// Parses the body as JSON into `T` (ignores unknown fields).
+    fn jsonArenaAllocator(self: *const Response) !Allocator {
+        const target = @constCast(self);
+        if (target.jsonArena == null) {
+            const arena = try self.allocator.create(std.heap.ArenaAllocator);
+            arena.* = std.heap.ArenaAllocator.init(self.allocator);
+            target.jsonArena = arena;
+        }
+        return target.jsonArena.?.allocator();
+    }
+
+    /// Parses the body as JSON into `T` using the exact Zig field names.
+    /// Quoted identifiers such as `@"user-name"` map directly to the wire keys,
+    /// and unknown object keys are ignored.
+    ///
+    /// The decoded value is allocated from a lazily created arena owned by the
+    /// response and is valid until `deinit`. Use [`jsonAlloc`] when the value
+    /// must outlive the response or use a caller-owned allocator.
     pub fn json(self: *const Response, comptime T: type) !T {
-        return std.json.parseFromSliceLeaky(T, self.allocator, self.body, .{ .ignore_unknown_fields = true });
+        return jsonMod.decode(T, try self.jsonArenaAllocator(), self.body);
+    }
+
+    /// Parses the body as a dynamic JSON value owned by the response arena.
+    pub fn jsonValue(self: *const Response) !jsonMod.Value {
+        return jsonMod.parse(try self.jsonArenaAllocator(), self.body);
     }
 
     /// Parses the body as JSON with an explicit allocator and returns `std.json.Parsed(T)` with managed lifecycle.
@@ -256,21 +320,6 @@ pub const Response = struct {
         return self.header("content-type") orelse "";
     }
 
-    /// Parses HTML body into a Document using the response's internal allocator.
-    pub fn html(self: *const Response) !@import("../parsing/document.zig").Document {
-        return @import("../parsing/document.zig").Document.parseHtml(self.allocator, self.body);
-    }
-
-    /// Parses XML body into a Document using the response's internal allocator.
-    pub fn xml(self: *const Response) !@import("../parsing/document.zig").Document {
-        return @import("../parsing/document.zig").Document.parseXml(self.allocator, self.body);
-    }
-
-    /// Parses auto-detected document from response body and headers.
-    pub fn document(self: *const Response) !@import("../parsing/document.zig").Document {
-        return @import("../parsing/document.zig").Document.parse(self.allocator, self.header("content-type"), self.body);
-    }
-
     /// Returns body as bytes.
     pub fn bytes(self: *const Response) []const u8 {
         return self.body;
@@ -290,6 +339,7 @@ pub const ResponseStream = struct {
     headers: []Header,
     body: BodySource,
 
+    /// Closes the body source and releases the response headers.
     pub fn deinit(self: *ResponseStream) void {
         self.body.close();
         for (self.headers) |h| {
@@ -299,6 +349,7 @@ pub const ResponseStream = struct {
         self.allocator.free(self.headers);
     }
 
+    /// Case-insensitive header lookup; returns the first match.
     pub fn header(self: *const ResponseStream, name: []const u8) ?[]const u8 {
         for (self.headers) |h| {
             if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
@@ -312,24 +363,41 @@ pub const ResponseStream = struct {
     }
 
     /// Bounded helper to consume remainder of stream into newly allocated slice.
-    pub fn readAllAlloc(self: *ResponseStream, a: Allocator, maxBytes: usize) ![]u8 {
+    pub fn readAllAlloc(self: *ResponseStream, maxBytes: usize) ![]u8 {
         var list = std.ArrayList(u8).empty;
-        errdefer list.deinit(a);
+        errdefer list.deinit(self.allocator);
         var chunkBuf: [16 * 1024]u8 = undefined;
         while (true) {
             const n = try self.body.read(&chunkBuf);
             if (n == 0) break;
             if (n > maxBytes -| list.items.len) return Error.ResponseTooLarge;
-            try list.appendSlice(a, chunkBuf[0..n]);
+            try list.appendSlice(self.allocator, chunkBuf[0..n]);
         }
-        return list.toOwnedSlice(a);
+        return list.toOwnedSlice(self.allocator);
     }
 
     /// Retrieve trailers if available after body EOF.
-    pub fn trailers(self: *ResponseStream, a: Allocator) anyerror!?[]const Header {
-        return self.body.getTrailers(a);
+    /// The returned headers are allocated by this stream's allocator.
+    pub fn trailers(self: *ResponseStream) anyerror!?[]const Header {
+        return self.body.getTrailers(self.allocator);
     }
 };
+
+test "response stream reuses its owning allocator for bounded reads" {
+    const allocator = std.testing.allocator;
+    var sourceReader = SliceReader.init("stream body");
+    var stream = ResponseStream{
+        .allocator = allocator,
+        .status = 200,
+        .headers = &.{},
+        .body = sourceReader.source(),
+    };
+    defer stream.deinit();
+
+    const body = try stream.readAllAlloc(32);
+    defer allocator.free(body);
+    try std.testing.expectEqualStrings("stream body", body);
+}
 
 /// Helper: convert struct fields to Header array (for headers/query).
 pub fn headersFromStruct(allocator: Allocator, value: anytype) ![]Header {
@@ -363,11 +431,11 @@ pub fn headersFromStruct(allocator: Allocator, value: anytype) ![]Header {
     return list.toOwnedSlice(allocator);
 }
 
-/// Helper: stringify any struct/value to JSON bytes.
+/// Helper: stringify any struct/value to JSON bytes using exact field names.
 pub fn jsonBody(allocator: Allocator, value: anytype) ![]u8 {
     const T = @TypeOf(value);
     if (T == []const u8 or T == []u8) return allocator.dupe(u8, value);
-    return std.json.Stringify.valueAlloc(allocator, value, .{});
+    return jsonMod.encodeAny(allocator, value);
 }
 
 pub const Error = error{
@@ -386,16 +454,21 @@ pub const Error = error{
     /// Explicit h2 requested but the server did not select it via ALPN,
     /// or no ALPN agreement was reached. Never silently downgraded.
     AlpnNegotiationFailed,
-    /// Retained for API stability; no longer returned now that the live
-    /// QUIC transport backs `.http3` (out-of-scope conditions use the
-    /// precise errors above instead).
-    Http3NotImplemented,
     /// HTTP/3 over a proxy: CONNECT-UDP tunneling is not implemented.
     Http3ProxyUnsupported,
     /// HTTP/3 operation exceeded its deadline (handshake or exchange).
     Timeout,
+    /// Operation cancelled via cooperative cancellation flag.
+    Cancelled,
     /// HTTP/2 framing/HPACK violation from the peer.
     ProtocolViolation,
+    InvalidRequestBody,
+    /// The client configuration failed schema validation.
+    InvalidConfig,
+    /// A `.json` payload could not be encoded by its schema.
+    InvalidJsonBody,
+    /// GraphQL variables were not valid JSON.
+    InvalidGraphQLVariables,
     ConnectFailed,
     /// HTTP proxy replied 407: CONNECT credentials missing or rejected.
     ProxyAuthRequired,
@@ -487,7 +560,7 @@ fn headerLinesWithAuth(a: Allocator, hdrs: []const Header, contentType: ?[]const
         try lines.append(a, l);
     }
     if (!hasUserAgent) {
-        const l = try std.fmt.allocPrint(a, "User-Agent: {s}", .{versionInfo.userAgent});
+        const l = try std.fmt.allocPrint(a, "User-Agent: httpx/{s}", .{versionInfo.defaultInfo.version});
         try lines.append(a, l);
     }
     if (contentType) |ct| if (!hasContentType) {
@@ -650,10 +723,9 @@ fn h3DoRequest(
 
     // Resolve: literal first, then single-flight cache, then OS resolver
     // (IPv4 preferred, mirroring the TCP happy-eyeballs-lite order).
-    var probe = addressMod.Address{ .family = .ip4, .port = 0 };
     var destAddr: addressMod.Address = undefined;
     var haveDest = false;
-    if (probe.parseIp(host)) |direct| {
+    if (addressMod.Address.parseIp(host)) |direct| {
         destAddr = direct;
         destAddr.port = port;
         haveDest = true;
@@ -741,6 +813,7 @@ fn h3DoRequest(
         .earlyData = canSendEarlyData,
         .sessionOut = &capturedSession,
         .timeoutMs = deadlineMs,
+        .quic = req.quic,
     }) catch |e| switch (e) {
         error.OutOfMemory => return Error.OutOfMemory,
         error.Timeout => return Error.Timeout,
@@ -767,20 +840,6 @@ fn h3DoRequest(
     }
 
     return resp;
-}
-
-/// Maps QUIC handshake failures onto the request error set, preserving
-/// the driver's precise cause (ALPN vs certificate vs generic).
-fn mapQuicHandshakeError(err: anyerror, detail: quicHs.Detail) Error {
-    return switch (err) {
-        error.OutOfMemory => Error.OutOfMemory,
-        error.HandshakeTimeout => Error.Timeout,
-        else => switch (detail) {
-            .alpnMismatch => Error.AlpnNegotiationFailed,
-            .certFailed => Error.TlsCertificateNotVerified,
-            else => Error.TlsHandshakeFailed,
-        },
-    };
 }
 
 /// One HTTP/2 request/response exchange over an established H2 session
@@ -915,6 +974,7 @@ const Http1StreamState = struct {
     transport: Transport,
     tlsBox: ?*tlsClientMod.Client.Connection,
     pool: ?*Pool,
+    cancel: ?*const std.atomic.Value(bool) = null,
     host: [256]u8,
     hostLen: usize,
     port: u16,
@@ -947,6 +1007,9 @@ const Http1StreamState = struct {
 
     fn read(ctx: *anyopaque, buf: []u8) anyerror!usize {
         const self: *Http1StreamState = @ptrCast(@alignCast(ctx));
+        if (self.cancel) |cf| {
+            if (cf.load(.acquire)) return Error.Cancelled;
+        }
         if (self.closed or self.done) return 0;
         if (buf.len == 0) return 0;
 
@@ -1151,7 +1214,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
             }
         }
 
-        var port = u.effectivePort();
+        var port = uriMod.effectivePort(&u);
         if (port == 0) return Error.InvalidUrl;
         // DNS names are limited to 253 octets (255 including a trailing dot)
         // and the pool/host scratch buffers below are sized for that bound.
@@ -1160,14 +1223,14 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
 
         // Worst case: 255-byte host + "[]" + ":" + five port digits.
         var authBuf: [320]u8 = undefined;
-        const authorityStr = u.authority(&authBuf) catch return Error.InvalidUrl;
+        const authorityStr = uriMod.authority(&u, &authBuf) catch return Error.InvalidUrl;
 
         const target = try buildTarget(a, u.path, u.query, req.query);
         defer a.free(target);
 
-        const ct: ?[]const u8 = if (bodyStripped) null else switch (req.bodyKind) {
-            .json => "application/json",
-            .form => "application/x-www-form-urlencoded",
+        const ct: ?[]const u8 = if (bodyStripped) null else if (req.contentType) |c| c else switch (req.bodyKind) {
+            .json => mediaTypeMod.applicationJson,
+            .form => mediaTypeMod.formUrlEncoded,
             else => null,
         };
         const hasBody = !bodyStripped and (req.body.len > 0 or switch (req.bodyKind) {
@@ -1209,7 +1272,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
             };
         }
         if (hasStreamCl and clHdrVal != null) {
-            hdrPairs[extra.len] = .{ .name = "content-length", .value = clHdrVal.? };
+            hdrPairs[extra.len] = .{ .name = "Content-Length", .value = clHdrVal.? };
         }
 
         const raw = writerMod.buildRequest(
@@ -1296,6 +1359,10 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
             }
         }
 
+        if (req.cancel) |cf| {
+            if (cf.load(.acquire)) return Error.Cancelled;
+        }
+
         // Numeric IPs connect directly; hostnames resolve via the OS
         // (getaddrinfo) and each returned address is tried in order.
         var resolved: ?[]addressMod.Address = null;
@@ -1309,8 +1376,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                         var targetHost = hostOnly;
                         var localResolvedBuf: [64]u8 = undefined;
                         if (!pInfo.remoteDns) {
-                            var probe = addressMod.Address{ .family = .ip4, .port = 0 };
-                            if (probe.parseIp(hostOnly)) |_| {
+                            if (addressMod.Address.parseIp(hostOnly)) |_| {
                                 targetHost = hostOnly;
                             } else |_| {
                                 const addrs = (netResolve.Resolver.init(a, io)).lookup(hostOnly, .{ .port = port }) catch return Error.ConnectFailed;
@@ -1345,8 +1411,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                         var targetHost = hostOnly;
                         var localResolvedBuf: [64]u8 = undefined;
                         if (!pInfo.remoteDns) {
-                            var probe = addressMod.Address{ .family = .ip4, .port = 0 };
-                            if (probe.parseIp(hostOnly)) |_| {
+                            if (addressMod.Address.parseIp(hostOnly)) |_| {
                                 targetHost = hostOnly;
                             } else |_| {
                                 const addrs = (netResolve.Resolver.init(a, io)).lookup(hostOnly, .{ .port = port }) catch return Error.ConnectFailed;
@@ -1381,8 +1446,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                     },
                     .httpConnect => {
                         var s = if (isTls) blkS: {
-                            var probe = addressMod.Address{ .family = .ip4, .port = 0 };
-                            if (probe.parseIp(pInfo.host)) |parsed| {
+                            if (addressMod.Address.parseIp(pInfo.host)) |parsed| {
                                 var addr = parsed;
                                 addr.port = pInfo.port;
                                 break :blkS tcp.connectAddressStream(io, &addr) catch return Error.ConnectFailed;
@@ -1392,8 +1456,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                             if (addrs.len == 0) return Error.ConnectFailed;
                             break :blkS tcp.connectAddressStream(io, &addrs[0]) catch return Error.ConnectFailed;
                         } else blkS: {
-                            var probe = addressMod.Address{ .family = .ip4, .port = 0 };
-                            if (probe.parseIp(pInfo.host)) |parsed| {
+                            if (addressMod.Address.parseIp(pInfo.host)) |parsed| {
                                 var addr = parsed;
                                 addr.port = pInfo.port;
                                 break :blkS tcp.connectAddress(io, &addr) catch return Error.ConnectFailed;
@@ -1456,14 +1519,13 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                     if (p.acquire(hostCopy[0..hl], port)) |s| break :blk s;
                 }
             }
-            var probe = addressMod.Address{ .family = .ip4, .port = 0 };
-            if (probe.parseIp(hostOnly)) |direct| {
+            if (addressMod.Address.parseIp(hostOnly)) |direct| {
                 var da = direct;
                 da.port = port;
                 // For TLS, use the AFD-backed stream path (required for
                 // std.Io.net TLS initialization). For plain HTTP on Windows,
                 // use the direct winsock path (avoids netConnectIpWindows
-                // STATUS_CONNECTION_REFUSED → unexpectedStatus() stderr noise
+                // STATUS_CONNECTION_REFUSED ’ unexpectedStatus() stderr noise
                 // that corrupts the --listen=- test runner protocol).
                 if (isTls) {
                     break :blk tcp.connectAddressStream(io, &da) catch return Error.ConnectFailed;
@@ -1713,6 +1775,9 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                 var chunkBuf: [16 * 1024]u8 = undefined;
                 var totalWritten: u64 = 0;
                 while (true) {
+                    if (req.cancel) |cf| {
+                        if (cf.load(.acquire)) return Error.Cancelled;
+                    }
                     const n = bs.read(&chunkBuf) catch return Error.WriteFailed;
                     if (n == 0) break;
                     totalWritten += n;
@@ -1724,6 +1789,9 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                 var chunkBuf: [16 * 1024]u8 = undefined;
                 var hexBuf: [32]u8 = undefined;
                 while (true) {
+                    if (req.cancel) |cf| {
+                        if (cf.load(.acquire)) return Error.Cancelled;
+                    }
                     const n = bs.read(&chunkBuf) catch return Error.WriteFailed;
                     if (n == 0) break;
                     const hex = std.fmt.bufPrint(&hexBuf, "{x}\r\n", .{n}) catch unreachable;
@@ -1751,7 +1819,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
 
         if (!streaming) {
             const responseLimit = @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize);
-            const full = try readFullResponseWithOptions(a, transport, method == .HEAD, .{ .allowLfLineEndings = req.allowLfLineEndings }, responseLimit);
+            const full = try readFullResponseWithOptions(a, transport, method == .HEAD, .{ .allowLfLineEndings = req.allowLfLineEndings }, responseLimit, req.cancel);
             var resp = full.resp;
 
             if (try applyRedirect(a, req, &u, &resp, &redirectState)) continue;
@@ -1779,6 +1847,9 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                                 }
                             }
                         }
+                        if (req.cancel) |cf| {
+                            if (cf.load(.acquire)) return Error.Cancelled;
+                        }
                         const n = transport.read(readBuf[0..]) catch return Error.ReadFailed;
                         if (n == 0) return Error.MalformedResponse;
                         acc.appendSlice(a, readBuf[0..n]) catch return Error.OutOfMemory;
@@ -1795,8 +1866,8 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                     const interim = parserMod.parseHeaderBlock(acc.items[0..headEnd], respHead.headEnd, interimFields[0..], optsParser) catch
                         return Error.MalformedResponse;
                     for (interimFields[0..interim.count]) |field| {
-                        if (std.ascii.eqlIgnoreCase(field.name, "Content-Length") or
-                            std.ascii.eqlIgnoreCase(field.name, "Transfer-Encoding")) return Error.MalformedResponse;
+                        if (std.ascii.eqlIgnoreCase(field.name, headerName.contentLength) or
+                            std.ascii.eqlIgnoreCase(field.name, headerName.transferEncoding)) return Error.MalformedResponse;
                     }
                     interimCount += 1;
                     if (interimCount > 16) return Error.MalformedResponse;
@@ -1886,6 +1957,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                 .transport = transport,
                 .tlsBox = tlsBox,
                 .pool = if (req.proxy == null) req.pool else null,
+                .cancel = req.cancel,
                 .host = hostCopy,
                 .hostLen = hl,
                 .port = port,
@@ -1898,7 +1970,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                 .remainingCl = if (framing.framing == .contentLength) framing.length else 0,
                 .maxBodySize = streamResponseLimit,
                 .leftover = .empty,
-                .chunkDecoder = parserMod.ChunkedDecoder.initWithOptions(.{ .allowLfLineEndings = req.allowLfLineEndings }),
+                .chunkDecoder = parserMod.ChunkedDecoder.init(.{ .allowLfLineEndings = req.allowLfLineEndings }),
                 .wire = .empty,
                 .decodedBuf = .empty,
             };
@@ -1942,7 +2014,7 @@ fn applyRedirect(
     state: *RedirectState,
 ) Error!bool {
     if (!req.followRedirects or !isRedirect(resp.status)) return false;
-    const loc = resp.header("Location") orelse return false;
+    const loc = resp.header(headerName.location) orelse return false;
     if (state.redirects.* >= req.maxRedirects) {
         resp.deinit();
         return Error.TooManyRedirects;
@@ -2220,7 +2292,7 @@ test "client restates every repeated content encoding after decoding" {
 
     const headers = try ownedTestHeaders(a, &.{
         .{ "content-encoding", "gzip" },
-        .{ "Content-Encoding", "br" },
+        .{ headerName.contentEncoding, "br" },
         .{ "content-length", "999" },
         .{ "CONTENT-LENGTH", "1000" },
     });
@@ -2247,28 +2319,35 @@ test "client compression advertisement respects explicit override" {
         a.free(defaults);
     }
     const userAgentPrefix = "User-Agent: ";
-    try std.testing.expectEqualStrings(versionInfo.userAgent, defaults[0][userAgentPrefix.len..]);
+    try std.testing.expectEqualStrings("httpx/" ++ versionInfo.defaultInfo.version, defaults[0][userAgentPrefix.len..]);
     const aePrefix = "Accept-Encoding: ";
     try std.testing.expectEqualStrings(aePrefix, defaults[1][0..aePrefix.len]);
     try std.testing.expectEqualStrings(compression.acceptEncodingValue(), defaults[1][aePrefix.len..]);
 
-    const custom = try headerLines(a, &.{.{ .name = "Accept-Encoding", .value = "identity" }}, null);
+    const custom = try headerLines(a, &.{.{ .name = headerName.acceptEncoding, .value = "identity" }}, null);
     defer {
         for (custom) |line| a.free(line);
         a.free(custom);
     }
     try std.testing.expectEqual(@as(usize, 2), custom.len);
     try std.testing.expectEqualStrings("Accept-Encoding: identity", custom[0]);
-    try std.testing.expectEqualStrings(versionInfo.userAgent, custom[1][userAgentPrefix.len..]);
+    try std.testing.expectEqualStrings("httpx/" ++ versionInfo.defaultInfo.version, custom[1][userAgentPrefix.len..]);
 }
 
 /// `reusable` is true ONLY when the body was framed and fully consumed —
 /// the precondition for parking a connection back into the keep-alive pool.
 fn readFullResponse(a: Allocator, conn: anytype, isHead: bool) Error!FullResponse {
-    return readFullResponseWithOptions(a, conn, isHead, .{}, maxResponseBodySize);
+    return readFullResponseWithOptions(a, conn, isHead, .{}, maxResponseBodySize, null);
 }
 
-fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: parserMod.Options, maxSize: usize) Error!FullResponse {
+fn readFullResponseWithOptions(
+    a: Allocator,
+    conn: anytype,
+    isHead: bool,
+    opts: parserMod.Options,
+    maxSize: usize,
+    cancel: ?*const std.atomic.Value(bool),
+) Error!FullResponse {
     var acc: std.ArrayList(u8) = .empty;
     defer acc.deinit(a);
     var buf: [8192]u8 = undefined;
@@ -2291,6 +2370,9 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
                         }
                     }
                 }
+                if (cancel) |cf| {
+                    if (cf.load(.acquire)) return Error.Cancelled;
+                }
                 const n = conn.read(buf[0..]) catch return Error.ReadFailed;
                 if (n == 0) return Error.MalformedResponse;
                 acc.appendSlice(a, buf[0..n]) catch return Error.OutOfMemory;
@@ -2310,8 +2392,8 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
             const interim = parserMod.parseHeaderBlock(acc.items[0..headEnd], respHead.headEnd, interimFields[0..], optsParser) catch
                 return Error.MalformedResponse;
             for (interimFields[0..interim.count]) |field| {
-                if (std.ascii.eqlIgnoreCase(field.name, "Content-Length") or
-                    std.ascii.eqlIgnoreCase(field.name, "Transfer-Encoding")) return Error.MalformedResponse;
+                if (std.ascii.eqlIgnoreCase(field.name, headerName.contentLength) or
+                    std.ascii.eqlIgnoreCase(field.name, headerName.transferEncoding)) return Error.MalformedResponse;
             }
             interimCount += 1;
             if (interimCount > 16) return Error.MalformedResponse;
@@ -2371,7 +2453,7 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
     try body.appendSlice(a, acc.items[headEnd..]);
 
     if (framing.framing == .chunked) {
-        const chunkedBody = try readChunkedResponseBody(a, conn, body.items, buf[0..], maxSize, opts.allowLfLineEndings);
+        const chunkedBody = try readChunkedResponseBody(a, conn, body.items, buf[0..], maxSize, opts.allowLfLineEndings, cancel);
         return .{ .resp = .{
             .allocator = a,
             .status = respHead.statusCode,
@@ -2386,6 +2468,9 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
         const clen = framing.length;
         if (clen > maxSize) return Error.ResponseTooLarge;
         while (body.items.len < clen) {
+            if (cancel) |cf| {
+                if (cf.load(.acquire)) return Error.Cancelled;
+            }
             const n = conn.read(buf[0..]) catch return Error.ReadFailed;
             if (n == 0) break;
             if (n > maxSize -| body.items.len) return Error.ResponseTooLarge;
@@ -2396,6 +2481,9 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
         body.items.len = clen;
     } else {
         while (true) {
+            if (cancel) |cf| {
+                if (cf.load(.acquire)) return Error.Cancelled;
+            }
             const n = conn.read(buf[0..]) catch return Error.ReadFailed;
             if (n == 0) break;
             if (n > maxSize -| body.items.len) return Error.ResponseTooLarge;
@@ -2415,14 +2503,22 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
 
 const ChunkedResponseBody = struct { body: []u8, reusable: bool };
 
-fn readChunkedResponseBody(a: Allocator, conn: anytype, initialWire: []const u8, readBuf: []u8, maxSize: usize, allowLfLineEndings: bool) Error!ChunkedResponseBody {
+fn readChunkedResponseBody(
+    a: Allocator,
+    conn: anytype,
+    initialWire: []const u8,
+    readBuf: []u8,
+    maxSize: usize,
+    allowLfLineEndings: bool,
+    cancel: ?*const std.atomic.Value(bool),
+) Error!ChunkedResponseBody {
     var wire: std.ArrayList(u8) = .empty;
     defer wire.deinit(a);
     wire.appendSlice(a, initialWire) catch return Error.OutOfMemory;
 
     var decoded: std.ArrayList(u8) = .empty;
     errdefer decoded.deinit(a);
-    var decoder = parserMod.ChunkedDecoder.initWithOptions(.{ .allowLfLineEndings = allowLfLineEndings });
+    var decoder = parserMod.ChunkedDecoder.init(.{ .allowLfLineEndings = allowLfLineEndings });
 
     while (true) {
         _ = decoder.decode(wire.items) catch |err| switch (err) {
@@ -2449,6 +2545,9 @@ fn readChunkedResponseBody(a: Allocator, conn: anytype, initialWire: []const u8,
         if (wire.items.len > maxSize - consumedWire) {
             return Error.ResponseTooLarge;
         }
+        if (cancel) |cf| {
+            if (cf.load(.acquire)) return Error.Cancelled;
+        }
         const n = conn.read(readBuf) catch return Error.ReadFailed;
         if (n == 0) return Error.MalformedResponse;
         const remainingCapacity = maxSize - consumedWire - wire.items.len;
@@ -2460,7 +2559,7 @@ fn readChunkedResponseBody(a: Allocator, conn: anytype, initialWire: []const u8,
 fn decodeChunked(a: Allocator, wireIn: []const u8) ![]u8 {
     const wire = try a.dupe(u8, wireIn);
     defer a.free(wire);
-    var decoder = parserMod.ChunkedDecoder.init();
+    var decoder = parserMod.ChunkedDecoder.init(.{});
     _ = try decoder.decode(wire);
     if (!decoder.isDone()) return error.Incomplete;
     return a.dupe(u8, wire[0..decoder.decodedLen]);
@@ -2484,7 +2583,7 @@ test "chunked client response reads trailers incrementally and ignores marker-li
     var conn = MockConn{ .tail = "\r\nNEXT" };
     const wire = "5\r\n0\r\n\r\n\r\n0\r\nX-Checksum: yes\r\n";
     var readBuf: [8]u8 = undefined;
-    const result = try readChunkedResponseBody(a, &conn, wire, &readBuf, maxResponseBodySize, false);
+    const result = try readChunkedResponseBody(a, &conn, wire, &readBuf, maxResponseBodySize, false, null);
     defer a.free(result.body);
     try std.testing.expectEqualStrings("0\r\n\r\n", result.body);
     try std.testing.expectEqual(@as(usize, 1), conn.reads);
@@ -2507,11 +2606,11 @@ test "client chunked response honors strict and lenient LF framing options" {
     var strictConn = MockConn{ .wire = response };
     try std.testing.expectError(
         Error.MalformedResponse,
-        readFullResponseWithOptions(a, &strictConn, false, .{}, maxResponseBodySize),
+        readFullResponseWithOptions(a, &strictConn, false, .{}, maxResponseBodySize, null),
     );
 
     var lenientConn = MockConn{ .wire = response };
-    var full = try readFullResponseWithOptions(a, &lenientConn, false, .{ .allowLfLineEndings = true }, maxResponseBodySize);
+    var full = try readFullResponseWithOptions(a, &lenientConn, false, .{ .allowLfLineEndings = true }, maxResponseBodySize, null);
     defer full.resp.deinit();
     try std.testing.expectEqualStrings("a", full.resp.body);
 }
@@ -2559,7 +2658,7 @@ test "client enforces configured response size before buffering the full body" {
     var conn = MockConn{};
     try std.testing.expectError(
         Error.ResponseTooLarge,
-        readFullResponseWithOptions(a, &conn, false, .{}, 3),
+        readFullResponseWithOptions(a, &conn, false, .{}, 3, null),
     );
 }
 
@@ -2617,7 +2716,7 @@ fn isRedirect(status: u16) bool {
 fn sameOrigin(base: *const uriMod.Uri, target: *const uriMod.Uri) bool {
     return std.ascii.eqlIgnoreCase(base.scheme, target.scheme) and
         std.ascii.eqlIgnoreCase(base.host, target.host) and
-        base.effectivePort() == target.effectivePort();
+        uriMod.effectivePort(base) == uriMod.effectivePort(target);
 }
 
 fn isSecureDowngrade(fromScheme: []const u8, toScheme: []const u8) bool {
@@ -2654,8 +2753,8 @@ fn filterRedirectHeaders(a: Allocator, hdrs: []const Header, stripCredentials: b
             std.ascii.eqlIgnoreCase(h.name, "Cookie") or
             std.ascii.eqlIgnoreCase(h.name, "Proxy-Authorization"))) continue;
         const isContentHeader = h.name.len >= 8 and std.ascii.eqlIgnoreCase(h.name[0..8], "content-");
-        if (stripBody and (isContentHeader or std.ascii.eqlIgnoreCase(h.name, "Transfer-Encoding") or
-            std.ascii.eqlIgnoreCase(h.name, "Trailer") or std.ascii.eqlIgnoreCase(h.name, "Expect"))) continue;
+        if (stripBody and (isContentHeader or std.ascii.eqlIgnoreCase(h.name, headerName.transferEncoding) or
+            std.ascii.eqlIgnoreCase(h.name, headerName.trailer) or std.ascii.eqlIgnoreCase(h.name, "Expect"))) continue;
         try filtered.append(a, h);
     }
     return filtered.toOwnedSlice(a);
@@ -2707,7 +2806,7 @@ fn resolveLocation(a: Allocator, baseUrl: []const u8, loc: []const u8) ![]u8 {
     try out.appendSlice(a, base.scheme);
     try out.appendSlice(a, "://");
     var ab: [512]u8 = undefined;
-    const baseAuthority = try base.authority(&ab);
+    const baseAuthority = try uriMod.authority(&base, &ab);
     try out.appendSlice(a, baseAuthority);
     try out.appendSlice(a, resolvedPath);
     if (query) |q| {
@@ -2766,162 +2865,44 @@ fn removeDotSegments(a: Allocator, path: []const u8) ![]u8 {
 
 // Convenience one-shot helpers (all route through request()).
 // NOTE: JSON/form bodies use the canonical `.{.bodyKind/.body}` fields on
-// `Request` (or `Client.RequestOptions.json`) — no postJson/putJson/patchJson
+// `Request.bodyKind`/`Request.body` or the inferred `.json` operation field — no postJson/putJson/patchJson
 // explosion.
 
+/// One-shot `GET` without a client instance.
 pub fn get(a: Allocator, io: std.Io, url: []const u8) Error!Response {
     return request(a, io, .{ .method = .GET, .url = url });
 }
 
+/// One-shot `POST` with a raw body and explicit content type.
 pub fn post(a: Allocator, io: std.Io, url: []const u8, body: []const u8, contentType: []const u8) Error!Response {
     return request(a, io, .{ .method = .POST, .url = url, .bodyKind = .raw, .body = body, .headers = &.{.{ .name = "Content-Type", .value = contentType }} });
 }
 
+/// One-shot `PUT` with a raw body and explicit content type.
 pub fn put(a: Allocator, io: std.Io, url: []const u8, body: []const u8, contentType: []const u8) Error!Response {
     return request(a, io, .{ .method = .PUT, .url = url, .bodyKind = .raw, .body = body, .headers = &.{.{ .name = "Content-Type", .value = contentType }} });
 }
 
+/// One-shot `PATCH` with a raw body and explicit content type.
 pub fn patch(a: Allocator, io: std.Io, url: []const u8, body: []const u8, contentType: []const u8) Error!Response {
     return request(a, io, .{ .method = .PATCH, .url = url, .bodyKind = .raw, .body = body, .headers = &.{.{ .name = "Content-Type", .value = contentType }} });
 }
 
+/// One-shot `DELETE`.
 pub fn delete(a: Allocator, io: std.Io, url: []const u8) Error!Response {
     return request(a, io, .{ .method = .DELETE, .url = url });
 }
 
+/// One-shot `HEAD`.
 pub fn head(a: Allocator, io: std.Io, url: []const u8) Error!Response {
     return request(a, io, .{ .method = .HEAD, .url = url });
 }
 
+/// One-shot `OPTIONS`.
 pub fn options(a: Allocator, io: std.Io, url: []const u8) Error!Response {
     return request(a, io, .{ .method = .OPTIONS, .url = url });
 }
 
-// Multipart file upload (buffered; files up to maxBufferedUpload)
-
-/// Largest file buffered whole by `postMultipartFile`.
-pub const maxBufferedUpload: usize = 16 * 1024 * 1024;
-
-/// Reads a file using direct OS-level I/O (bypasses std.Io.Threaded whose
-/// internal file-op dispatch can deadlock when interleaved with socket ops
-/// from the same thread).
-fn readFileDirect(a: Allocator, path: []const u8) ![]u8 {
-    if (@import("builtin").os.tag == .windows) {
-        return readFileWindows(a, path);
-    }
-    return readFilePosix(a, path);
-}
-
-fn readFileWindows(a: Allocator, path: []const u8) ![]u8 {
-    const win = std.os.windows;
-    var wideBuf: [win.PATH_MAX_WIDE]u16 = undefined;
-    const wideLen = try std.unicode.utf8ToUtf16Le(&wideBuf, path);
-    const wide = wideBuf[0..wideLen];
-
-    const handle = win.CreateFileW(
-        wide.ptr,
-        win.GENERIC_READ,
-        win.FILE_SHARE_READ,
-        null,
-        win.OPEN_EXISTING,
-        win.FILE_ATTRIBUTE_NORMAL,
-        null,
-    ) catch |e| switch (e) {
-        error.FileNotFound => return error.FileNotFound,
-        else => return error.ReadFailed,
-    };
-    defer win.CloseHandle(handle);
-
-    var sizeLg: win.LARGE_INTEGER = undefined;
-    if (win.kernel32.GetFileSizeEx(handle, &sizeLg) == 0) return error.ReadFailed;
-    const fsize: usize = @intCast(sizeLg.Value);
-    if (fsize > maxBufferedUpload) return error.FileTooLarge;
-
-    const buf = try a.alloc(u8, fsize);
-    errdefer a.free(buf);
-
-    var total: usize = 0;
-    while (total < fsize) {
-        var bytesRead: win.DWORD = 0;
-        const ok = win.ReadFile(handle, buf[total..].ptr, @intCast(@min(fsize - total, 0xFFFF_FFFF)), &bytesRead, null);
-        if (ok == 0) return error.ReadFailed;
-        if (bytesRead == 0) break;
-        total += bytesRead;
-    }
-    if (total != fsize) return error.ReadFailed;
-    return buf;
-}
-
-fn readFilePosix(a: Allocator, path: []const u8) ![]u8 {
-    const posixSys = std.posix;
-    const fd = posixSys.open(path, .{ .ACCMODE = .RDONLY }, 0) catch |e| switch (e) {
-        error.FileNotFound => return error.FileNotFound,
-        else => return error.ReadFailed,
-    };
-    defer posixSys.close(fd);
-    const st = posixSys.fstat(fd) catch return error.ReadFailed;
-    const fsize: usize = @intCast(st.size);
-    if (fsize > maxBufferedUpload) return error.FileTooLarge;
-    const buf = try a.alloc(u8, fsize);
-    errdefer a.free(buf);
-    var total: usize = 0;
-    while (total < fsize) {
-        const n = posixSys.read(fd, buf[total..]) catch return error.ReadFailed;
-        if (n == 0) break;
-        total += n;
-    }
-    if (total != fsize) return error.ReadFailed;
-    return buf;
-}
-
-/// Uploads `filePath` as multipart/form-data via POST to `url`.
-pub fn postMultipartFile(
-    a: Allocator,
-    io: std.Io,
-    url: []const u8,
-    fieldName: []const u8,
-    filePath: []const u8,
-    boundary: []const u8,
-) Error!Response {
-    const fileData = readFileDirect(a, filePath) catch |e| switch (e) {
-        error.FileNotFound => return Error.FileNotFound,
-        error.FileTooLarge => return Error.FileTooLarge,
-        else => return Error.ReadFailed,
-    };
-    defer a.free(fileData);
-
-    const mpEncoder = @import("../web/multipart/multipartEncoder.zig");
-
-    // Content-Type header value.
-    var ctBuf: [128]u8 = undefined;
-    const ct = mpEncoder.contentType(&ctBuf, boundary);
-
-    // Filename from path tail.
-    const fname = if (std.mem.lastIndexOfScalar(u8, filePath, '/')) |ix|
-        filePath[ix + 1 ..]
-    else if (std.mem.lastIndexOfScalar(u8, filePath, '\\')) |bx|
-        filePath[bx + 1 ..]
-    else
-        filePath;
-
-    var bodyBuf: std.Io.Writer.Allocating = .init(a);
-    defer bodyBuf.deinit();
-    const parts = [_]mpEncoder.Part{
-        .{ .name = fieldName, .filename = fname, .contentType = mimeMod.octetStream, .data = fileData },
-    };
-    mpEncoder.encodeParts(&bodyBuf.writer, boundary, &parts) catch |err| switch (err) {
-        error.OutOfMemory => return Error.OutOfMemory,
-        else => return Error.WriteFailed,
-    };
-
-    return request(a, io, .{
-        .method = .POST,
-        .url = url,
-        .bodyKind = .raw,
-        .body = bodyBuf.written(),
-        .headers = &.{.{ .name = "Content-Type", .value = ct }},
-    });
-}
 // Tests
 
 const tTcp = tcp;
@@ -2938,8 +2919,7 @@ fn startTestServer(
     errdefer ctx.deinit();
     var srv = try lifecycle.Server.init(a, ctx.io, .{
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 1,
+        .limits = .{ .maxConnections = 1 },
         .keepAlive = keepAlive,
     });
     errdefer srv.deinit();
@@ -2956,19 +2936,18 @@ test "HTTP/3 client reaches the built-in server and decodes dynamic QPACK" {
     const lifecycle = @import("../server/httpServer.zig");
     const routerNs = @import("../web/router/router.zig");
 
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
     var srv = lifecycle.Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .http3 = true,
+        .protocols = .{ .http3 = true },
         .tls = .{
             .certificatePem = lifecycle.h3TestCertPem,
             .privateKeyPem = lifecycle.h3TestKeyPem,
         },
-        .enableDocs = false,
-    }) catch return;
+    }) catch |err| return err;
     defer srv.deinit();
 
     try srv.router.add(.GET, "/h3", struct {
@@ -2982,7 +2961,7 @@ test "HTTP/3 client reaches the built-in server and decodes dynamic QPACK" {
         }
     }.h, .{});
 
-    const th = std.Thread.spawn(.{}, lifecycle.Server.run, .{&srv}) catch return;
+    const th = std.Thread.spawn(.{}, lifecycle.Server.run, .{&srv}) catch |err| return err;
     var joined = false;
     defer {
         srv.requestShutdown();
@@ -3026,7 +3005,7 @@ test "keep-alive: second request reuses pooled connection" {
     defer srv.deinit();
     defer S.ctx.deinit();
 
-    const th = std.Thread.spawn(.{}, @import("../server/httpServer.zig").Server.run, .{srv}) catch return;
+    const th = std.Thread.spawn(.{}, @import("../server/httpServer.zig").Server.run, .{srv}) catch |err| return err;
 
     // Client with pool; two requests over hostname.
     // Manual lifecycle: client must be FULLY torn down (releasing pooled
@@ -3244,7 +3223,7 @@ test "connection close response is not pooled" {
     var ctx = try tTcp.IoContext.init(a);
     defer ctx.deinit();
     // keepAlive=false server => always responds Connection: close
-    var srv = try lifecycle.Server.init(a, ctx.io, .{ .port = 0, .enableDocs = false, .maxConnections = 2 });
+    var srv = try lifecycle.Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConnections = 2 } });
     defer srv.deinit();
     try srv.router.add(.GET, "/x", struct {
         fn h(_: *routerNs.Context) anyerror!routerNs.Response {
@@ -3257,7 +3236,7 @@ test "connection close response is not pooled" {
             s.run();
         }
     };
-    const th = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    const th = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch |err| return err;
 
     var client = @import("httpClient.zig").Client.init(a, ctx.io, .{});
     defer client.deinit();
@@ -3302,7 +3281,7 @@ test "connection-close body without Content-Length is read to EOF" {
             sock.writeAll("HTTP/1.1 200 OK\r\n\r\nclose-delimited-body") catch {};
         }
     };
-    const th = std.Thread.spawn(.{}, RawServer.run, .{ &lst, ctx.io }) catch return;
+    const th = std.Thread.spawn(.{}, RawServer.run, .{ &lst, ctx.io }) catch |err| return err;
     defer th.join();
 
     var ub: [64]u8 = undefined;
@@ -3617,7 +3596,7 @@ test "requestBuilder HTTP/1.1 streaming upload with Content-Length sends chunks"
     try std.testing.expectEqual(@as(u16, 200), response.status);
     const reqStr = capture.bytes[0..capture.len];
     try std.testing.expect(std.mem.startsWith(u8, reqStr, "POST /upload HTTP/1.1\r\n"));
-    try std.testing.expect(std.mem.indexOf(u8, reqStr, "content-length: 27\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reqStr, "Content-Length: 27\r\n") != null);
     try std.testing.expect(std.mem.endsWith(u8, reqStr, "streamed payload data here!"));
 }
 
@@ -3923,4 +3902,18 @@ test "requestStream abandoned early does not return dirty socket to pool and ter
 
     thread.join();
     joined = true;
+}
+
+test "Response.json owns decoded values until deinit" {
+    const a = std.testing.allocator;
+    var response = Response{
+        .allocator = a,
+        .status = 200,
+        .headers = try a.alloc(Header, 0),
+        .body = try a.dupe(u8, "{\"name\":\"alice\"}"),
+    };
+    const T = struct { name: []const u8 };
+    const decoded = try response.json(T);
+    try std.testing.expectEqualStrings("alice", decoded.name);
+    response.deinit();
 }

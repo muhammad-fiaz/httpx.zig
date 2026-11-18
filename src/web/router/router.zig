@@ -9,7 +9,20 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const mimeMod = @import("../../utils/mime.zig");
+const z = @import("zigantic");
+
+/// Schema for a value zigantic cannot inspect structurally (function
+/// pointers, opaque pointers, fixed byte arrays). Type-checked only.
+fn typedSchema(comptime T: type) type {
+    return z.custom(T, .{ .check = struct {
+        fn accept(_: T) bool {
+            return true;
+        }
+    }.accept });
+}
+
+const mimeMod = @import("../../common/mime.zig");
+const mediaTypeMod = @import("../../common/mediaType.zig");
 const Method = @import("../../common/method.zig").Method;
 const patternMod = @import("routePattern.zig");
 pub const pattern = patternMod;
@@ -17,6 +30,7 @@ pub const metadata = @import("routeMetadata.zig");
 const Pattern = patternMod.Pattern;
 const SegmentKind = patternMod.SegmentKind;
 const parseMod = @import("../../common/parse.zig");
+const jsonMod = @import("../../common/json.zig");
 const multipartServerMod = @import("../multipart/multipartServer.zig");
 const addressMod = @import("../../net/address.zig");
 
@@ -24,18 +38,46 @@ pub const HandlerFn = *const fn (*Context) anyerror!Response;
 pub const NextFn = *const fn (*Context) anyerror!Response;
 pub const MiddlewareFn = *const fn (*Context, NextFn) anyerror!Response;
 
+/// Byte-stream transport handed to a connection-takeover handler. See
+/// `common/stream.zig`: the stream borrows the connection and never closes it.
+pub const UpgradeTransport = @import("../../common/stream.zig").Stream;
+
+/// Runs after the route handler returns and the HTTP layer has decided not to
+/// write a normal response. `buffered` holds bytes already read past the
+/// request head/body; the handler must consume them before reading further.
+/// The handler runs synchronously on the connection's worker. When it
+/// returns, the HTTP layer closes the connection exactly once.
+pub const UpgradeHandler = *const fn (*Context, UpgradeTransport, buffered: []const u8) anyerror!void;
+
+/// Explicit connection takeover request. Setting this on a context transfers
+/// the connection to `handler`; the HTTP layer skips response serialization
+/// and normal keep-alive handling.
+pub const Upgrade = struct {
+    handler: UpgradeHandler,
+    userData: ?*anyopaque = null,
+};
+
+/// Typed REST result carrier for `httpx.router.Result(T)` handlers, defined
+/// here rather than re-exported from `rest` so the router namespace stays
+/// the single place for handler signature types.
+pub const Result = @import("../rest/api.zig").Result;
+
 pub fn contextNext(ctx: *Context) anyerror!Response {
     return ctx.next();
 }
 
 /// A single extra response header (name excludes the trailing colon).
-pub const Header = struct { name: []const u8, value: []const u8 };
+pub const Header = headersMod.Header;
 
 pub const Context = struct {
     /// Per-request scratch allocator. Dynamic response content (bodies,
     /// header arrays) MUST come from here; the transport resets it after the
     /// response is written. Slices placed in Response are borrowed.
     allocator: Allocator,
+    /// Long-lived allocator owned by the transport (the server's allocator).
+    /// Handlers that keep state past the request arena's lifetime, such as a
+    /// connection-takeover session, allocate here. Null means `allocator`.
+    baseAllocator: ?Allocator = null,
     /// Raw request headers as provided by the transport (may be empty).
     headers: []const Header = &.{},
     params: [16]struct { name: []const u8, value: []const u8 } = undefined,
@@ -68,9 +110,19 @@ pub const Context = struct {
     /// Proxy IPs/CIDRs whose entries are skipped when resolving the client
     /// from an X-Forwarded-For chain.
     trustedProxies: []const []const u8 = &.{},
+    /// Set by a handler that takes over the connection (WebSocket upgrade,
+    /// custom protocol). The transport skips normal response writing.
+    upgrade: ?Upgrade = null,
+
+    /// Requests connection takeover. The route handler should return
+    /// immediately afterwards; its `Response` is ignored. `handler` runs after
+    /// the handler returns, with any already-buffered bytes preserved.
+    pub fn takeOver(self: *Context, upgradeValue: Upgrade) void {
+        self.upgrade = upgradeValue;
+    }
 
     /// Invokes the next middleware in the pipeline, or the route handler if at the end.
-    /// Order is deterministic: router middleware → route middleware → handler.
+    /// Order is deterministic: router middleware -> route middleware -> handler.
     pub fn next(self: *Context) anyerror!Response {
         const r: *Router = @ptrCast(@alignCast(self.activeRouter orelse return error.NoRouter));
         if (self.middlewareIndex < r.middlewares.items.len) {
@@ -124,7 +176,7 @@ pub const Context = struct {
     /// type safety; plain `param()` stays allocation-free and simple).
     /// Field names must match parameter names. Supported field types: ints,
     /// uints, floats, bools, `[]const u8` (borrowed), and optionals of
-    /// those (missing → null). Anything else is a compile error.
+    /// those (missing -> null). Anything else is a compile error.
     pub fn bindParams(self: *const Context, comptime T: type) ParamError!T {
         const info = @typeInfo(T);
         if (info != .@"struct") @compileError("bindParams requires a struct type");
@@ -189,12 +241,77 @@ pub const Context = struct {
     /// Parses the buffered request body as multipart/form-data. The returned
     /// form must be deinitialized with its own allocator (normally
     /// `ctx.allocator`).
-    pub fn multipartForm(
+    pub fn multipart(
         self: *Context,
-        options: multipartServerMod.Options,
+        options: anytype,
     ) multipartServerMod.Error!multipartServerMod.Form {
+        const parsedOpts: multipartServerMod.Options = blk: {
+            const OptsType = @TypeOf(options);
+            if (OptsType == multipartServerMod.Options) break :blk options;
+            var o = multipartServerMod.Options{};
+            const info = @typeInfo(OptsType);
+            if (info == .@"struct") {
+                inline for (info.@"struct".field_names) |fname| {
+                    if (@hasField(multipartServerMod.Options, fname)) {
+                        @field(o, fname) = @field(options, fname);
+                    }
+                }
+            }
+            break :blk o;
+        };
         const ct = self.header("Content-Type") orelse return error.MissingContentType;
-        return multipartServerMod.parse(self.allocator, self.body, ct, options);
+        return multipartServerMod.parse(self.allocator, self.io, self.body, ct, parsedOpts);
+    }
+
+    /// One field from an `application/x-www-form-urlencoded` request body,
+    /// returned raw (allocation-free, like `queryParam`).
+    pub fn formValue(self: *const Context, name: []const u8) ?[]const u8 {
+        return lookupQuery(self.body, name);
+    }
+
+    /// Decodes an `application/x-www-form-urlencoded` body into struct `T`,
+    /// percent-decoding each value. Field names are matched exactly (quoted
+    /// identifiers included); missing required fields are an error, unknown
+    /// keys are ignored. Decoded strings borrow `ctx.allocator` and stay
+    /// valid until the request ends.
+    pub fn form(self: *const Context, comptime T: type) !T {
+        const info = @typeInfo(T);
+        if (info != .@"struct") @compileError("form requires a struct type");
+        const structInfo = info.@"struct";
+        var out: T = undefined;
+        const scratch = try self.allocator.alloc(u8, self.body.len);
+        var cursor: usize = 0;
+        inline for (structInfo.field_names, structInfo.field_types, structInfo.field_attrs) |fname, FType, fattrs| {
+            const FT = FType;
+            const fti = @typeInfo(FT);
+            const isOptional = fti == .optional;
+            const raw = self.formValue(fname);
+            if (raw == null and isOptional) {
+                @field(out, fname) = null;
+            } else if (raw == null and fattrs.default_value_ptr != null) {
+                const dvPtr: *const FT = @ptrCast(@alignCast(fattrs.default_value_ptr.?));
+                @field(out, fname) = dvPtr.*;
+            } else if (raw == null) {
+                return error.MissingField;
+            } else {
+                const spaced = if (std.mem.indexOfScalar(u8, raw.?, '+')) |_| blk: {
+                    const src = raw.?;
+                    const tmp = scratch[cursor .. cursor + src.len];
+                    for (src, 0..) |c, idx| tmp[idx] = if (c == '+') ' ' else c;
+                    break :blk tmp;
+                } else raw.?;
+                const decoded = try parseMod.percentDecode(scratch[cursor..], spaced);
+                cursor += spaced.len;
+                const ChildT = if (isOptional) fti.optional.child else FT;
+                @field(out, fname) = switch (@typeInfo(ChildT)) {
+                    .int => try std.fmt.parseInt(ChildT, decoded, 10),
+                    .float => try std.fmt.parseFloat(ChildT, decoded),
+                    .bool => if (std.mem.eql(u8, decoded, "true")) true else if (std.mem.eql(u8, decoded, "false")) false else return error.InvalidValue,
+                    else => decoded,
+                };
+            }
+        }
+        return out;
     }
 
     /// Extracts Bearer token from Authorization header if present.
@@ -224,12 +341,43 @@ pub const Context = struct {
         };
     }
 
-    /// Deserializes JSON request body into type `T`.
-    pub fn json(self: *const Context, comptime T: type) !T {
-        const parsed = try std.json.parseFromSlice(T, self.allocator, self.body, .{
-            .ignore_unknown_fields = true,
-        });
-        return parsed.value;
+    /// Unified JSON handler:
+    /// - If `arg` is a `type` (`comptime T: type`), deserializes the request body into `T`.
+    ///   Scalars, slices, and nested values borrow `ctx.allocator` (the
+    ///   per-request scratch arena) and stay valid until the request ends.
+    ///   Field names are matched exactly; use Zig quoted identifiers such as
+    ///   `@"user-name"` for arbitrary keys, and [`jsonValue`] for dynamic objects.
+    /// - If `arg` is a value/struct, serializes and returns a JSON `Response` (200 OK).
+    pub fn json(self: *const Context, arg: anytype) !if (@TypeOf(arg) == type) arg else Response {
+        if (@TypeOf(arg) == type) {
+            return jsonMod.decode(arg, self.allocator, self.body);
+        } else {
+            return self.jsonStatus(200, arg);
+        }
+    }
+
+    /// Parses the request body as a dynamic JSON value. Key lookup preserves
+    /// arbitrary property names (`user-name`, `@context`, `123user`).
+    pub fn jsonValue(self: *const Context) !jsonMod.Value {
+        return jsonMod.parse(self.allocator, self.body);
+    }
+
+    /// Renders a JSON response with a custom status code.
+    pub fn jsonStatus(self: *const Context, code: u16, value: anytype) !Response {
+        const T = @TypeOf(value);
+        if (T == []const u8 or T == []u8) {
+            return Response{
+                .status = code,
+                .body = value,
+                .contentType = mediaTypeMod.applicationJson,
+            };
+        }
+        const str = try std.json.Stringify.valueAlloc(self.allocator, value, .{});
+        return Response{
+            .status = code,
+            .body = str,
+            .contentType = mediaTypeMod.applicationJson,
+        };
     }
 
     /// Renders an HTML response.
@@ -244,7 +392,7 @@ pub const Context = struct {
         return .{
             .status = code,
             .body = content,
-            .contentType = "text/html; charset=utf-8",
+            .contentType = mediaTypeMod.textHtmlUtf8,
         };
     }
 
@@ -270,36 +418,13 @@ pub const Context = struct {
         return error.TemplateEngineNotConfigured;
     }
 
-    /// Renders a JSON response from a serialized string or struct (200 OK).
-    pub fn renderJson(self: *const Context, value: anytype) !Response {
-        return self.renderJsonStatus(200, value);
-    }
-
-    /// Renders a JSON response with a custom status code.
-    pub fn renderJsonStatus(self: *const Context, code: u16, value: anytype) !Response {
-        const T = @TypeOf(value);
-        if (T == []const u8 or T == []u8) {
-            return Response{
-                .status = code,
-                .body = value,
-                .contentType = "application/json",
-            };
-        }
-        const str = try std.json.Stringify.valueAlloc(self.allocator, value, .{});
-        return Response{
-            .status = code,
-            .body = str,
-            .contentType = "application/json",
-        };
-    }
-
     /// Formatted JSON response from a format string and arguments.
     pub fn jsonFmt(self: *const Context, comptime fmt: []const u8, args: anytype) !Response {
         const str = try std.fmt.allocPrint(self.allocator, fmt, args);
         return Response{
             .status = 200,
             .body = str,
-            .contentType = "application/json",
+            .contentType = mediaTypeMod.applicationJson,
         };
     }
 
@@ -315,7 +440,7 @@ pub const Context = struct {
         return .{
             .status = code,
             .body = content,
-            .contentType = "text/plain; charset=utf-8",
+            .contentType = mediaTypeMod.textPlainUtf8,
         };
     }
 
@@ -496,7 +621,7 @@ pub const Response = struct {
         return .{
             .status = 200,
             .body = content,
-            .contentType = "text/html; charset=utf-8",
+            .contentType = mediaTypeMod.textHtmlUtf8,
         };
     }
 
@@ -504,7 +629,7 @@ pub const Response = struct {
         return .{
             .status = 200,
             .body = content,
-            .contentType = "text/plain; charset=utf-8",
+            .contentType = mediaTypeMod.textPlainUtf8,
         };
     }
 
@@ -512,7 +637,7 @@ pub const Response = struct {
         return .{
             .status = 200,
             .body = content,
-            .contentType = "application/json",
+            .contentType = mediaTypeMod.applicationJson,
         };
     }
 
@@ -544,7 +669,7 @@ pub const Response = struct {
         return .{
             .status = 200,
             .body = content,
-            .contentType = "text/plain; charset=utf-8",
+            .contentType = mediaTypeMod.textPlainUtf8,
         };
     }
 
@@ -598,6 +723,7 @@ pub const ParamError = error{
 };
 
 const metaMod = @import("routeMetadata.zig");
+const headersMod = @import("../../common/headers.zig");
 
 /// A statically declared route definition for compile-time or declarative route tables.
 pub const RouteDecl = struct {
@@ -779,32 +905,28 @@ const RouteEntry = struct {
 
 /// Per-route options. Everything configurable about one registration lives
 /// here; `path` + `handler` stay positional as the fundamental inputs.
-pub const RouteOptions = struct {
-    /// OpenAPI documentation source.
-    meta: metaMod.Metadata = .{},
-    /// Route name for `url()` reversing. Must be unique per router.
-    name: ?[]const u8 = null,
-    /// Route-level middleware (router middleware runs first).
-    middleware: []const MiddlewareFn = &.{},
-    /// Handler-private state pointer (borrowed; see `deinitData`).
-    userData: ?*anyopaque = null,
-    /// Optional destructor for `userData`, run once at router deinit.
-    deinitData: ?*const fn (?*anyopaque) void = null,
-};
+const RouteOptionsSchema = z.objectOf(.{
+    .meta = z.withDefault(metaMod.MetadataSchema, .{}),
+    .name = z.optional(z.string(.{ .min = 1 })),
+    .middleware = z.withDefault(typedSchema([]const MiddlewareFn), &.{}),
+    .userData = z.withDefault(typedSchema(?*anyopaque), null),
+    .deinitData = z.withDefault(typedSchema(?*const fn (?*anyopaque) void), null),
+}, .{});
+pub const RouteOptions = RouteOptionsSchema.Value;
 
 pub const ErrorHandlerFn = *const fn (*Context, anyerror) anyerror!Response;
 
 /// Options shared by every route in a group.
-pub const GroupOptions = struct {
-    /// Middleware prepended (outer groups first) to each route's own list.
-    middleware: []const MiddlewareFn = &.{},
-};
+const GroupOptionsSchema = z.objectOf(.{
+    .middleware = z.withDefault(typedSchema([]const MiddlewareFn), &.{}),
+}, .{});
+pub const GroupOptions = GroupOptionsSchema.Value;
 
 /// Options for `mount()`.
-pub const MountOptions = struct {
-    /// Middleware prepended to every mounted route's own list.
-    middleware: []const MiddlewareFn = &.{},
-};
+const MountOptionsSchema = z.objectOf(.{
+    .middleware = z.withDefault(typedSchema([]const MiddlewareFn), &.{}),
+}, .{});
+pub const MountOptions = MountOptionsSchema.Value;
 
 /// A prefixed view over a router. Groups compose (`group.group(...)`)
 /// without allocating: prefixes and middleware chain-borrow caller memory
@@ -873,7 +995,7 @@ pub const Group = struct {
         try self.register(.OPTIONS, path, handler, opts);
     }
 
-    /// Nested group: prefixes compose (`/api` + `/users` → `/api/users`),
+    /// Nested group: prefixes compose (`/api` + `/users` -> `/api/users`),
     /// middleware accumulates outer-first. Borrow rules match `group()`.
     pub fn group(self: *const Group, prefix: []const u8, opts: GroupOptions) Group {
         return .{ .router = self.router, .parent = self, .prefix = prefix, .middleware = opts.middleware };
@@ -920,9 +1042,10 @@ pub const TrailingSlash = enum {
     strict,
 };
 
-pub const RouterConfig = struct {
-    trailingSlash: TrailingSlash = .serveBoth,
-};
+const RouterConfigSchema = z.objectOf(.{
+    .trailingSlash = z.withDefault(z.enumType(TrailingSlash, .{}), .serveBoth),
+}, .{});
+pub const RouterConfig = RouterConfigSchema.Value;
 
 pub const Router = struct {
     allocator: Allocator,
@@ -934,11 +1057,8 @@ pub const Router = struct {
     templateEngine: ?*anyopaque = null,
     trailingSlash: TrailingSlash = .serveBoth,
 
-    pub fn init(allocator: Allocator) Router {
-        return initWithConfig(allocator, .{});
-    }
-
-    pub fn initWithConfig(allocator: Allocator, config: RouterConfig) Router {
+    /// Creates a router from an explicit allocator and one inline `.{}`.
+    pub fn init(allocator: Allocator, config: RouterConfig) Router {
         return .{
             .allocator = allocator,
             .statusHandlers = std.AutoHashMap(u16, HandlerFn).init(allocator),
@@ -985,28 +1105,14 @@ pub const Router = struct {
         try self.statusHandlers.put(statusCode, handler);
     }
 
-    /// Registers a compile-time validated static slice of route declarations.
-    /// Emits a compile-time error if any conflicts (duplicate paths, shape collisions,
-    /// duplicate names, invalid patterns) are detected.
-    pub fn registerStatic(self: *Router, comptime routes: []const RouteDecl) RouteError!void {
-        comptime validateRoutesComptime(routes);
-        for (routes) |r| {
-            if (r.handler) |h| {
-                try self.add(r.method, r.path, h, .{
-                    .name = r.name,
-                    .meta = r.meta,
-                    .middleware = r.middleware,
-                    .userData = r.userData,
-                    .deinitData = r.deinitData,
-                });
-            }
-        }
-    }
-
-    /// Registers a dynamic route table with runtime conflict validation.
-    /// Returns DuplicateRoute or InvalidPattern if any conflicts are detected,
-    /// without modifying the active route table.
-    pub fn registerRouteTable(self: *Router, routes: []const RouteDecl) RouteError!void {
+    /// Registers a route table.
+    ///
+    /// Every declaration is validated before any route is added: a conflicting
+    /// table returns `DuplicateRoute`, `DuplicateName`, or `InvalidPattern`
+    /// without modifying the active route table. For build-time rejection of a
+    /// comptime-known table, call `validateRoutesComptime` in a `comptime`
+    /// block before registering it.
+    pub fn register(self: *Router, routes: []const RouteDecl) RouteError!void {
         if (validateRouteDeclarations(routes)) |conflict| {
             return switch (conflict.reason) {
                 .duplicateRouteName => RouteError.DuplicateName,
@@ -1294,21 +1400,6 @@ pub const Router = struct {
         try g.mountRouter(other, opts);
     }
 
-    /// Removes the route registered under `name`. Returns true when found.
-    pub fn removeByName(self: *Router, name: []const u8) bool {
-        for (self.routes.items, 0..) |existing, i| {
-            if (existing.name) |n| {
-                if (std.mem.eql(u8, n, name)) {
-                    const entry = self.routes.orderedRemove(i);
-                    self.allocator.free(entry.path);
-                    if (entry.ownsMiddleware) self.allocator.free(entry.middleware);
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
     /// Writes one anonymous-struct field into `out` for `url()`.
     /// Integers/floats/bools format; strings borrow; null optionals count
     /// as missing.
@@ -1477,11 +1568,11 @@ pub const Router = struct {
 
     pub fn notFoundResponse(self: *Router, ctx: *Context) Response {
         if (self.notFoundHandler) |nf| {
-            return nf(ctx) catch Response{ .status = 404, .body = "Not Found", .contentType = "text/plain; charset=utf-8" };
+            return nf(ctx) catch Response{ .status = 404, .body = "Not Found", .contentType = mediaTypeMod.textPlainUtf8 };
         } else if (self.statusHandlers.get(404)) |sh| {
-            return sh(ctx) catch Response{ .status = 404, .body = "Not Found", .contentType = "text/plain; charset=utf-8" };
+            return sh(ctx) catch Response{ .status = 404, .body = "Not Found", .contentType = mediaTypeMod.textPlainUtf8 };
         } else {
-            return Response{ .status = 404, .body = "Not Found", .contentType = "text/plain; charset=utf-8" };
+            return Response{ .status = 404, .body = "Not Found", .contentType = mediaTypeMod.textPlainUtf8 };
         }
     }
 
@@ -1515,11 +1606,11 @@ pub const Router = struct {
 
     fn handleError(self: *Router, ctx: *Context, err: anyerror) Response {
         if (self.errorHandler) |eh| {
-            return eh(ctx, err) catch Response{ .status = 500, .body = "Internal Server Error", .contentType = "text/plain; charset=utf-8" };
+            return eh(ctx, err) catch Response{ .status = 500, .body = "Internal Server Error", .contentType = mediaTypeMod.textPlainUtf8 };
         } else if (self.statusHandlers.get(500)) |sh| {
-            return sh(ctx) catch Response{ .status = 500, .body = "Internal Server Error", .contentType = "text/plain; charset=utf-8" };
+            return sh(ctx) catch Response{ .status = 500, .body = "Internal Server Error", .contentType = mediaTypeMod.textPlainUtf8 };
         } else {
-            return Response{ .status = 500, .body = "Internal Server Error", .contentType = "text/plain; charset=utf-8" };
+            return Response{ .status = 500, .body = "Internal Server Error", .contentType = mediaTypeMod.textPlainUtf8 };
         }
     }
 };
@@ -1595,7 +1686,7 @@ fn dummyHandler(ctx: *Context) anyerror!Response {
 
 test "matches exact route" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/hello", dummyHandler, .{});
@@ -1606,7 +1697,7 @@ test "matches exact route" {
 
 test "rejects duplicate GET route" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/users", dummyHandler, .{});
@@ -1615,16 +1706,58 @@ test "rejects duplicate GET route" {
 
 test "allows same path different methods" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/users", dummyHandler, .{});
     try router.post("/users", dummyHandler, .{});
 }
 
+test "submits and decodes form bodies" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var router = Router.init(a, .{});
+    defer router.deinit();
+
+    const Form = struct {
+        name: []const u8,
+        age: u32,
+        active: bool,
+        @"x-token": ?[]const u8 = null,
+    };
+
+    const handler = struct {
+        fn handle(ctx: *Context) anyerror!Response {
+            const f = ctx.form(Form) catch return ctx.textStatus(400, "bad form");
+            return ctx.json(.{ .name = f.name, .age = f.age, .active = f.active, .token = f.@"x-token" orelse "" });
+        }
+    }.handle;
+
+    try router.post("/submit", handler, .{});
+
+    var ctx = Context{
+        .allocator = arena.allocator(),
+        .path = "/submit",
+        .method = .POST,
+        .body = "name=Alice+Ng&age=30&active=true&x-token=a%26b",
+        .headers = &.{.{ .name = "Content-Type", .value = "application/x-www-form-urlencoded" }},
+    };
+    const h = router.match(.POST, "/submit", &ctx).?;
+    const res = try h(&ctx);
+    try std.testing.expectEqual(@as(u16, 200), res.status);
+    try std.testing.expect(std.mem.indexOf(u8, res.body, "\"name\":\"Alice Ng\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.body, "\"age\":30") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.body, "\"active\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.body, "\"token\":\"a&b\"") != null);
+
+    try std.testing.expectEqualStrings("Alice+Ng", ctx.formValue("name").?);
+    try std.testing.expect(ctx.formValue("missing") == null);
+}
+
 test "static beats parameter precedence" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/users/me", dummyHandler, .{});
@@ -1639,7 +1772,7 @@ test "static beats parameter precedence" {
 
 test "extracts path parameters" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/users/{id}/posts/{post_id}", dummyHandler, .{});
@@ -1655,7 +1788,7 @@ test "router owns registered path memory" {
     // buffers; registering a heap path and freeing it must leave the router
     // fully functional (matching, shapes, duplicate detection).
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     const temp = try a.dupe(u8, "/tmp/{name}");
@@ -1724,7 +1857,7 @@ test "context trusted proxy and scheme detection" {
 
 test "matches with query string and exposes queryParam" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/users/{id}", dummyHandler, .{});
@@ -1739,7 +1872,7 @@ test "matches with query string and exposes queryParam" {
 
 test "transport query field survives match on clean path" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/search", dummyHandler, .{});
@@ -1752,7 +1885,7 @@ test "transport query field survives match on clean path" {
 
 test "HEAD falls back to GET handler" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/asset", dummyHandler, .{});
@@ -1765,7 +1898,7 @@ test "HEAD falls back to GET handler" {
 
 test "registration rejects query and fragment in patterns" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try std.testing.expectError(RouteError.InvalidPattern, router.get("/users?x=1", dummyHandler, .{}));
@@ -1774,7 +1907,7 @@ test "registration rejects query and fragment in patterns" {
 
 test "duplicate detection ignores query strings" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/users/{id}", dummyHandler, .{});
@@ -1785,7 +1918,7 @@ test "duplicate detection ignores query strings" {
 
 test "nested slugs and wildcard remainder" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/a/{x}/c/{y}", dummyHandler, .{});
@@ -1806,7 +1939,7 @@ test "nested slugs and wildcard remainder" {
 
 test "match preserves TLS and peer fields" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     try router.get("/secure", dummyHandler, .{});
@@ -1831,7 +1964,7 @@ fn idHandler(ctx: *Context) anyerror!Response {
 
 test "typed int parameter converts and rejects" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/users/{id:int}", idHandler, .{});
 
@@ -1850,7 +1983,7 @@ test "typed int parameter converts and rejects" {
 
 test "uint/float/bool converters" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/u/{n:uint}", dummyHandler, .{});
     try router.get("/f/{v:float}", dummyHandler, .{});
@@ -1875,7 +2008,7 @@ test "uint/float/bool converters" {
 
 test "uuid and slug converters" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/o/{id:uuid}", dummyHandler, .{});
     try router.get("/blog/{slug:slug}", dummyHandler, .{});
@@ -1897,7 +2030,7 @@ test "uuid and slug converters" {
 
 test "catch-all path converter spans segments" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/files/{path:path}", dummyHandler, .{});
 
@@ -1911,7 +2044,7 @@ test "catch-all path converter spans segments" {
 
 test "multiple typed parameters" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/users/{userId:int}/posts/{postId:int}", dummyHandler, .{});
 
@@ -1923,7 +2056,7 @@ test "multiple typed parameters" {
 
 test "int route does not swallow static sibling" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/users/{id:int}", dummyHandler, .{});
     try router.get("/users/me", dummyHandler, .{});
@@ -1935,7 +2068,7 @@ test "int route does not swallow static sibling" {
 
 test "int and generic overlap is allowed, typed wins" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/w/{name}", dummyHandler, .{});
     try router.get("/w/{id:int}", dummyHandler, .{});
@@ -1950,7 +2083,7 @@ test "int and generic overlap is allowed, typed wins" {
 
 test "generic duplicates conflict" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/users/{id}", dummyHandler, .{});
     try std.testing.expectError(RouteError.DuplicateRoute, router.get("/users/{name}", dummyHandler, .{}));
@@ -1960,7 +2093,7 @@ test "generic duplicates conflict" {
 
 test "duplicate names rejected" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/a", dummyHandler, .{ .name = "home" });
     try std.testing.expectError(RouteError.DuplicateName, router.get("/b", dummyHandler, .{ .name = "home" }));
@@ -1968,7 +2101,7 @@ test "duplicate names rejected" {
 
 test "groups compose prefixes and middleware" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     // Order log lives in the same arena the dispatched request uses, so a
     // single allocator owns it (never freed with a different one).
@@ -2003,9 +2136,9 @@ test "groups compose prefixes and middleware" {
 
 test "mount preserves routes, params, names" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
-    var admin = Router.init(a);
+    var admin = Router.init(a, .{});
     defer admin.deinit();
     try admin.get("/stats", dummyHandler, .{ .name = "stats" });
     try admin.get("/users/{id:int}", dummyHandler, .{});
@@ -2021,7 +2154,7 @@ test "mount preserves routes, params, names" {
 
 test "dispatch distinguishes 404 and 405 with Allow" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/users", dummyHandler, .{});
     try router.post("/users", dummyHandler, .{});
@@ -2046,7 +2179,7 @@ test "dispatch distinguishes 404 and 405 with Allow" {
 
 test "dispatch auto-OPTIONS and HEAD fallback" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/asset", dummyHandler, .{});
 
@@ -2063,7 +2196,7 @@ test "dispatch auto-OPTIONS and HEAD fallback" {
 
 test "url reversing covers params, nesting, errors" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/users/{id:int}", dummyHandler, .{ .name = "user" });
     try router.get("/users/{userId:int}/posts/{postId:int}", dummyHandler, .{ .name = "userPost" });
@@ -2089,7 +2222,7 @@ test "url reversing covers params, nesting, errors" {
 
 test "trailing slash is lenient" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/users", dummyHandler, .{});
     var ctx = Context{ .allocator = a };
@@ -2100,7 +2233,7 @@ test "trailing slash is lenient" {
 
 test "encoded and UTF-8 segments match as raw text" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/f/{name}", dummyHandler, .{});
     var ctx = Context{ .allocator = a };
@@ -2113,7 +2246,7 @@ test "encoded and UTF-8 segments match as raw text" {
 
 test "query params stay separate from path params" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/users/{id:int}", dummyHandler, .{});
     var ctx = Context{ .allocator = a };
@@ -2125,7 +2258,7 @@ test "query params stay separate from path params" {
 
 test "struct binding validates fields and types" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/users/{userId:int}/posts/{postId:int}", dummyHandler, .{});
 
@@ -2162,7 +2295,7 @@ test "struct binding validates fields and types" {
 
 test "struct binding rejects bad values" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/n/{v:int}", dummyHandler, .{});
     // Bypass converter by matching the sibling generic route's params.
@@ -2177,7 +2310,7 @@ test "struct binding rejects bad values" {
 
 test "route middleware runs global, router, route in order" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -2210,20 +2343,9 @@ test "route middleware runs global, router, route in order" {
     try std.testing.expectEqual('h', order.items[2]);
 }
 
-test "removeByName releases the route" {
-    const a = std.testing.allocator;
-    var router = Router.init(a);
-    defer router.deinit();
-    try router.get("/tmp", dummyHandler, .{ .name = "tmp" });
-    try std.testing.expect(router.removeByName("tmp"));
-    try std.testing.expect(!router.removeByName("tmp"));
-    var ctx = Context{ .allocator = a };
-    try std.testing.expect(router.match(.GET, "/tmp", &ctx) == null);
-}
-
 test "dynamic websocket-style route matches" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
     try router.get("/ws/{roomId}", dummyHandler, .{});
     var ctx = Context{ .allocator = a };
@@ -2236,7 +2358,7 @@ test "router trailing slash policies: redirectSlash, redirectNoSlash, strict" {
 
     // redirectSlash policy
     {
-        var r = Router.initWithConfig(a, .{ .trailingSlash = .redirectSlash });
+        var r = Router.init(a, .{ .trailingSlash = .redirectSlash });
         defer r.deinit();
         try r.get("/users", dummyHandler, .{});
 
@@ -2256,7 +2378,7 @@ test "router trailing slash policies: redirectSlash, redirectNoSlash, strict" {
 
     // redirectNoSlash policy
     {
-        var r = Router.initWithConfig(a, .{ .trailingSlash = .redirectNoSlash });
+        var r = Router.init(a, .{ .trailingSlash = .redirectNoSlash });
         defer r.deinit();
         try r.get("/about", dummyHandler, .{});
 
@@ -2276,7 +2398,7 @@ test "router trailing slash policies: redirectSlash, redirectNoSlash, strict" {
 
     // strict policy
     {
-        var r = Router.initWithConfig(a, .{ .trailingSlash = .strict });
+        var r = Router.init(a, .{ .trailingSlash = .strict });
         defer r.deinit();
         try r.get("/api/v1", dummyHandler, .{});
 
@@ -2296,7 +2418,7 @@ test "router trailing slash policies: redirectSlash, redirectNoSlash, strict" {
 
 test "comptime and static route registration with compile-time conflict detection" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     const staticRoutes = [_]RouteDecl{
@@ -2308,7 +2430,8 @@ test "comptime and static route registration with compile-time conflict detectio
     };
 
     // Validates at comptime and registers all static declarations
-    try router.registerStatic(&staticRoutes);
+    comptime validateRoutesComptime(&staticRoutes);
+    try router.register(&staticRoutes);
 
     var ctx = Context{ .allocator = a };
     const h1 = router.match(.GET, "/users/123", &ctx);
@@ -2428,22 +2551,22 @@ test "route conflict validation catches duplicate paths, shape collisions, and i
     }
 }
 
-test "registerRouteTable rejects conflicting update without corrupting table" {
+test "register rejects conflicting update without corrupting table" {
     const a = std.testing.allocator;
-    var router = Router.init(a);
+    var router = Router.init(a, .{});
     defer router.deinit();
 
     const good = [_]RouteDecl{
         .{ .method = .GET, .path = "/api/status", .handler = dummyHandler },
     };
-    try router.registerRouteTable(&good);
+    try router.register(&good);
 
     // Attempt to register table with collision
     const conflicting = [_]RouteDecl{
         .{ .method = .GET, .path = "/u/{id}", .handler = dummyHandler },
         .{ .method = .GET, .path = "/u/{name}", .handler = dummyHandler },
     };
-    try std.testing.expectError(RouteError.DuplicateRoute, router.registerRouteTable(&conflicting));
+    try std.testing.expectError(RouteError.DuplicateRoute, router.register(&conflicting));
 
     // Active route table remains intact and functional
     var ctx = Context{ .allocator = a };
@@ -2477,4 +2600,32 @@ test "forwarded client resolution skips trusted proxy hops" {
         .trustedProxies = &proxies,
     };
     try std.testing.expectEqualStrings("127.0.0.1", all_proxy.remoteAddress().?);
+}
+
+test "context JSON helpers decode typed and dynamic keys" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .allocator = arena.allocator(),
+        .body = "{\"user-name\":\"Fiaz\",\"@context\":\"https://example.com\",\"count\":3}",
+    };
+
+    const Renamed = struct {
+        @"user-name": []const u8,
+        @"@context": []const u8,
+        count: i64,
+    };
+    const renamed = try ctx.json(Renamed);
+    try std.testing.expectEqualStrings("Fiaz", renamed.@"user-name");
+    try std.testing.expectEqualStrings("https://example.com", renamed.@"@context");
+    try std.testing.expectEqual(@as(i64, 3), renamed.count);
+
+    const Typed = struct { count: i64 };
+    const typed = try ctx.json(Typed);
+    try std.testing.expectEqual(@as(i64, 3), typed.count);
+
+    const dynamic = try ctx.jsonValue();
+    try std.testing.expectEqualStrings("Fiaz", jsonMod.getString(&dynamic.object, "user-name").?);
+    try std.testing.expectEqualStrings("https://example.com", jsonMod.getString(&dynamic.object, "@context").?);
 }

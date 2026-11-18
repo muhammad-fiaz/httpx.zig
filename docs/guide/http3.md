@@ -22,8 +22,8 @@ The HTTP/3 runtime has loopback integration coverage on the native test host. Cr
 ## Features
 
 - **High-level Client Runtime** - `Client` performs QUIC + TLS 1.3 with ALPN `h3`, certificate verification, QPACK dynamic-table encoding, response trailers, and loss recovery.
-- **High-level Server Runtime** - `httpx.Server` can bind a UDP endpoint when `.http3 = true` and a default certificate/key identity are provided. It routes supported H3 requests through server handlers. The handshake requires that default identity; selector-only TLS configuration does not initialize the H3 endpoint.
-- **Protocol-level Server Runtime** - serve H3 over QUIC directly with `httpx.protocols.quic` (Endpoint + Pump + HandshakeDriver) and `httpx.protocols.http3` builders; see `examples/http3Client.zig` for a complete loopback server.
+- **High-level Server Runtime** - `httpx.Server` can bind a UDP endpoint when `.protocols = .{ .http3 = true }` and a default certificate/key identity are provided. It routes supported H3 requests through server handlers. The handshake requires that default identity; selector-only TLS configuration does not initialize the H3 endpoint.
+- **Protocol-level Server Runtime** - serve H3 over QUIC directly with `httpx.protocols.quic` (Endpoint + Pump + Handshake) and `httpx.protocols.http3` builders; see `examples/http3Client.zig` for a complete loopback server.
 - **Handshake Lifecycle** - the server confirms the handshake after verifying the client Finished and sends `HANDSHAKE_DONE`; the client confirms on that frame or on a 1-RTT acknowledgment. Confirmation discards the Handshake keys on both ends and late Handshake packets are ignored (RFC 9001 Sections 4.1.2 and 4.9.2).
 
 ### Finding the HTTP/3 port
@@ -34,7 +34,7 @@ HTTP/3 shares the HTTP/1.1 port number (RFC 9114 Section 3), so a client normall
 const server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 0,
-    .http3 = true,
+    .protocols = .{ .http3 = true },
     .tls = .{ .certificatePem = certPem, .privateKeyPem = keyPem },
 });
 
@@ -49,22 +49,64 @@ if (server.http3.portFallback) {
 An explicit nonzero `.port` never falls back: if the UDP bind fails (for example, the port is already in use or falls in a reserved range), `Server.init` returns the bind error and releases the TCP listener, because moving HTTP/3 to an unannounced port would break the shared-port contract.
 
 Always prefer `server.http3.port()` over `server.localPort()` when dialling HTTP/3.
-- **QPACK Header Compression** - RFC 9204 static and dynamic tables with encoder/decoder stream prefixes, insert-count acknowledgments, and blocked-section retry.
-- **QUIC Transport Framing** - STREAM, CRYPTO, ACK, HANDSHAKE_DONE, RESET_STREAM/STOP_SENDING, transport parameters, PTO/loss recovery, and NewReno congestion control.
-- **Variable-Length Integers** - QUIC varint encoding/decoding.
-- **Connection IDs** - Connection ID generation and peer table.
-- **Flow Control** - MAX_DATA and MAX_STREAM_DATA frame handling with connection-level and per-stream flow control windows.
-- **GOAWAY and CONNECTION_CLOSE** - Frame codecs present; server-initiated graceful shutdown mid-request is future work.
-- **Stream Cancellation** - RESET_STREAM and STOP_SENDING frame codecs.
 
-### Deliberate Current Limits
+### Connection handling
 
-- The high-level HTTP/3 client pools QUIC connections for sequential reuse but does not multiplex concurrent requests over one connection; proxy routes are rejected loudly (`Http3ProxyUnsupported`).
-- 0-RTT resumption works over QUIC, but the QUIC driver does not handle HelloRetryRequest; clients always send an X25519 share.
-- Retry/token validation, QUIC v1/v2 version negotiation, and 1-RTT key updates are implemented. Set `.http3Retry = true` in the inline options passed to `httpx.Server.init` to require address validation before the Initial flight; the 3x anti-amplification limit otherwise applies until the client Finished is verified. The high-level client honors Retry automatically and resends the ClientHello under the new Initial keys.
-- No connection migration, server push, HTTP/3 datagrams, or extended CONNECT.
-- Streaming uploads are supported through a request body source. The one-shot
-  API buffers response bodies, so streaming downloads are not provided.
+- **QPACK** — RFC 9204 static and dynamic tables with encoder/decoder stream prefixes, insert-count acknowledgments, and blocked-section retry.
+- **QUIC framing** — STREAM, CRYPTO, ACK, HANDSHAKE_DONE, RESET_STREAM/STOP_SENDING, transport parameters, PTO/loss recovery, and NewReno congestion control.
+- **Varints** — QUIC variable-length integer encoding/decoding.
+- **Connection IDs** — generation and peer table.
+- **Flow control** — MAX_DATA and MAX_STREAM_DATA with connection-level and per-stream windows.
+- **GOAWAY / CONNECTION_CLOSE** — graceful shutdown and close handling.
+- **Stream cancellation** — RESET_STREAM and STOP_SENDING codecs.
+
+### Operational Notes
+
+- `Client` pools QUIC connections per origin for sequential reuse. For an independent UDP connection, initialize a second client:
+
+  ```zig
+  var client = httpx.Client.init(allocator, io, .{});
+  defer client.deinit();
+  ```
+
+  Without it, a second request reuses the pooled connection. HTTP/3 over a proxy is rejected: `try client.get("https://example.com/", .{ .httpVersion = .http3, .proxy = "http://127.0.0.1:8080" })` returns `error.Http3ProxyUnsupported`.
+
+- `client.close()` drains the pool and sends an application `CONNECTION_CLOSE`
+  on each pooled QUIC connection before joining its pump, so a server can
+  release the session immediately instead of waiting for its idle timeout. Use
+  it when an application deliberately ends a session, for example before
+  opening a fresh one to exercise 0-RTT resumption.
+
+- HTTP/3 session tickets use keys owned by the `Server`, and 0-RTT replay
+  detection uses a server-wide cache. Tickets therefore remain valid across
+  connections for the lifetime of the server. Supply explicit `.tls = .{
+  .ticketKeys = ... }` values when several server instances must accept each
+  other's tickets; otherwise a single key is generated from OS entropy on
+  first use and wiped on `deinit`.
+
+- Require QUIC address validation before the Initial flight with one inline field:
+
+  ```zig
+  var server = try httpx.Server.init(allocator, io, .{ .http3Options = .{ .retry = true } });
+  defer server.deinit();
+  ```
+
+  Without it, the RFC 9000 Section 8.1 3x anti-amplification limit applies until the client Finished is verified. The client handles Retry automatically: `cliConn.retryPending` is set and the ClientHello is resent under the new Initial keys.
+
+- Stream uploads with a body source and read responses incrementally:
+
+  ```zig
+  var reader = httpx.SliceReader.init("streamed-data-payload");
+  var res = try client.requestStream("https://127.0.0.1:8443/upload", .{
+      .method = .POST,
+      .httpVersion = .http3,
+      .tls = .{ .verify = .caBundle, .caPem = ca_pem },
+      .body = reader.source(),
+  });
+  defer res.deinit();
+  var buf: [64]u8 = undefined;
+  const n = try res.body.read(&buf);
+  ```
 
 ## High-level Client Usage
 
@@ -93,13 +135,14 @@ var ep = try httpx.quic.transport.Endpoint.init(allocator, io, conn, .{ .port = 
 var pump = httpx.quic.Pump{};
 try pump.start(&ep, allocator);
 defer pump.stop();
-var drv = httpx.quic.HandshakeDriver.initServer(io, allocator, .{
+var drv = httpx.quic.Handshake.init(allocator, io, .{
+    .role = .server,
     .certChainPem = cert_pem,
     .privateKeyPem = key_pem,
 });
 defer drv.deinit();
-conn.tls = .{ .ctx = &drv, .onData = httpx.quic.HandshakeDriver.onData };
-try httpx.quic.handshake.serveHandshake(&ep, &pump, &drv, 15_000);
+drv.attach(conn);
+try httpx.quic.handshake.serve(.{ .ep = &ep, .pump = &pump, .hs = &drv, .deadlineMs = 15_000 });
 // ... read request HEADERS on a bidi stream, route, respond ...
 ```
 
@@ -250,11 +293,11 @@ std.debug.print("Key phase: {}\n", .{decoded.keyPhase});
 
 | Type | Long Header | Description |
 |------|-------------|-------------|
-| Initial | ✅ | Connection establishment |
-| 0-RTT | ✅ | Early data |
-| Handshake | ✅ | TLS handshake completion |
-| Retry | ✅ | Address validation |
-| 1-RTT | âŒ (Short) | Application data |
+| Initial | Yes | Connection establishment |
+| 0-RTT | Yes | Early data |
+| Handshake | Yes | TLS handshake completion |
+| Retry | Yes | Address validation |
+| 1-RTT | No (short header) | Application data |
 
 ## QUIC Frames
 
@@ -413,7 +456,7 @@ QUIC transport parameters can be encoded:
 var list = std.ArrayList(u8).empty;
 defer list.deinit(allocator);
 try httpx.quic.transportParameters.encode(&list, allocator, .{
-    .maxIdleTimeoutMs = 30000,
+    .maxIdleMs = 30000,
     .maxUdpPayloadSize = 1350,
     .initialMaxData = 1048576,
     .initialMaxStreamDataBidiLocal = 262144,
@@ -437,6 +480,40 @@ const params = httpx.quic.transportParameters.Params{
     .initialMaxStreamDataUni = 1024 * 1024,
 };
 ```
+
+The same limits are what the live QUIC connection advertises and
+enforces. They are validated at `Connection.init` (`error.InvalidConfig`
+for impossible windows, too many streams, or a UDP payload outside
+1200–65527 bytes). Protocol defaults are secure and need no manual
+construction.
+
+Client applications tune them through the client initialization options,
+never by constructing a protocol config object of their own:
+
+```zig
+var client = httpx.Client.init(allocator, io, .{
+    .http3 = true,
+    .protocols = .{ .http3 = .{ .quic = .{
+        .maxIdleMs = 30_000,
+        .initialMaxData = 10 * 1024 * 1024,
+        .initialMaxStreamsBidi = 128,
+        .maxUdpPayload = 1472,
+    } } },
+});
+defer client.deinit();
+```
+
+Omitting `.protocols` or using `.{}` keeps the secure defaults.
+
+The effective idle timeout is the minimum of the local value and the
+peer's advertised `max_idle_timeout`; zero disables enforcement. When it
+expires, `pollTimeouts` transitions the connection to `.draining` and
+returns `error.Draining`.
+
+On the server these values are exposed as `http3Options.maxIdleMs`,
+`http3Options.initialMaxData`, `http3Options.initialMaxStreamDataBidiLocal`,
+`http3Options.initialMaxStreamDataBidiRemote`, `http3Options.initialMaxStreamDataUni`,
+`http3Options.maxStreamsBidi`, `http3Options.maxStreamsUni`, and `http3Options.maxUdpPayload`.
 
 ## GOAWAY and CONNECTION_CLOSE
 

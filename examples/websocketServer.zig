@@ -14,7 +14,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .maxConnections = 5,
+        .limits = .{ .maxConnections = 5 },
     });
     defer server.deinit();
 
@@ -73,19 +73,16 @@ fn indexHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
 }
 
 fn wsHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    // If request contains Sec-WebSocket-Key, compute Sec-WebSocket-Accept
-    if (ctx.header("sec-websocket-key")) |key| {
-        var acceptBuf: [28]u8 = undefined;
-        httpx.websocket.computeAccept(key, &acceptBuf);
-        return .{
-            .status = 101,
-            .headers = try ctx.allocator.dupe(httpx.router.Header, &[_]httpx.router.Header{
-                .{ .name = "Upgrade", .value = "websocket" },
-                .{ .name = "Connection", .value = "Upgrade" },
-                .{ .name = "Sec-WebSocket-Accept", .value = try ctx.allocator.dupe(u8, &acceptBuf) },
-            }),
-            .body = "",
-        };
+    // The HTTP worker hands the connection to the session after this returns.
+    try httpx.websocket.accept(ctx, .{
+        .callbacks = .{ .onMessage = echo },
+    });
+    return .{};
+}
+
+fn echo(session: *httpx.websocket.Session, message: *httpx.websocket.Message, _: ?*anyopaque) anyerror!void {
+    switch (message.kind) {
+        .text => try session.sendText(message.data),
+        .binary => try session.sendBinary(message.data),
     }
-    return ctx.html("<h1>WebSocket Endpoint</h1><p>Connect with a WebSocket client.</p>");
 }

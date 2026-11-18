@@ -31,8 +31,3 @@ This is the output format of `zig build run-interceptor-example` (see `examples/
 ```bash
 zig build run-interceptor-example
 ```
-
-## What to Verify
-
-- `GET /` returns 200 with the expected JSON body.
-- Middleware runs in registration order.

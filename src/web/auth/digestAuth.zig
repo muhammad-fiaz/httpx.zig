@@ -130,23 +130,18 @@ pub fn parseChallenge(headerValue: []const u8) ParseError!Challenge {
 }
 
 fn hashHex(comptime Alg: Algorithm, out: []u8, data: []const u8) void {
-    const hex = "0123456789abcdef";
     switch (Alg) {
         .sha256 => {
             var digest: [32]u8 = undefined;
             std.crypto.hash.sha2.Sha256.hash(data, &digest, .{});
-            for (digest, 0..) |b, i| {
-                out[i * 2] = hex[b >> 4];
-                out[i * 2 + 1] = hex[b & 0x0f];
-            }
+            const encoded = std.fmt.bytesToHex(digest, .lower);
+            @memcpy(out[0..encoded.len], &encoded);
         },
         .md5 => {
             var digest: [16]u8 = undefined;
             std.crypto.hash.Md5.hash(data, &digest, .{});
-            for (digest, 0..) |b, i| {
-                out[i * 2] = hex[b >> 4];
-                out[i * 2 + 1] = hex[b & 0x0f];
-            }
+            const encoded = std.fmt.bytesToHex(digest, .lower);
+            @memcpy(out[0..encoded.len], &encoded);
         },
     }
 }
@@ -441,7 +436,7 @@ test "rfc 7616 sha-256 test vector calculation" {
     // Verify response is a valid 64-character lowercase hex string
     try std.testing.expectEqual(@as(usize, 64), resp.len);
     for (resp) |c| {
-        try std.testing.expect((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f'));
+        try std.testing.expect(std.ascii.isDigit(c) or (c >= 'a' and c <= 'f'));
     }
 
     // Build client header and verify

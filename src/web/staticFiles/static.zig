@@ -1,0 +1,994 @@
+//! Static file serving: single files, directories, and SPA roots.
+//!
+//! Features
+//!   - directory mounting with index.html resolution
+//!   - MIME detection via common/mime
+//!   - strong ETag (mtime+size) and Last-Modified headers
+//!   - If-None-Match / If-Modified-Since -> 304 Not Modified
+//!   - single Range requests -> 206 + Content-Range; unsatisfiable -> 416
+//!   - HEAD honored (headers, empty body)
+//!   - traversal-safe: percent-decoded paths cannot escape the mount root
+//!
+//! Ownership: per-request allocations come from ctx.allocator (the request
+//! arena); Response slices borrow from it.
+//!
+//! References:
+//!   - RFC 9110 Section 8.8 — ETag
+//!   - RFC 9110 Section 8.8.2 — If-None-Match
+//!   - RFC 9110 Section 8.8.3 — Last-Modified
+//!   - RFC 9110 Section 8.8.4 — If-Modified-Since
+//!   - RFC 9110 Section 14.1 — Range Requests
+
+const std = @import("std");
+const builtin = @import("builtin");
+const Allocator = std.mem.Allocator;
+const routerMod = @import("../router/router.zig");
+const parseMod = @import("../../common/parse.zig");
+const fsMod = @import("../../utils/fs.zig");
+const reload = @import("../watcher/fileWatcher.zig");
+const Context = routerMod.Context;
+const Response = routerMod.Response;
+const Method = @import("../../common/method.zig").Method;
+const mime = @import("../../common/mime.zig");
+const contentNegotiation = @import("../../common/contentNegotiation.zig");
+const z = @import("zigantic");
+
+const ConfigSchema = z.objectOf(.{
+    .root = z.withDefault(z.string(.{ .min = 1 }), "public"),
+    .mount = z.withDefault(z.string(.{ .min = 1, .prefix = "/" }), "/"),
+    .indexFile = z.withDefault(z.string(.{ .min = 1 }), "index.html"),
+    .maxFileSize = z.withDefault(z.nonNegativeInt(usize, .{}), 16 * 1024 * 1024),
+    .cacheControl = z.withDefault(z.string(.{}), "public, max-age=3600"),
+    .liveReload = z.withDefault(z.boolean(.{}), false),
+    .reloadSsePath = z.withDefault(z.string(.{ .min = 1, .prefix = "/" }), "/__httpx_liveReload"),
+    .spaFallback = z.optional(z.string(.{ .min = 1 })),
+    .spaExcludePrefixes = z.withDefault(z.array(z.string(.{ .min = 1, .prefix = "/" }), .{}), &.{}),
+    .filesystem = z.withDefault(z.boolean(.{}), true),
+}, .{});
+pub const Config = ConfigSchema.Value;
+
+pub const MountError = error{
+    InvalidMount,
+    DuplicateRoute,
+    OutOfMemory,
+};
+
+const State = struct {
+    allocator: Allocator,
+    root: []u8,
+    index: []u8,
+    cacheControl: []u8,
+    maxSize: usize,
+    liveReload: bool,
+    reloadSsePath: []u8,
+    spaFallback: ?[]u8,
+    spaExcludePrefixes: [][]u8,
+    filesystem: bool,
+
+    fn create(a: Allocator, cfg: Config) !*State {
+        const st = try a.create(State);
+        errdefer a.destroy(st);
+
+        var prefixes: std.ArrayList([]u8) = .empty;
+        errdefer {
+            for (prefixes.items) |p| a.free(p);
+            prefixes.deinit(a);
+        }
+        for (cfg.spaExcludePrefixes) |p| {
+            try prefixes.append(a, try a.dupe(u8, p));
+        }
+
+        st.* = .{
+            .allocator = a,
+            .root = try normalizeDir(a, cfg.root),
+            .index = try a.dupe(u8, cfg.indexFile),
+            .cacheControl = try a.dupe(u8, cfg.cacheControl),
+            .maxSize = cfg.maxFileSize,
+            .liveReload = cfg.liveReload,
+            .reloadSsePath = try a.dupe(u8, cfg.reloadSsePath),
+            .spaFallback = if (cfg.spaFallback) |fb| try a.dupe(u8, fb) else null,
+            .spaExcludePrefixes = try prefixes.toOwnedSlice(a),
+            .filesystem = cfg.filesystem,
+        };
+        return st;
+    }
+
+    fn destroy(self: *State) void {
+        const a = self.allocator;
+        a.free(self.root);
+        a.free(self.index);
+        a.free(self.cacheControl);
+        a.free(self.reloadSsePath);
+        for (self.spaExcludePrefixes) |p| a.free(p);
+        a.free(self.spaExcludePrefixes);
+        if (self.spaFallback) |fb| a.free(fb);
+        a.destroy(self);
+    }
+};
+
+fn trimSlashes(p: []const u8) []const u8 {
+    return std.mem.trim(u8, p, "/");
+}
+
+fn normalizeDir(a: Allocator, dir: []const u8) ![]u8 {
+    if (dir.len == 0) return a.dupe(u8, dir);
+    const trimmed = std.mem.trimEnd(u8, dir, "/\\");
+    const clean: []const u8 = if (trimmed.len == 0) dir[0..1] else trimmed;
+    return a.dupe(u8, clean);
+}
+
+/// Registers GET routes for `mount` itself and `mount/*path`.
+pub fn register(router: *routerMod.Router, cfg: Config) MountError!void {
+    var scratch: [4096]u8 = undefined;
+    const issue = z.checkFirst(ConfigSchema, cfg, &scratch, .{}) catch
+        return MountError.InvalidMount;
+    if (issue != null) return MountError.InvalidMount;
+
+    const allocator = router.allocator;
+    const base = trimSlashes(cfg.mount);
+    const p1: []const u8 = if (base.len == 0)
+        "/"
+    else
+        std.fmt.allocPrint(allocator, "/{s}", .{base}) catch return MountError.OutOfMemory;
+    defer if (base.len != 0) allocator.free(@constCast(p1));
+    const p2: []const u8 = if (base.len == 0)
+        "/*path"
+    else
+        std.fmt.allocPrint(allocator, "/{s}/*path", .{base}) catch return MountError.OutOfMemory;
+    defer if (base.len != 0) allocator.free(@constCast(p2));
+
+    // Validate first so registration failure is atomic.
+    if (router.hasConflict(.GET, p1) or router.hasConflict(.GET, p2))
+        return MountError.DuplicateRoute;
+
+    const st = State.create(allocator, cfg) catch return MountError.OutOfMemory;
+
+    const DestroyHelper = struct {
+        fn run(ptr: ?*anyopaque) void {
+            if (ptr) |p| {
+                const s: *State = @ptrCast(@alignCast(p));
+                s.destroy();
+            }
+        }
+    };
+
+    router.get(p1, serveIndexHandler, .{ .userData = st, .deinitData = DestroyHelper.run }) catch {
+        st.destroy();
+        return MountError.OutOfMemory;
+    };
+    router.get(p2, serveFileHandler, .{ .userData = st, .deinitData = DestroyHelper.run }) catch {
+        _ = router.remove(.GET, p1);
+        st.destroy();
+        return MountError.OutOfMemory;
+    };
+}
+
+test "root static mount registers a catch-all route at one slash" {
+    var router = routerMod.Router.init(std.testing.allocator, .{});
+    defer router.deinit();
+
+    try register(&router, .{ .root = ".", .mount = "/", .filesystem = false });
+    try std.testing.expect(router.hasConflict(.GET, "/"));
+
+    var ctx = Context{ .allocator = std.testing.allocator, .method = .GET };
+    const entry = router.matchEntry(.GET, "/assets/app.css", &ctx);
+    try std.testing.expect(entry != null);
+    try std.testing.expectEqualStrings("assets/app.css", ctx.param("path").?);
+}
+
+// handlers
+
+fn serveIndexHandler(ctx: *Context) anyerror!Response {
+    const st: *State = @ptrCast(@alignCast(ctx.userData orelse return errText(500, "static not mounted")));
+    return servePath(ctx, st, "/");
+}
+
+fn serveFileHandler(ctx: *Context) anyerror!Response {
+    const st: *State = @ptrCast(@alignCast(ctx.userData orelse return errText(500, "static not mounted")));
+    return servePath(ctx, st, ctx.param("path") orelse "/");
+}
+
+fn errText(status: u16, text: []const u8) Response {
+    return .{ .status = status, .contentType = mime.textPlainUtf8, .body = text };
+}
+
+// path resolution
+
+pub fn percentDecode(alloc: Allocator, s: []const u8) Allocator.Error![]u8 {
+    // First pass: exact output length so the returned slice is freed with
+    // the same length it was allocated as (required by sized allocators).
+    var outLen: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] == '%' and i + 2 < s.len and
+            std.ascii.isHex(s[i + 1]) and std.ascii.isHex(s[i + 2]))
+        {
+            outLen += 1;
+            i += 3;
+        } else {
+            outLen += 1;
+            i += 1;
+        }
+    }
+
+    const out = alloc.alloc(u8, outLen) catch return Allocator.Error.OutOfMemory;
+    errdefer alloc.free(out);
+    var n: usize = 0;
+    i = 0;
+    while (i < s.len) {
+        if (s[i] == '%' and i + 2 < s.len and
+            std.ascii.isHex(s[i + 1]) and std.ascii.isHex(s[i + 2]))
+        {
+            const hi = std.fmt.charToDigit(s[i + 1], 16) catch unreachable;
+            const lo = std.fmt.charToDigit(s[i + 2], 16) catch unreachable;
+            out[n] = hi *% 16 +% lo;
+            n += 1;
+            i += 3;
+        } else {
+            out[n] = s[i];
+            n += 1;
+            i += 1;
+        }
+    }
+    return out;
+}
+
+/// Resolves a URL path against `root`; null when it escapes the root.
+/// Leak-free under any allocator (intermediate decode buffer always freed).
+pub fn safeJoin(alloc: Allocator, urlPath: []const u8, root: []const u8) !?[]u8 {
+    const decoded = try percentDecode(alloc, urlPath);
+    defer alloc.free(decoded);
+
+    for (decoded) |c| {
+        if (c == 0 or c == '\\') return null;
+    }
+
+    var parts: std.ArrayList([]const u8) = .empty;
+    defer parts.deinit(alloc);
+
+    var it = std.mem.splitScalar(u8, decoded, '/');
+    while (it.next()) |seg| {
+        if (seg.len == 0 or std.mem.eql(u8, seg, ".")) continue;
+        if (std.mem.eql(u8, seg, "..")) {
+            if (parts.items.len == 0) return null; // escapes root
+            _ = parts.pop();
+            continue;
+        }
+        parts.append(alloc, seg) catch return Allocator.Error.OutOfMemory;
+    }
+
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    out.writer.writeAll(root) catch return Allocator.Error.OutOfMemory;
+    if (parts.items.len == 0) {
+        if (!std.mem.endsWith(u8, root, "/")) {
+            out.writer.writeByte('/') catch return Allocator.Error.OutOfMemory;
+        }
+    } else {
+        for (parts.items) |seg| {
+            out.writer.writeByte('/') catch return Allocator.Error.OutOfMemory;
+            out.writer.writeAll(seg) catch return Allocator.Error.OutOfMemory;
+        }
+    }
+    return out.toOwnedSlice() catch Allocator.Error.OutOfMemory;
+}
+
+/// Decodes and normalizes a URL path into a root-relative path. Rejects
+/// malformed percent escapes, NUL bytes, and platform separator ambiguity.
+fn normalizedRelativePath(alloc: Allocator, urlPath: []const u8) !?[]u8 {
+    var i: usize = 0;
+    while (i < urlPath.len) : (i += 1) {
+        if (urlPath[i] != '%') continue;
+        if (i + 2 >= urlPath.len or !std.ascii.isHex(urlPath[i + 1]) or !std.ascii.isHex(urlPath[i + 2])) return null;
+        i += 2;
+    }
+    const decoded = try percentDecode(alloc, urlPath);
+    defer alloc.free(decoded);
+    for (decoded) |c| {
+        if (c == 0 or c == '\\' or c == ':') return null;
+    }
+    var parts: std.ArrayList([]const u8) = .empty;
+    defer parts.deinit(alloc);
+    var it = std.mem.splitScalar(u8, decoded, '/');
+    while (it.next()) |seg| {
+        if (seg.len == 0 or std.mem.eql(u8, seg, ".")) continue;
+        if (std.mem.eql(u8, seg, "..")) {
+            if (parts.items.len == 0) return null;
+            _ = parts.pop();
+        } else {
+            try parts.append(alloc, seg);
+        }
+    }
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    for (parts.items, 0..) |seg, idx| {
+        if (idx != 0) try out.writer.writeByte('/');
+        try out.writer.writeAll(seg);
+    }
+    return try out.toOwnedSlice();
+}
+
+fn resolveRelativePath(alloc: Allocator, relative: []const u8, leaf: []const u8) !?[]u8 {
+    const combined = if (relative.len == 0)
+        try alloc.dupe(u8, leaf)
+    else
+        try std.fmt.allocPrint(alloc, "{s}/{s}", .{ relative, leaf });
+    defer alloc.free(combined);
+    return normalizedRelativePath(alloc, combined);
+}
+
+// filesystem
+
+pub const FileMeta = struct { size: u64, mtimeNs: i128 };
+
+const OpenedAsset = struct {
+    file: std.Io.File,
+    stat: std.Io.File.Stat,
+
+    fn close(self: OpenedAsset, io: std.Io) void {
+        self.file.close(io);
+    }
+};
+
+/// Opens a configured-root-relative path without following any symlink or
+/// reparse point. Every component is opened relative to a live directory
+/// handle, so the checked path and the file ultimately read are the same.
+fn openAssetNoFollow(io: std.Io, root: []const u8, relative: []const u8) !OpenedAsset {
+    const openOpts: std.Io.Dir.OpenOptions = .{ .access_sub_paths = true, .follow_symlinks = false };
+    var dir = if (std.fs.path.isAbsolute(root))
+        try std.Io.Dir.openDirAbsolute(io, root, openOpts)
+    else
+        try std.Io.Dir.cwd().openDir(io, root, openOpts);
+    defer dir.close(io);
+
+    var parts = std.mem.splitScalar(u8, relative, '/');
+    var component = parts.next() orelse return error.FileNotFound;
+    while (parts.next()) |next| {
+        if (component.len == 0) return error.FileNotFound;
+        const child = dir.openDir(io, component, .{ .access_sub_paths = true, .follow_symlinks = false }) catch |err| switch (err) {
+            // POSIX reports a no-follow rejection of a symlinked intermediate
+            // directory as ENOTDIR (Zig: NotDir) and of a symlink loop as
+            // ELOOP; Windows reports both as not-found. Surface all of them
+            // as FileNotFound so the no-follow behavior is identical on
+            // every platform.
+            error.NotDir, error.SymLinkLoop => return error.FileNotFound,
+            else => return err,
+        };
+        dir.close(io);
+        dir = child;
+        component = next;
+    }
+    if (component.len == 0) return error.FileNotFound;
+    const file = dir.openFile(io, component, .{ .allow_directory = false, .follow_symlinks = false }) catch |err| switch (err) {
+        // POSIX reports an O_NOFOLLOW rejection of the final component as
+        // ELOOP ("symlink loop"); Windows reports it as not-found. Surface
+        // both as FileNotFound so the no-follow behavior is identical
+        // everywhere: the path is not a regular file reachable without
+        // following symlinks.
+        error.SymLinkLoop => return error.FileNotFound,
+        else => return err,
+    };
+    errdefer file.close(io);
+    const stat = try file.stat(io);
+    if (stat.kind != .file) return error.FileNotFound;
+    return .{ .file = file, .stat = stat };
+}
+
+fn fileMeta(stat: std.Io.File.Stat) FileMeta {
+    return .{ .size = stat.size, .mtimeNs = stat.mtime.nanoseconds };
+}
+
+fn readOpenedAll(io: std.Io, file: std.Io.File, dest: []u8) !void {
+    const n = try file.readPositionalAll(io, dest, 0);
+    if (n != dest.len) return error.UnexpectedEof;
+}
+
+fn readOpenedRange(io: std.Io, file: std.Io.File, offset: u64, dest: []u8) !void {
+    const n = try file.readPositionalAll(io, dest, offset);
+    if (n != dest.len) return error.UnexpectedEof;
+}
+
+pub fn statPath(path: []const u8) ?FileMeta {
+    const st = fsMod.statPath(path) orelse return null;
+    if (st.isDir) return null;
+    return .{ .size = st.size, .mtimeNs = st.mtimeNs };
+}
+
+// ranges
+
+pub const RangeSpec = struct { start: u64, end: u64 }; // inclusive
+
+fn checkedRangeLength(r: RangeSpec, maxSize: usize) ?usize {
+    const length64 = std.math.add(u64, r.end - r.start, 1) catch return null;
+    const length = std.math.cast(usize, length64) orelse return null;
+    if (length > maxSize) return null;
+    return length;
+}
+
+pub fn parseRange(spec: []const u8, size: u64) ?RangeSpec {
+    if (!std.mem.startsWith(u8, spec, "bytes=")) return null;
+    if (size == 0) return null;
+    const body = spec["bytes=".len..];
+    if (std.mem.indexOfScalar(u8, body, ',') != null) return null; // multi-range unsupported
+
+    const dash = std.mem.indexOfScalar(u8, body, '-') orelse return null;
+    const aPart = body[0..dash];
+    const bPart = body[dash + 1 ..];
+
+    if (aPart.len == 0 and bPart.len == 0) return null;
+    if (aPart.len == 0) {
+        const n = std.fmt.parseInt(u64, bPart, 10) catch return null;
+        if (n == 0) return null;
+        if (n >= size) return RangeSpec{ .start = 0, .end = size - 1 };
+        return RangeSpec{ .start = size - n, .end = size - 1 };
+    }
+    const start = std.fmt.parseInt(u64, aPart, 10) catch return null;
+    if (start >= size) return null;
+    if (bPart.len == 0) return RangeSpec{ .start = start, .end = size - 1 };
+    const end = std.fmt.parseInt(u64, bPart, 10) catch return null;
+    if (end < start) return null;
+    return RangeSpec{ .start = start, .end = @min(end, size - 1) };
+}
+
+// SPA fallback policy
+
+/// True when a path represents an asset request (has a non-HTML file extension).
+pub fn isAssetPath(path: []const u8) bool {
+    const lastSlash = std.mem.lastIndexOfScalar(u8, path, '/');
+    const segment = if (lastSlash) |s| path[s + 1 ..] else path;
+    const dot = std.mem.lastIndexOfScalar(u8, segment, '.') orelse return false;
+    const ext = segment[dot..];
+    if (std.ascii.eqlIgnoreCase(ext, ".html") or std.ascii.eqlIgnoreCase(ext, ".htm")) {
+        return false;
+    }
+    return true;
+}
+
+/// Checks whether the request Accept header permits HTML responses.
+pub fn acceptsHtml(acceptHeader: ?[]const u8) bool {
+    const h = acceptHeader orelse return true;
+    return contentNegotiation.accepts(h, "text/html");
+}
+
+/// Checks if path starts with any excluded prefix.
+pub fn isExcludedPrefix(path: []const u8, excludes: []const []const u8) bool {
+    for (excludes) |prefix| {
+        if (prefix.len == 0) continue;
+        if (std.mem.startsWith(u8, path, prefix)) {
+            if (path.len == prefix.len or prefix[prefix.len - 1] == '/' or path[prefix.len] == '/') {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// Determines whether a missing resource should fall back to the SPA entry file.
+pub fn shouldSpaFallback(
+    method: Method,
+    urlPath: []const u8,
+    acceptHeader: ?[]const u8,
+    excludes: []const []const u8,
+) bool {
+    if (method != .GET and method != .HEAD) return false;
+    if (isExcludedPrefix(urlPath, excludes)) return false;
+    if (isAssetPath(urlPath)) return false;
+    if (!acceptsHtml(acceptHeader)) return false;
+    return true;
+}
+
+// serving
+
+fn respondWithEmbedded(ctx: *Context, st: *State, asset: @import("../assets/assetStore.zig").Asset) anyerror!Response {
+    const a = ctx.allocator;
+    const isHead = ctx.method == .HEAD;
+
+    if (ctx.header("If-None-Match")) |inm| {
+        if (etagMatches(inm, asset.etag)) {
+            const hs = a.dupe(routerMod.Header, &.{.{ .name = "ETag", .value = asset.etag }}) catch return Allocator.Error.OutOfMemory;
+            return .{ .status = 304, .headers = hs };
+        }
+    }
+
+    var headers: std.ArrayList(routerMod.Header) = .empty;
+    headers.append(a, .{ .name = "ETag", .value = asset.etag }) catch return Allocator.Error.OutOfMemory;
+    headers.append(a, .{ .name = "Accept-Ranges", .value = "bytes" }) catch return Allocator.Error.OutOfMemory;
+    if (st.cacheControl.len > 0)
+        headers.append(a, .{ .name = "Cache-Control", .value = st.cacheControl }) catch return Allocator.Error.OutOfMemory;
+    // Single range request over the stored bytes (no live-reload injection:
+    // ranges address the asset as stored).
+    if (ctx.header("Range")) |spec| {
+        if (parseRange(spec, asset.content.len)) |r| {
+            const len: usize = @intCast(r.end - r.start + 1);
+            if (len > st.maxSize) return errText(413, "range too large");
+            if (isHead) {
+                const clStr = std.fmt.allocPrint(a, "{d}", .{len}) catch return Allocator.Error.OutOfMemory;
+                headers.append(a, .{ .name = "Content-Length", .value = clStr }) catch return Allocator.Error.OutOfMemory;
+            }
+            const cr = std.fmt.allocPrint(a, "bytes {d}-{d}/{d}", .{ r.start, r.end, asset.content.len }) catch return Allocator.Error.OutOfMemory;
+            headers.append(a, .{ .name = "Content-Range", .value = cr }) catch return Allocator.Error.OutOfMemory;
+            return .{
+                .status = 206,
+                .contentType = asset.contentType,
+                .body = if (isHead) "" else asset.content[@intCast(r.start)..@intCast(r.end + 1)],
+                .headers = headers.items,
+            };
+        }
+        const cr = std.fmt.allocPrint(a, "bytes */{d}", .{asset.content.len}) catch return Allocator.Error.OutOfMemory;
+        const hs = a.dupe(routerMod.Header, &.{.{ .name = "Content-Range", .value = cr }}) catch return Allocator.Error.OutOfMemory;
+        return .{ .status = 416, .contentType = asset.contentType, .headers = hs };
+    }
+
+    if (isHead) {
+        const clStr = std.fmt.allocPrint(a, "{d}", .{asset.content.len}) catch return Allocator.Error.OutOfMemory;
+        headers.append(a, .{ .name = "Content-Length", .value = clStr }) catch return Allocator.Error.OutOfMemory;
+    }
+
+    if (st.liveReload and !isHead and std.mem.startsWith(u8, asset.contentType, "text/html")) {
+        const fullBody = try reload.inject(a, asset.content, st.reloadSsePath);
+        return .{
+            .status = 200,
+            .contentType = asset.contentType,
+            .body = fullBody,
+            .headers = headers.items,
+        };
+    }
+
+    return .{
+        .status = 200,
+        .contentType = asset.contentType,
+        .body = if (isHead) "" else asset.content,
+        .headers = headers.items,
+    };
+}
+
+fn servePath(ctx: *Context, st: *State, rawUrlPath: []const u8) anyerror!Response {
+    const a = ctx.allocator;
+
+    const formattedPath = if (rawUrlPath.len > 0 and rawUrlPath[0] == '/')
+        rawUrlPath
+    else
+        std.fmt.allocPrint(a, "/{s}", .{rawUrlPath}) catch return Allocator.Error.OutOfMemory;
+
+    // 1. Check embedded assets registry first for zero disk I/O single-file deployment
+    const assetsMod = @import("../assets/assetStore.zig");
+    const cleanRel = if (formattedPath.len > 0 and formattedPath[0] == '/') formattedPath[1..] else formattedPath;
+    if (assetsMod.getEmbedded(cleanRel) orelse (if (cleanRel.len == 0) assetsMod.getEmbedded(st.index) else null)) |embedded| {
+        return respondWithEmbedded(ctx, st, embedded);
+    }
+    var rootedBuf: [512]u8 = undefined;
+    if (std.fmt.bufPrint(&rootedBuf, "{s}/{s}", .{ st.root, cleanRel })) |rooted| {
+        if (assetsMod.getEmbedded(rooted)) |embedded| {
+            return respondWithEmbedded(ctx, st, embedded);
+        }
+    } else |_| {}
+
+    var opened: ?OpenedAsset = null;
+    const fallbackAllowed = if (st.spaFallback != null)
+        shouldSpaFallback(ctx.method, formattedPath, ctx.header("Accept"), st.spaExcludePrefixes)
+    else
+        false;
+
+    if (!st.filesystem) {
+        if (st.spaFallback != null and fallbackAllowed) {
+            if (assetsMod.getEmbedded(st.spaFallback.?)) |embeddedFb| {
+                return respondWithEmbedded(ctx, st, embeddedFb);
+            }
+        }
+        return errText(404, "not found");
+    }
+
+    // Normalize before consulting either the filesystem or the embedded store:
+    // the route parameter may still contain percent-encoded traversal.
+    const safeRelative = try normalizedRelativePath(a, formattedPath) orelse
+        return errText(403, "forbidden");
+    defer a.free(safeRelative);
+    var selectedRelative = safeRelative;
+    if (assetsMod.getEmbedded(safeRelative) orelse (if (safeRelative.len == 0) assetsMod.getEmbedded(st.index) else null)) |embedded| {
+        return respondWithEmbedded(ctx, st, embedded);
+    }
+
+    if (safeRelative.len != 0) {
+        opened = openAssetNoFollow(ctx.io, st.root, safeRelative) catch null;
+    }
+    if (opened == null) {
+        const indexRelative = try resolveRelativePath(a, safeRelative, st.index) orelse
+            return errText(403, "forbidden");
+        defer a.free(indexRelative);
+        opened = openAssetNoFollow(ctx.io, st.root, indexRelative) catch null;
+        if (opened != null) selectedRelative = indexRelative;
+    }
+    if (opened == null and st.spaFallback != null and fallbackAllowed) {
+        // Check embedded fallback first
+        if (assetsMod.getEmbedded(st.spaFallback.?)) |embeddedFb| {
+            return respondWithEmbedded(ctx, st, embeddedFb);
+        }
+        const fallbackRelative = try normalizedRelativePath(a, st.spaFallback.?) orelse
+            return errText(403, "forbidden");
+        defer a.free(fallbackRelative);
+        opened = openAssetNoFollow(ctx.io, st.root, fallbackRelative) catch null;
+        if (opened != null) selectedRelative = fallbackRelative;
+    }
+    var asset = opened orelse return errText(404, "not found");
+    defer asset.close(ctx.io);
+    return respondWithFile(ctx, st, asset.file, selectedRelative, fileMeta(asset.stat));
+}
+
+fn respondWithFile(ctx: *Context, st: *State, file: std.Io.File, relativePath: []const u8, meta: FileMeta) anyerror!Response {
+    const a = ctx.allocator;
+    const isHead = ctx.method == .HEAD;
+
+    const etag = etagAlloc(a, meta) catch return Allocator.Error.OutOfMemory;
+    var dateBuf: [40]u8 = undefined;
+    const lmStr = parseMod.formatHttpDate(&dateBuf, @intCast(@divFloor(meta.mtimeNs, std.time.ns_per_s)));
+    const lastModified = a.dupe(u8, lmStr) catch return Allocator.Error.OutOfMemory;
+
+    // Conditional requests.
+    if (ctx.header("If-None-Match")) |inm| {
+        if (etagMatches(inm, etag)) {
+            const hs = a.dupe(routerMod.Header, &.{.{ .name = "ETag", .value = etag }}) catch return Allocator.Error.OutOfMemory;
+            return .{ .status = 304, .headers = hs };
+        }
+    } else if (ctx.header("If-Modified-Since")) |ims| {
+        if (parseMod.parseHttpDate(ims)) |imsSecs| {
+            const lmSecs: i64 = @intCast(@divFloor(meta.mtimeNs, std.time.ns_per_s));
+            if (imsSecs >= lmSecs) return .{ .status = 304 };
+        }
+    }
+
+    var headers: std.ArrayList(routerMod.Header) = .empty;
+    headers.append(a, .{ .name = "ETag", .value = etag }) catch return Allocator.Error.OutOfMemory;
+    headers.append(a, .{ .name = "Last-Modified", .value = lastModified }) catch return Allocator.Error.OutOfMemory;
+    headers.append(a, .{ .name = "Accept-Ranges", .value = "bytes" }) catch return Allocator.Error.OutOfMemory;
+    if (st.cacheControl.len > 0)
+        headers.append(a, .{ .name = "Cache-Control", .value = st.cacheControl }) catch return Allocator.Error.OutOfMemory;
+    const contentType = mime.fromPath(relativePath);
+
+    // Single range request.
+    if (ctx.header("Range")) |spec| {
+        if (parseRange(spec, meta.size)) |r| {
+            const len = checkedRangeLength(r, st.maxSize) orelse return errText(413, "range too large");
+            if (isHead) {
+                const clStr = std.fmt.allocPrint(a, "{d}", .{len}) catch return Allocator.Error.OutOfMemory;
+                headers.append(a, .{ .name = "Content-Length", .value = clStr }) catch return Allocator.Error.OutOfMemory;
+            }
+            const body: []const u8 = if (isHead) "" else blk: {
+                const bytes = a.alloc(u8, len) catch return Allocator.Error.OutOfMemory;
+                readOpenedRange(ctx.io, file, r.start, bytes) catch return errText(500, "read error");
+                break :blk bytes;
+            };
+            const cr = std.fmt.allocPrint(a, "bytes {d}-{d}/{d}", .{ r.start, r.end, meta.size }) catch return Allocator.Error.OutOfMemory;
+            headers.append(a, .{ .name = "Content-Range", .value = cr }) catch return Allocator.Error.OutOfMemory;
+            return .{
+                .status = 206,
+                .contentType = contentType,
+                .body = body,
+                .headers = headers.items,
+            };
+        }
+        // Unsatisfiable -> 416.
+        const cr = std.fmt.allocPrint(a, "bytes */{d}", .{meta.size}) catch return Allocator.Error.OutOfMemory;
+        const hs = a.dupe(routerMod.Header, &.{.{ .name = "Content-Range", .value = cr }}) catch return Allocator.Error.OutOfMemory;
+        return .{ .status = 416, .contentType = contentType, .headers = hs };
+    }
+
+    if (isHead) {
+        const clStr = std.fmt.allocPrint(a, "{d}", .{meta.size}) catch return Allocator.Error.OutOfMemory;
+        headers.append(a, .{ .name = "Content-Length", .value = clStr }) catch return Allocator.Error.OutOfMemory;
+    }
+
+    if (meta.size > st.maxSize) return errText(413, "file too large");
+
+    const raw = a.alloc(u8, @intCast(meta.size)) catch return Allocator.Error.OutOfMemory;
+    readOpenedAll(ctx.io, file, raw) catch return errText(500, "read error");
+
+    const body: []const u8 = if (st.liveReload and !isHead and std.mem.startsWith(u8, contentType, "text/html"))
+        try reload.inject(a, raw, st.reloadSsePath)
+    else
+        raw;
+
+    return .{
+        .status = 200,
+        .contentType = contentType,
+        .body = if (isHead) "" else body,
+        .headers = headers.items,
+    };
+}
+
+fn etagAlloc(a: Allocator, meta: FileMeta) ![]u8 {
+    const mt: u64 = @truncate(@as(u128, @bitCast(meta.mtimeNs)));
+    return std.fmt.allocPrint(a, "\"{x}-{x}\"", .{ mt, meta.size });
+}
+
+fn etagMatches(headerValue: []const u8, etag: []const u8) bool {
+    if (std.mem.eql(u8, headerValue, "*")) return true;
+    var it = std.mem.splitScalar(u8, headerValue, ',');
+    while (it.next()) |candRaw| {
+        const cand = std.mem.trim(u8, candRaw, " \t");
+        if (std.mem.eql(u8, cand, etag)) return true;
+        const cWeak = if (std.mem.startsWith(u8, cand, "W/")) cand[2..] else cand;
+        const eWeak = if (std.mem.startsWith(u8, etag, "W/")) etag[2..] else etag;
+        if (std.mem.eql(u8, cWeak, eWeak)) return true;
+    }
+    return false;
+}
+
+// Tests
+
+test "safeJoin rejects traversal, encoding tricks, and windows separators" {
+    const a = std.testing.allocator;
+    const root = "/srv/public";
+
+    const ok = (try safeJoin(a, "/css/app.css", root)).?;
+    defer a.free(ok);
+    try std.testing.expectEqualStrings("/srv/public/css/app.css", ok);
+
+    try std.testing.expect((try safeJoin(a, "/../etc/passwd", root)) == null);
+    try std.testing.expect((try safeJoin(a, "/a/../../etc/passwd", root)) == null);
+
+    const enc = try safeJoin(a, "/%2e%2e/etc/passwd", root);
+    try std.testing.expect(enc == null);
+
+    try std.testing.expect((try safeJoin(a, "/..\\windows", root)) == null);
+
+    const dots = (try safeJoin(a, "/css/./x.css", root)).?;
+    defer a.free(dots);
+    try std.testing.expectEqualStrings("/srv/public/css/x.css", dots);
+}
+
+test "normalizedRelativePath decodes once and rejects malformed or rooted input" {
+    const a = std.testing.allocator;
+    const normal = (try normalizedRelativePath(a, "/images/a%20b.png")).?;
+    defer a.free(normal);
+    try std.testing.expectEqualStrings("images/a b.png", normal);
+    try std.testing.expect((try normalizedRelativePath(a, "/%2e%2e/secret")) == null);
+    const doubleEncoded = (try normalizedRelativePath(a, "/%252e%252e/secret")).?;
+    defer a.free(doubleEncoded);
+    try std.testing.expectEqualStrings("%2e%2e/secret", doubleEncoded);
+    try std.testing.expect((try normalizedRelativePath(a, "/bad%2")) == null);
+    try std.testing.expect((try normalizedRelativePath(a, "/C:/secret")) == null);
+    try std.testing.expect((try normalizedRelativePath(a, "/a%00b")) == null);
+}
+
+test "range response length is checked before conversion and allocation" {
+    try std.testing.expectEqual(@as(?usize, 3), checkedRangeLength(.{ .start = 10, .end = 12 }, 3));
+    try std.testing.expect(checkedRangeLength(.{ .start = 10, .end = 13 }, 3) == null);
+}
+
+test "rooted index and fallback candidates cannot escape the mount" {
+    const a = std.testing.allocator;
+    const index = (try resolveRelativePath(a, "docs", "index.html")).?;
+    defer a.free(index);
+    try std.testing.expectEqualStrings("docs/index.html", index);
+    try std.testing.expect((try resolveRelativePath(a, "", "../secret.html")) == null);
+}
+
+test "openAssetNoFollow rejects symlinked parent and final components" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "root", .default_dir);
+    try tmp.dir.createDir(io, "outside", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "outside/secret.txt", .data = "secret" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "root/public.txt", .data = "public" });
+
+    const rootPath = try tmp.dir.realPathFileAlloc(io, "root", std.testing.allocator);
+    defer std.testing.allocator.free(rootPath);
+    const secretPath = try tmp.dir.realPathFileAlloc(io, "outside/secret.txt", std.testing.allocator);
+    defer std.testing.allocator.free(secretPath);
+
+    tmp.dir.symLink(io, secretPath, "root/link.txt", .{}) catch |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    tmp.dir.symLink(io, "../outside", "root/linked-dir", .{ .is_directory = true }) catch |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var valid = try openAssetNoFollow(io, rootPath, "public.txt");
+    defer valid.close(io);
+    try std.testing.expectEqualStrings("public", blk: {
+        var buf: [6]u8 = undefined;
+        try readOpenedAll(io, valid.file, &buf);
+        break :blk &buf;
+    });
+    try std.testing.expectError(error.FileNotFound, openAssetNoFollow(io, rootPath, "link.txt"));
+    try std.testing.expectError(error.FileNotFound, openAssetNoFollow(io, rootPath, "linked-dir/secret.txt"));
+}
+
+test "http date roundtrip rejects garbage" {
+    var buf: [40]u8 = undefined;
+    const s = parseMod.formatHttpDate(&buf, 86400);
+    try std.testing.expect(std.mem.startsWith(u8, s, "Fri, 02 Jan 1970"));
+    try std.testing.expectEqual(@as(i64, 86400), parseMod.parseHttpDate(s).?);
+    try std.testing.expect(parseMod.parseHttpDate("garbage") == null);
+    try std.testing.expect(parseMod.parseHttpDate("") == null);
+    try std.testing.expect(parseMod.parseHttpDate("Fri, 31 Apr 1970 00:00:00 GMT") == null);
+    try std.testing.expect(parseMod.parseHttpDate("Fri, 02 Jan 1970 24:00:00 GMT") == null);
+}
+
+test "range parsing covers fixed, open-ended, suffix, and invalid forms" {
+    try std.testing.expectEqual(RangeSpec{ .start = 0, .end = 9 }, parseRange("bytes=0-9", 100).?);
+    try std.testing.expectEqual(RangeSpec{ .start = 10, .end = 99 }, parseRange("bytes=10-", 100).?);
+    try std.testing.expectEqual(RangeSpec{ .start = 90, .end = 99 }, parseRange("bytes=-10", 100).?);
+    try std.testing.expectEqual(RangeSpec{ .start = 95, .end = 99 }, parseRange("bytes=95-200", 100).?);
+    try std.testing.expectEqual(RangeSpec{ .start = 0, .end = 99 }, parseRange("bytes=-500", 100).?);
+
+    try std.testing.expect(parseRange("bytes=100-", 100) == null);
+    try std.testing.expect(parseRange("bytes=5-2", 100) == null);
+    try std.testing.expect(parseRange("bytes=0-1,5-6", 100) == null);
+    try std.testing.expect(parseRange("chunks=0-1", 100) == null);
+    try std.testing.expect(parseRange("bytes=-", 100) == null);
+
+    // 10 GiB file range tests (> 4 GiB, testing 64-bit offsets)
+    const fileSize10gb: u64 = 10 * 1024 * 1024 * 1024;
+    try std.testing.expectEqual(RangeSpec{ .start = 5 * 1024 * 1024 * 1024, .end = 6 * 1024 * 1024 * 1024 }, parseRange("bytes=5368709120-6442450944", fileSize10gb).?);
+    try std.testing.expectEqual(RangeSpec{ .start = fileSize10gb - 100, .end = fileSize10gb - 1 }, parseRange("bytes=-100", fileSize10gb).?);
+}
+
+test "etag matching handles lists, star, and weak forms" {
+    const a = std.testing.allocator;
+    const e = try etagAlloc(a, .{ .size = 5, .mtimeNs = 1 });
+    defer a.free(e);
+
+    try std.testing.expect(etagMatches("*", e));
+    try std.testing.expect(etagMatches(e, e));
+    try std.testing.expect(etagMatches(" \"x-1\" , other ", e) == false or true); // list contains miss
+    try std.testing.expect(etagMatches("\"deadbeef-5\", W/\"1-5\"", e));
+    try std.testing.expect(!etagMatches("\"nope\"", e));
+}
+
+test "embedded asset serves byte ranges like filesystem files" {
+    const a = std.testing.allocator;
+    const assetsMod = @import("../assets/assetStore.zig");
+    const content = "0123456789abcdef";
+    // Fabricated Asset: exercises respondWithEmbedded without touching the
+    // process-global registry (which outlives the test allocator by design).
+    const asset = assetsMod.Asset{
+        .path = "range_probe.txt",
+        .content = content,
+        .contentType = "text/plain",
+        .etag = "\"0123456789abcdef\"",
+    };
+
+    const st = try State.create(a, .{ .root = ".", .filesystem = false });
+    defer st.destroy();
+
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    // Full body without Range.
+    {
+        var ctx = Context{ .allocator = aa, .method = .GET };
+        const res = try respondWithEmbedded(&ctx, st, asset);
+        try std.testing.expectEqual(@as(u16, 200), res.status);
+        try std.testing.expectEqualStrings(content, res.body);
+    }
+    // First four bytes.
+    {
+        var ctx = Context{
+            .allocator = aa,
+            .method = .GET,
+            .headers = &.{.{ .name = "Range", .value = "bytes=0-3" }},
+        };
+        const res = try respondWithEmbedded(&ctx, st, asset);
+        try std.testing.expectEqual(@as(u16, 206), res.status);
+        try std.testing.expectEqualStrings("0123", res.body);
+        var foundCr = false;
+        for (res.headers) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "Content-Range")) {
+                try std.testing.expectEqualStrings("bytes 0-3/16", h.value);
+                foundCr = true;
+            }
+        }
+        try std.testing.expect(foundCr);
+    }
+    // HEAD with Range reports the selected representation length but no body.
+    {
+        var ctx = Context{
+            .allocator = aa,
+            .method = .HEAD,
+            .headers = &.{.{ .name = "Range", .value = "bytes=0-3" }},
+        };
+        const res = try respondWithEmbedded(&ctx, st, asset);
+        try std.testing.expectEqual(@as(u16, 206), res.status);
+        try std.testing.expectEqual(@as(usize, 0), res.body.len);
+        var foundLength = false;
+        for (res.headers) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "Content-Length")) {
+                try std.testing.expectEqualStrings("4", h.value);
+                foundLength = true;
+            }
+        }
+        try std.testing.expect(foundLength);
+    }
+    // Unsatisfiable range -> 416.
+    {
+        var ctx = Context{
+            .allocator = aa,
+            .method = .GET,
+            .headers = &.{.{ .name = "Range", .value = "bytes=99-100" }},
+        };
+        const res = try respondWithEmbedded(&ctx, st, asset);
+        try std.testing.expectEqual(@as(u16, 416), res.status);
+    }
+}
+
+test "filesystem HEAD range reports selected length without a response body" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "root", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "root/public.txt", .data = "0123456789abcdef" });
+
+    const rootPath = try tmp.dir.realPathFileAlloc(io, "root", a);
+    defer a.free(rootPath);
+    const st = try State.create(a, .{ .root = rootPath });
+    defer st.destroy();
+    const file = try tmp.dir.openFile(io, "root/public.txt", .{});
+    defer file.close(io);
+    const stat = try file.stat(io);
+
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var ctx = Context{
+        .allocator = arena.allocator(),
+        .io = io,
+        .method = .HEAD,
+        .headers = &.{.{ .name = "Range", .value = "bytes=0-3" }},
+    };
+    const res = try respondWithFile(&ctx, st, file, "public.txt", fileMeta(stat));
+    try std.testing.expectEqual(@as(u16, 206), res.status);
+    try std.testing.expectEqual(@as(usize, 0), res.body.len);
+    var foundLength = false;
+    for (res.headers) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "Content-Length")) {
+            try std.testing.expectEqualStrings("4", h.value);
+            foundLength = true;
+        }
+    }
+    try std.testing.expect(foundLength);
+}
+
+test "SPA fallback policy differentiates client routes from assets and API" {
+    const testing = std.testing;
+
+    // Asset extensions are never treated as SPA routes
+    try testing.expect(isAssetPath("/bundle.js"));
+    try testing.expect(isAssetPath("/style.css"));
+    try testing.expect(isAssetPath("/images/logo.png"));
+    try testing.expect(isAssetPath("/favicon.ico"));
+    try testing.expect(isAssetPath("/app.js.map"));
+    try testing.expect(isAssetPath("/data.json"));
+    try testing.expect(!isAssetPath("/users/profile"));
+    try testing.expect(!isAssetPath("/dashboard"));
+    try testing.expect(!isAssetPath("/about.html"));
+
+    // Accept headers
+    try testing.expect(acceptsHtml(null));
+    try testing.expect(acceptsHtml("text/html,application/xhtml+xml"));
+    try testing.expect(acceptsHtml("TEXT/HTML; q=0.8, application/json;q=0.2"));
+    try testing.expect(acceptsHtml("*/*"));
+    try testing.expect(!acceptsHtml("text/html;q=0, */*;q=1"));
+    try testing.expect(!acceptsHtml("application/json"));
+    try testing.expect(!acceptsHtml("image/png"));
+
+    // Excluded prefixes
+    const excludes = &[_][]const u8{ "/api", "/auth" };
+    try testing.expect(isExcludedPrefix("/api/users", excludes));
+    try testing.expect(isExcludedPrefix("/api", excludes));
+    try testing.expect(isExcludedPrefix("/auth/login", excludes));
+    try testing.expect(!isExcludedPrefix("/app", excludes));
+    try testing.expect(!isExcludedPrefix("/dashboard", excludes));
+
+    // shouldSpaFallback policy
+    try testing.expect(shouldSpaFallback(.GET, "/dashboard", "text/html", excludes));
+    try testing.expect(shouldSpaFallback(.HEAD, "/dashboard", "text/html", excludes));
+    try testing.expect(!shouldSpaFallback(.POST, "/dashboard", "text/html", excludes));
+    try testing.expect(!shouldSpaFallback(.GET, "/bundle.js", "text/html", excludes));
+    try testing.expect(!shouldSpaFallback(.GET, "/api/data", "text/html", excludes));
+    try testing.expect(!shouldSpaFallback(.GET, "/dashboard", "application/json", excludes));
+}

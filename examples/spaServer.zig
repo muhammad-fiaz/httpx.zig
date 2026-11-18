@@ -11,7 +11,7 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 fn apiHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{
+    return ctx.json(.{
         .status = "ok",
         .service = "spa-api",
     });
@@ -23,13 +23,10 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    std.debug.print("==> HTTPX SPA Fallback Server Demo\n\n", .{});
-
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 4,
+        .limits = .{ .maxConnections = 4 },
     });
     defer server.deinit();
 
@@ -37,7 +34,7 @@ pub fn main() !void {
     try server.get("/api/user", apiHandler);
 
     // Register SPA fallback using existing examples/static directory
-    try server.spa("/", "examples/static");
+    try server.spa(.{ .mount = "/", .root = "examples/static" });
 
     const port = server.localPort();
     std.debug.print("SPA server listening on http://127.0.0.1:{d}\n", .{port});
@@ -69,6 +66,5 @@ pub fn main() !void {
     defer resApi.deinit();
     std.debug.print("GET /api/user (API Route) -> Status: {d}, Body: {s}\n", .{ resApi.status, resApi.body });
 
-    std.debug.print("\nSPA server verification successful.\n", .{});
     server.stop();
 }

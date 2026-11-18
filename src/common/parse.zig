@@ -8,6 +8,7 @@
 //! hot paths targeting Zig 0.17.0.
 
 const std = @import("std");
+const z = @import("zigantic");
 const Allocator = std.mem.Allocator;
 
 // ASCII and character classification tables
@@ -54,6 +55,51 @@ pub const HEX_VALUES: [256]u8 = blk: {
 /// True if `c` is a valid RFC 7230/9110 token character.
 pub inline fn isTokenChar(c: u8) bool {
     return TOKEN_CHARS[c];
+}
+
+/// True if `c` may appear in an HTTP field value (RFC 9110 Section 5.5):
+/// visible ASCII, SP and HTAB.
+pub inline fn isFieldValueChar(c: u8) bool {
+    return c == '\t' or (c >= 0x20 and c != 0x7F);
+}
+
+/// Validates a complete field value: allowed characters plus no leading or
+/// trailing whitespace (RFC 9113 Section 8.2.1).
+pub fn isValidFieldValue(value: []const u8) bool {
+    if (value.len == 0) return true;
+    const first = value[0];
+    const last = value[value.len - 1];
+    if (first == ' ' or first == '\t' or last == ' ' or last == '\t') return false;
+    for (value) |c| {
+        if (!isFieldValueChar(c)) return false;
+    }
+    return true;
+}
+
+/// Validates a URI scheme (RFC 3986 Section 3.1):
+/// `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`.
+pub fn isValidScheme(scheme: []const u8) bool {
+    if (scheme.len == 0 or !std.ascii.isAlphabetic(scheme[0])) return false;
+    for (scheme[1..]) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '+' and c != '-' and c != '.') return false;
+    }
+    return true;
+}
+
+/// Connection-specific fields that MUST NOT be forwarded between hops
+/// (RFC 9110 Section 7.6.1, RFC 9113 Section 8.2.2).
+pub fn isConnectionSpecific(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, "connection") or
+        std.ascii.eqlIgnoreCase(name, "keep-alive") or
+        std.ascii.eqlIgnoreCase(name, "proxy-connection") or
+        std.ascii.eqlIgnoreCase(name, "transfer-encoding") or
+        std.ascii.eqlIgnoreCase(name, "upgrade");
+}
+
+/// The "te" field may only carry the value "trailers" (RFC 9110 Section 7.6.2).
+/// HTTP/2 compares the value case-insensitively.
+pub fn isTeTrailers(value: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(value, "trailers");
 }
 
 /// True if `c` is an RFC 3986 unreserved character.
@@ -110,7 +156,7 @@ pub fn parseUint(comptime T: type, s: []const u8) ?T {
     if (s.len == 0) return null;
     var result: T = 0;
     for (s) |c| {
-        if (c < '0' or c > '9') return null;
+        if (!std.ascii.isDigit(c)) return null;
         const digit: T = @intCast(c - '0');
         result = std.math.mul(T, result, 10) catch return null;
         result = std.math.add(T, result, digit) catch return null;
@@ -124,7 +170,7 @@ pub inline fn parse3DigitStatus(s: []const u8) ?u16 {
     const d0 = s[0];
     const d1 = s[1];
     const d2 = s[2];
-    if (d0 < '1' or d0 > '9' or d1 < '0' or d1 > '9' or d2 < '0' or d2 > '9') return null;
+    if (d0 == '0' or !std.ascii.isDigit(d0) or !std.ascii.isDigit(d1) or !std.ascii.isDigit(d2)) return null;
     return (@as(u16, d0 - '0') * 100) + (@as(u16, d1 - '0') * 10) + @as(u16, d2 - '0');
 }
 
@@ -159,14 +205,15 @@ pub const parseMethod = Method.fromString;
 
 // Authority, host, and port parser
 
-pub const ParsedAuthority = struct {
-    /// Hostname, IPv4 string, or inner unbracketed IPv6 literal.
-    host: []const u8,
-    /// Explicit port if specified in the authority string.
-    port: ?u16 = null,
-    /// True when the host was wrapped in IPv6 brackets `[...]`.
-    isIpv6: bool = false,
-};
+const ParsedAuthoritySchema = z.objectOf(.{
+    // Hostname, IPv4 string, or inner unbracketed IPv6 literal.
+    .host = z.string(.{ .min = 1 }),
+    // Explicit port if specified in the authority string.
+    .port = z.optional(z.integer(u16, .{})),
+    // True when the host was wrapped in IPv6 brackets `[...]`.
+    .isIpv6 = z.withDefault(z.boolean(.{}), false),
+}, .{});
+pub const ParsedAuthority = ParsedAuthoritySchema.Value;
 
 /// Parses an authority string ("host", "host:port", "[::1]", "[::1]:port").
 /// Returns null if the syntax is malformed (unmatched brackets, invalid port
@@ -556,6 +603,28 @@ pub fn parseHttpDate(s: []const u8) ?i64 {
     return days * 86400 + @as(i64, hh) * 3600 + @as(i64, mm) * 60 + ss;
 }
 
+/// Formats epoch seconds as an IMF-fixdate string for `Last-Modified`.
+pub fn formatHttpDate(buf: []u8, epochSecs: i64) []const u8 {
+    const es = std.time.epoch.EpochSeconds{ .secs = @intCast(@max(0, epochSecs)) };
+    const day = es.getEpochDay();
+    const yearDay = day.calculateYearDay();
+    const monthDay = yearDay.calculateMonthDay();
+    const ds = es.getDaySeconds();
+
+    const wdNames = [_][]const u8{ "Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed" };
+    const wd = wdNames[@intCast(@mod(day.day, 7))];
+
+    return std.fmt.bufPrint(buf, "{s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} GMT", .{
+        wd,
+        monthDay.day_index + 1,
+        monthNames[monthDay.month.numeric() - 1],
+        yearDay.year,
+        ds.getHoursIntoDay(),
+        ds.getMinutesIntoHour(),
+        ds.getSecondsIntoMinute(),
+    }) catch unreachable;
+}
+
 fn daysInMonth(year: i32, month: u4) u16 {
     return std.time.epoch.getDaysInMonth(@intCast(year), @fromBackingInt(@intCast(month)));
 }
@@ -581,6 +650,39 @@ test "isTokenChar matches RFC 7230" {
     try std.testing.expect(!isTokenChar('('));
     try std.testing.expect(!isTokenChar('\r'));
     try std.testing.expect(!isTokenChar(0));
+}
+
+test "field value and scheme validation" {
+    // Visible ASCII, SP and HTAB only; no leading/trailing whitespace.
+    try std.testing.expect(isValidFieldValue(""));
+    try std.testing.expect(isValidFieldValue("plain"));
+    try std.testing.expect(isValidFieldValue("with space"));
+    try std.testing.expect(isValidFieldValue("with\ttab"));
+    try std.testing.expect(!isValidFieldValue(" leading"));
+    try std.testing.expect(!isValidFieldValue("trailing "));
+    try std.testing.expect(!isValidFieldValue("bad\r\n"));
+    try std.testing.expect(!isValidFieldValue("del\x7F"));
+
+    try std.testing.expect(isValidScheme("https"));
+    try std.testing.expect(isValidScheme("h2"));
+    try std.testing.expect(isValidScheme("a+b-c.d"));
+    try std.testing.expect(!isValidScheme(""));
+    try std.testing.expect(!isValidScheme("1http"));
+    try std.testing.expect(!isValidScheme("ht tp"));
+}
+
+test "connection-specific field classification" {
+    try std.testing.expect(isConnectionSpecific("connection"));
+    try std.testing.expect(isConnectionSpecific("Keep-Alive"));
+    try std.testing.expect(isConnectionSpecific("proxy-connection"));
+    try std.testing.expect(isConnectionSpecific("transfer-encoding"));
+    try std.testing.expect(isConnectionSpecific("upgrade"));
+    try std.testing.expect(!isConnectionSpecific("content-length"));
+    try std.testing.expect(!isConnectionSpecific("te"));
+
+    try std.testing.expect(isTeTrailers("trailers"));
+    try std.testing.expect(isTeTrailers("Trailers"));
+    try std.testing.expect(!isTeTrailers("gzip"));
 }
 
 test "parseUint and parse3DigitStatus" {

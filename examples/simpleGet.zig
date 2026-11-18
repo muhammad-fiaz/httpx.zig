@@ -18,8 +18,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .enableDocs = false,
-        .maxConnections = 1,
+        .limits = .{ .maxConnections = 1 },
     });
     defer server.deinit();
     try server.router.add(.GET, "/get", getHandler, .{});
@@ -33,8 +32,8 @@ pub fn main() !void {
     var urlBuf: [64]u8 = undefined;
     const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/get", .{port});
 
-    // Unified fetch request
-    var response = try client.fetch(url, .{});
+    // GET request
+    var response = try client.get(url, .{});
     defer response.deinit();
 
     std.debug.print("Status: {d}\n", .{response.status});

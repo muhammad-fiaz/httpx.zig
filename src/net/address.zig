@@ -80,8 +80,7 @@ pub const Address = struct {
         };
     }
 
-    pub fn parseIp(self: *const Address, text: []const u8) Error!Address {
-        _ = self;
+    pub fn parseIp(text: []const u8) Error!Address {
         // Try IPv4 first
         if (parseIp4Bytes(text)) |b| {
             var a = Address{ .family = .ip4, .port = 0 };
@@ -174,10 +173,9 @@ pub fn matchesCidr(peer: []const u8, rule: []const u8) bool {
     const slash = std.mem.indexOfScalar(u8, trimmed, '/');
     const host = if (slash) |i| trimmed[0..i] else trimmed;
 
-    var dummy = Address{ .family = .ip4, .port = 0 };
-    var peerAddr = dummy.parseIp(std.mem.trim(u8, peer, " \t")) catch
+    var peerAddr = Address.parseIp(std.mem.trim(u8, peer, " \t")) catch
         return std.ascii.eqlIgnoreCase(peer, trimmed);
-    var ruleAddr = dummy.parseIp(host) catch
+    var ruleAddr = Address.parseIp(host) catch
         return std.ascii.eqlIgnoreCase(peer, trimmed);
 
     if (peerAddr.toV4MappedView()) |v| peerAddr = v;
@@ -279,11 +277,9 @@ fn parseIp6Text(textIn: []const u8) Error!Address {
 
 // Tests
 
-var addrAny = Address{ .family = .ip4, .port = 0 };
-
 test "parse ipv4 dotted quad" {
     var buf: [64]u8 = undefined;
-    const a = addrAny.parseIp("192.168.1.100") catch unreachable;
+    const a = Address.parseIp("192.168.1.100") catch unreachable;
     try std.testing.expectEqual(Family.ip4, a.family);
     try std.testing.expectEqualSlices(u8, &.{ 192, 168, 1, 100 }, a.bytes[0..4]);
     try std.testing.expectEqualStrings("192.168.1.100", a.formatBuf(&buf));
@@ -295,12 +291,11 @@ test "parse ipv4 dotted quad" {
 }
 
 test "reject malformed ipv4" {
-    const a = Address{ .family = .ip4, .port = 0 };
-    try std.testing.expectError(Error.InvalidAddress, a.parseIp("256.1.1.1"));
-    try std.testing.expectError(Error.InvalidAddress, a.parseIp("1.2.3"));
-    try std.testing.expectError(Error.InvalidAddress, a.parseIp("1.2.3.4.5"));
-    try std.testing.expectError(Error.InvalidAddress, a.parseIp("a.b.c.d"));
-    try std.testing.expectError(Error.InvalidAddress, a.parseIp(""));
+    try std.testing.expectError(Error.InvalidAddress, Address.parseIp("256.1.1.1"));
+    try std.testing.expectError(Error.InvalidAddress, Address.parseIp("1.2.3"));
+    try std.testing.expectError(Error.InvalidAddress, Address.parseIp("1.2.3.4.5"));
+    try std.testing.expectError(Error.InvalidAddress, Address.parseIp("a.b.c.d"));
+    try std.testing.expectError(Error.InvalidAddress, Address.parseIp(""));
 }
 
 test "parse ipv4 into network-order u32" {
@@ -313,35 +308,34 @@ test "parse ipv4 into network-order u32" {
 }
 
 test "reject non-canonical and malformed ip literals" {
-    const a = Address{ .family = .ip4, .port = 0 };
-    try std.testing.expectError(Error.InvalidAddress, a.parseIp("01.2.3.4"));
-    try std.testing.expectError(Error.InvalidAddress, a.parseIp("1.2.3.4 "));
-    try std.testing.expectError(Error.InvalidAddress, a.parseIp("999.1.1.1"));
+    try std.testing.expectError(Error.InvalidAddress, Address.parseIp("01.2.3.4"));
+    try std.testing.expectError(Error.InvalidAddress, Address.parseIp("1.2.3.4 "));
+    try std.testing.expectError(Error.InvalidAddress, Address.parseIp("999.1.1.1"));
 
     // Inputs that previously underflowed the compression-width calculation.
-    try std.testing.expectError(Error.InvalidAddress, a.parseIp("1:2:3:4:5:6:7:8:9::"));
-    try std.testing.expectError(Error.InvalidAddress, a.parseIp("1:2:3:4:5:6:7:8::"));
-    try std.testing.expectError(Error.InvalidAddress, a.parseIp("1::2::3"));
-    try std.testing.expectError(Error.InvalidAddress, a.parseIp("1:::2"));
-    try std.testing.expectError(Error.InvalidAddress, a.parseIp("fe80::1%"));
+    try std.testing.expectError(Error.InvalidAddress, Address.parseIp("1:2:3:4:5:6:7:8:9::"));
+    try std.testing.expectError(Error.InvalidAddress, Address.parseIp("1:2:3:4:5:6:7:8::"));
+    try std.testing.expectError(Error.InvalidAddress, Address.parseIp("1::2::3"));
+    try std.testing.expectError(Error.InvalidAddress, Address.parseIp("1:::2"));
+    try std.testing.expectError(Error.InvalidAddress, Address.parseIp("fe80::1%"));
 }
 
 test "parse embedded ipv4 ipv6 tails" {
     var buf: [64]u8 = undefined;
-    const m = try addrAny.parseIp("::ffff:192.168.1.1");
+    const m = try Address.parseIp("::ffff:192.168.1.1");
     try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 168, 1, 1 }, &m.bytes);
     try std.testing.expectEqualStrings("::ffff:192.168.1.1", m.formatBuf(&buf));
 
-    const plain = try addrAny.parseIp("::192.168.1.1");
+    const plain = try Address.parseIp("::192.168.1.1");
     try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 192, 168, 1, 1 }, &plain.bytes);
 
-    const full = try addrAny.parseIp("1:2:3:4:5:6:7.8.9.10");
+    const full = try Address.parseIp("1:2:3:4:5:6:7.8.9.10");
     try std.testing.expectEqualSlices(u8, &.{ 0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 7, 8, 9, 10 }, &full.bytes);
 }
 
 test "parse full-form ipv6" {
     var buf: [64]u8 = undefined;
-    const a = addrAny.parseIp("2001:0db8:0000:0000:0000:0000:0000:0001") catch unreachable;
+    const a = Address.parseIp("2001:0db8:0000:0000:0000:0000:0000:0001") catch unreachable;
     try std.testing.expectEqual(Family.ip6, a.family);
     try std.testing.expectEqualStrings("2001:db8::1", a.formatBuf(&buf));
 
@@ -357,7 +351,7 @@ test "parse compressed ipv6" {
         "fe80::a%eth0", "1:2:3:4:5:6:7:8",
     };
     for (cases) |c| {
-        const a = try addrAny.parseIp(c);
+        const a = try Address.parseIp(c);
         try std.testing.expectEqual(Family.ip6, a.family);
         _ = a.formatBuf(&buf);
     }
@@ -374,7 +368,7 @@ test "ipv6 loopback roundtrip" {
 
 test "v4 mapped ipv6" {
     var buf: [64]u8 = undefined;
-    const a = addrAny.parseIp("::ffff:192.168.1.1") catch unreachable;
+    const a = Address.parseIp("::ffff:192.168.1.1") catch unreachable;
     try std.testing.expect(a.isV4Mapped());
     try std.testing.expectEqualStrings("::ffff:192.168.1.1", a.formatBuf(&buf));
 
@@ -400,7 +394,7 @@ test "ipv6 text follows RFC 5952 through the standard formatter" {
         .{ .text = "2001:DB8:ABCD:EF01:2345:6789:ABCD:EF01", .want = "2001:db8:abcd:ef01:2345:6789:abcd:ef01" },
     };
     for (cases) |c| {
-        const a = try addrAny.parseIp(c.text);
+        const a = try Address.parseIp(c.text);
         try std.testing.expectEqualStrings(c.want, a.formatBuf(&buf));
     }
 }

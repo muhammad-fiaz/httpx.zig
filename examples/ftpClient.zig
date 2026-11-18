@@ -7,20 +7,15 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     std.debug.print("=== HTTPX Native FTP Client ===\n", .{});
 
-    // 1. Configure FTP options
-    const ftpOpts: httpx.protocols.ftp.Options = .{
+    // 1. Connect with an inline options literal; `.{}` keeps the defaults.
+    var client = httpx.protocols.ftp.Client.connect(allocator, .{
         .host = "test.rebex.net",
         .port = 21,
         .user = "demo",
         .password = "password",
         .secure = false, // Set to true for explicit FTPS
-    };
-
-    std.debug.print("1. FTP client configuration: {s}:{d}\n", .{ ftpOpts.host, ftpOpts.port });
-
-    // 2. Connect via TCP.
-    var client = httpx.protocols.ftp.Client.connect(allocator, ftpOpts) catch |err| {
-        std.debug.print("3. FTP connection failed: {s}\n", .{@errorName(err)});
+    }) catch |err| {
+        std.debug.print("2. FTP connection failed: {s}\n", .{@errorName(err)});
         std.debug.print("   Skipping network tests (server may be unreachable).\n", .{});
         return;
     };
