@@ -272,48 +272,26 @@ exe.root_module.addImport("httpx", httpx_dep.module("httpx"));
 
 ## Quick Start
 
-Simple HTTP client and server example with REST and GraphQL. JSON keys
-are the exact Zig field names, so keys that are not valid identifiers
-keep their wire name as quoted identifiers (e.g. `@"user-name"`):
+A concise HTTP server and client example in a single program:
 
 ```zig
 const std = @import("std");
 const httpx = @import("httpx");
 
-const User = struct { id: u64, @"user-name": []const u8 };
-const CreateUser = struct { @"user-name": []const u8 };
-
-// GraphQL wire shape: legal GraphQL identifiers only, declared by the
-// schema (`Type(...)`), independent of REST JSON keys.
-const GraphQLUser = struct { id: u64, name: []const u8 };
-
-const Scalar = httpx.graphql.Scalar;
-const UserType = httpx.graphql.Type("User", .{
-    .id = Scalar.id,
-    .name = Scalar.string,
-});
-
-const resolvers = struct {
-    fn me(ctx: *httpx.graphql.Context) !GraphQLUser {
-        _ = ctx;
-        return .{ .id = 1, .name = "alice" };
-    }
-};
-
-const QueryRoot = httpx.graphql.Query(.{
-    .me = .{ .type = UserType, .resolve = resolvers.me },
-});
-
-fn getUser(ctx: *httpx.router.Context) !httpx.router.Result(User) {
-    return .{ .body = .{ .id = ctx.paramUint("id") orelse 1, .@"user-name" = "alice" } };
+fn hello(_: *httpx.router.Context) anyerror!httpx.router.Response {
+    return .{
+        .status = 200,
+        .body = "hello from httpx.zig",
+        .contentType = "text/plain",
+    };
 }
 
-fn createUser(_: *httpx.router.Context, body: CreateUser) !httpx.router.Result(User) {
-    return .{ .status = .created, .body = .{ .id = 1, .@"user-name" = body.@"user-name" } };
-}
-
-fn health(_: *httpx.router.Context) anyerror!httpx.router.Response {
-    return .{ .status = 200, .body = "ok", .contentType = "text/plain; charset=utf-8" };
+fn echo(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
+    return .{
+        .status = 200,
+        .body = ctx.body,
+        .contentType = "application/json",
+    };
 }
 
 pub fn main() !void {
@@ -322,23 +300,15 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
+    // Start HTTP server on an ephemeral port
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .docs = .{},
     });
     defer server.deinit();
-    var client = httpx.Client.init(allocator, io, .{});
-    defer client.deinit();
 
-    try server.get("/health", .{ .handler = health, .summary = "Health check" });
-    try server.get("/users/{id:int}", .{ .handler = getUser, .summary = "Get user" });
-    try server.post("/users", .{ .handler = createUser, .summary = "Create user" });
-    try server.graphql(.{
-        .query = QueryRoot,
-        .types = &.{UserType},
-        .endpoint = "/graphql",
-    });
+    try server.router.add(.GET, "/hello", hello, .{});
+    try server.router.add(.POST, "/echo", echo, .{});
 
     const port = server.localPort();
     const thread = try server.start();
@@ -347,26 +317,25 @@ pub fn main() !void {
         thread.join();
     }
 
-    var urlBuf: [512]u8 = undefined;
-    const health_url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/health", .{port});
-    var health_res = try client.get(health_url, .{});
-    defer health_res.deinit();
-    std.debug.print("GET /health -> {d}: {s}\n", .{ health_res.status, health_res.bytes() });
+    // Initialize HTTP client
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
 
-    const user_url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/users/7", .{port});
-    var user_res = try client.get(user_url, .{});
-    defer user_res.deinit();
-    std.debug.print("GET /users/7 -> {d}: {s}\n", .{ user_res.status, user_res.bytes() });
+    var urlBuf: [64]u8 = undefined;
 
-    const post_url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/users", .{port});
-    var post_res = try client.post(post_url, .{ .json = .{ .@"user-name" = "bob" } });
-    defer post_res.deinit();
-    std.debug.print("POST /users -> {d}: {s}\n", .{ post_res.status, post_res.bytes() });
+    // GET request
+    const get_url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/hello", .{port});
+    var res1 = try client.get(get_url, .{});
+    defer res1.deinit();
+    std.debug.print("GET {s} -> {d}: {s}\n", .{ get_url, res1.status, res1.bytes() });
 
-    const gql_url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/graphql", .{port});
-    var gql_res = try client.graphql(gql_url, "{ me { id name } }", null, .{});
-    defer gql_res.deinit();
-    std.debug.print("POST /graphql -> {d}: {s}\n", .{ gql_res.status, gql_res.bytes() });
+    // POST request with JSON
+    const post_url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/echo", .{port});
+    var res2 = try client.post(post_url, .{
+        .json = .{ .message = "hello", .status = "ok" },
+    });
+    defer res2.deinit();
+    std.debug.print("POST {s} -> {d}: {s}\n", .{ post_url, res2.status, res2.bytes() });
 }
 ```
 
