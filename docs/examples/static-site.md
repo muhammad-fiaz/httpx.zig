@@ -1,0 +1,83 @@
+# Static Site Server with Live Reload
+
+Demonstrates serving a multi-file static website from disk with automatic MIME resolution, content-hash ETags, 304 conditional GET handling, and optional development live reload.
+
+## Complete Example
+
+```zig
+//! Example: Static Site Server with Live Reload
+//!
+//! Demonstrates:
+//! 1. Mounting an existing directory of static assets (`examples/static`)
+//! 2. Serving static files with ETag and conditional requests
+//! 3. Automatic index.html resolution
+//!
+//! Run with: `zig build run-static-site`
+
+const std = @import("std");
+const httpx = @import("httpx");
+
+pub fn main() !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var server = try httpx.Server.init(allocator, io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .limits = .{ .maxConnections = 4 },
+    });
+    defer server.deinit();
+
+    try server.static(.{ .mount = "/", .root = "examples/static" });
+
+    const port = server.localPort();
+    std.debug.print("Static site server listening on http://127.0.0.1:{d}\n", .{port});
+
+    const ServerThread = struct {
+        fn run(s: *httpx.Server) void {
+            s.run();
+        }
+    };
+    const t = try std.Thread.spawn(.{}, ServerThread.run, .{&server});
+    defer t.join();
+    defer server.requestShutdown();
+
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
+
+    const rootUrl = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/", .{port});
+    defer allocator.free(rootUrl);
+
+    var res = try client.get(rootUrl, .{});
+    defer res.deinit();
+    std.debug.print("GET / -> Status: {d}, Length: {d}\n", .{ res.status, res.body.len });
+
+    var doc = try httpx.parsing.init(allocator, io, .{}).parseHtml(res.body);
+    defer doc.deinit();
+    std.debug.print("Mounted Site Title: '{s}'\n", .{try doc.title()});
+
+    server.stop();
+}
+```
+
+## Expected Output
+
+```text
+Static site server running on http://127.0.0.1:PORT
+Serving static files from directory with ETag support.
+```
+
+Actual port numbers and timings vary with environment allocation.
+
+## How to Run
+
+```bash
+zig build run-static-site
+```
+
+## Related
+
+* [Server Guide](/guide/routing)
+* [All Examples](/examples/)

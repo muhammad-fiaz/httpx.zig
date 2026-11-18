@@ -50,4 +50,4 @@ pub fn formatHeaderSafe(name: []const u8, value: []const u8) []const u8 {
 
 * [Observability: Events](/observability/events)
 * [Observability: Metrics](/observability/metrics)
-* [Example: Retry](/examples/retry-example)
+* [Example: Retry](/examples/retry-demo)

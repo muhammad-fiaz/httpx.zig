@@ -308,9 +308,9 @@ For complete copy/paste demos, see these example pages:
 - [JSON API](/examples/json-api-example) - typed `.json` bodies, `Response.json(r)`, server `ctx.json(r)` + `ctx.json(value)`
 - [Post JSON](/examples/post-json)
 - [Custom Headers](/examples/custom-headers)
-- [Concurrent Requests](/examples/concurrent-requests)
+- [Concurrent Requests](/examples/concurrent-demo)
 - [Connection Pool](/examples/connection-pool)
-- [Cookies](/examples/cookies-demo)
+- [Cookies](/examples/cookie-server)
 - [HTTP Auth Helpers](/examples/http-auth-helpers)
 - [Simplified API Aliases](/examples/simplified-api-aliases)
 

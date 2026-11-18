@@ -43,5 +43,5 @@ routes. See [Middleware Guide](/guide/middleware) and
 
 ## Related
 
-* [Example: Interceptors](/examples/interceptors)
+* [Example: Interceptors](/examples/interceptor-example)
 * [Observability: Events](/observability/events)

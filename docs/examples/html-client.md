@@ -1,0 +1,106 @@
+# HTML Client & Unified Document Parsing
+
+Demonstrates fetching web pages with httpx.Client and parsing the returned HTML document using the unified httpx.parsing API.
+
+## Complete Example
+
+```zig
+//! Fetching HTML and parsing it with the unified parsing API.
+//!
+//! Run with: `zig build run-html-client`
+
+const std = @import("std");
+const httpx = @import("httpx");
+
+fn htmlHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
+    return .{
+        .status = 200,
+        .body =
+        \\<!DOCTYPE html>
+        \\<html>
+        \\<head><title>Httpx HTML Client Test</title></head>
+        \\<body>
+        \\  <h1>Welcome to Local HTML Test</h1>
+        \\  <p>Testing parsing end-to-end.</p>
+        \\  <a href="/about">About Us</a>
+        \\  <a href="/docs">Documentation</a>
+        \\</body>
+        \\</html>
+        ,
+        .contentType = "text/html; charset=utf-8",
+    };
+}
+
+pub fn main() !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var server = try httpx.Server.init(allocator, io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .limits = .{ .maxConnections = 2 },
+    });
+    defer server.deinit();
+    try server.get("/html", .{ .handler = htmlHandler });
+    const port = server.localPort();
+    const thread = try server.start();
+    defer {
+        server.requestShutdown();
+        thread.join();
+    }
+
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
+
+    var urlBuf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/html", .{port});
+
+    // Fetch HTML from local server
+    var response = try client.get(url, .{});
+    defer response.deinit();
+
+    std.debug.print("Status: {d}\n", .{response.status});
+    std.debug.print("Content-Type: {s}\n\n", .{response.contentType()});
+
+    // Parse HTML directly from response
+    var doc = try httpx.parsing.init(allocator, io, .{}).parseHtml(response.body);
+    defer doc.deinit();
+
+    const title = try doc.title();
+    std.debug.print("Document Title: '{s}'\n", .{title});
+
+    const bodyText = try doc.text();
+    std.debug.print("Body Text Sample:\n{s}\n\n", .{if (bodyText.len > 200) bodyText[0..200] else bodyText});
+
+    // Inspect Links
+    const links = try doc.links();
+    std.debug.print("Links ({d}):\n", .{links.len});
+    for (links) |link| {
+        std.debug.print("  - href: {s}, text: '{s}'\n", .{ link.href, link.text });
+    }
+}
+```
+
+## Expected Output
+
+```text
+Status: 200
+Page Title: Example Domain
+Headings found: 1
+Links found: 1
+```
+
+Actual port numbers and timings vary with environment allocation.
+
+## How to Run
+
+```bash
+zig build run-html-client
+```
+
+## Related
+
+* [Server Guide](/guide/routing)
+* [All Examples](/examples/)

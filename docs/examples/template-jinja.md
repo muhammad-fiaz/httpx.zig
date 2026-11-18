@@ -1,0 +1,80 @@
+# HTML Templates: Advanced Jinja-Style Templates
+
+Demonstrates advanced Jinja2-compatible template syntax, multi-level layout inheritance, custom component macros, and nested data filtering.
+
+## Complete Example
+
+```zig
+const std = @import("std");
+const httpx = @import("httpx");
+
+fn indexHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
+    return ctx.render("index.html", .{
+        .title = "HTTPX Jinja Demo",
+        .heading = "Team Directory",
+        .users = [_]struct { name: []const u8, role: []const u8, age: i32 }{
+            .{ .name = " ada lovelace ", .role = "admin", .age = 36 },
+            .{ .name = "grace hopper", .role = "member", .age = 15 },
+            .{ .name = "alan turing", .role = "member", .age = 10 },
+        },
+    });
+}
+
+pub fn main() !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var server = try httpx.Server.init(allocator, io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .templates = .{
+            .directory = "examples/web/templates/jinja/templates",
+        },
+    });
+    defer server.deinit();
+
+    try server.get("/", indexHandler);
+
+    const port = server.localPort();
+    std.debug.print("Jinja Template Server listening on http://127.0.0.1:{d}\n", .{port});
+
+    const thread = try server.start();
+    defer thread.join();
+
+    // Client verification
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
+
+    var urlBuf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/", .{port});
+
+    var res = try client.get(url, .{});
+    defer res.deinit();
+
+    std.debug.print("GET / -> Status {d}, Length {d} bytes\n", .{ res.status, res.body.len });
+    std.debug.print("Rendered HTML:\n{s}\n", .{res.body});
+
+    server.stop();
+}
+```
+
+## Expected Output
+
+```text
+Advanced template hierarchy rendered successfully.
+```
+
+Actual port numbers and timings vary with environment allocation.
+
+## How to Run
+
+```bash
+zig build run-template-jinja
+```
+
+## Related
+
+* [Server Guide](/guide/routing)
+* [All Examples](/examples/)

@@ -46,4 +46,4 @@ Compression applies to bodies up to `.maxCompressionInput` in the options passed
 ## Related
 
 * [API: Compression](/api/compression)
-* [Example: Compression Demo](/examples/compression-example)
+* [Example: Compression Demo](/examples/compression-demo)

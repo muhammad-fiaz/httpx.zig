@@ -14,7 +14,7 @@ fn proxyHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
 ```
 
 For client-side forward proxies (including SOCKS5h), see
-[Proxy Example](/examples/proxy-example) and `examples/proxyDemo.zig`.
+[Proxy Example](/examples/proxy-demo) and `examples/proxyDemo.zig`.
 
 ## Expected Output
 

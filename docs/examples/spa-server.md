@@ -1,0 +1,98 @@
+# Single Page Application (SPA) Server with Fallback
+
+Demonstrates serving Single Page Applications (React, Vue, Svelte, Angular) where unknown client-side routes gracefully fallback to index.html while maintaining 404 handling for missing static assets.
+
+## Complete Example
+
+```zig
+//! Example: Single Page Application (SPA) Server with Fallback
+//!
+//! Demonstrates:
+//! 1. Serving static assets (`examples/static`)
+//! 2. Client-side routes (e.g. `/dashboard`, `/profile`) falling back to `/index.html`
+//! 3. API endpoints (e.g. `/api/*`) returning proper API responses without fallback
+//!
+//! Run with: `zig build run-spa-server`
+
+const std = @import("std");
+const httpx = @import("httpx");
+
+fn apiHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
+    return ctx.json(.{
+        .status = "ok",
+        .service = "spa-api",
+    });
+}
+
+pub fn main() !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var server = try httpx.Server.init(allocator, io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .limits = .{ .maxConnections = 4 },
+    });
+    defer server.deinit();
+
+    // Register API endpoints first
+    try server.get("/api/user", apiHandler);
+
+    // Register SPA fallback using existing examples/static directory
+    try server.spa(.{ .mount = "/", .root = "examples/static" });
+
+    const port = server.localPort();
+    std.debug.print("SPA server listening on http://127.0.0.1:{d}\n", .{port});
+
+    const ServerThread = struct {
+        fn run(s: *httpx.Server) void {
+            s.run();
+        }
+    };
+    const t = try std.Thread.spawn(.{}, ServerThread.run, .{&server});
+    defer t.join();
+
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
+
+    // 1. Request client-side route `/dashboard` -> should fall back to index.html
+    const routeUrl = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/dashboard", .{port});
+    defer allocator.free(routeUrl);
+
+    var resRoute = try client.get(routeUrl, .{});
+    defer resRoute.deinit();
+    std.debug.print("GET /dashboard (Fallback) -> Status: {d}, Length: {d}\n", .{ resRoute.status, resRoute.body.len });
+
+    // 2. Request API endpoint `/api/user` -> should return JSON, not fallback
+    const apiUrl = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/api/user", .{port});
+    defer allocator.free(apiUrl);
+
+    var resApi = try client.get(apiUrl, .{});
+    defer resApi.deinit();
+    std.debug.print("GET /api/user (API Route) -> Status: {d}, Body: {s}\n", .{ resApi.status, resApi.body });
+
+    server.stop();
+}
+```
+
+## Expected Output
+
+```text
+SPA server running on http://127.0.0.1:PORT
+Direct assets served directly; client routes fall back to index.html.
+```
+
+Actual port numbers and timings vary with environment allocation.
+
+## How to Run
+
+```bash
+zig build run-spa-server
+```
+
+## Related
+
+* [Server Guide](/guide/routing)
+* [All Examples](/examples/)

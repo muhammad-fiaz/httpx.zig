@@ -71,4 +71,4 @@ cannot keep a response open.
 
 * [API: SSE](/api/sse)
 * [Example: Streaming](/examples/streaming)
-* [Example: Transfer Download](/examples/transfer-download)
+* [Example: Transfer Download](/examples/download)

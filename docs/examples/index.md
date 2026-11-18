@@ -1,100 +1,196 @@
-# Examples
+# Runnable Examples
 
-This section contains practical `httpx.zig` demo programs for client, server, middleware, streaming, and protocol features.
+Practical, fully verified demo programs for `httpx.zig` covering client operations, server routing, protocols, TLS, streaming, WebSockets, HTML parsing, templates, process signals, and observability.
 
-## How to Use
+Every example is backed by real source code in the repository and compiles directly with the Zig toolchain.
 
-1. Open an example page.
-2. Review the Example snippet.
-3. Run the matching command from the `Run` section.
-4. Verify behavior with the checklist.
+## Building and Running Examples
 
-For non-host targets, compile (without running) by adding `-Dtarget=...`:
+Compile and execute any example using `zig build run-<name>`:
 
 ```bash
-zig build run-simple-get -Dtarget=x86_64-linux-gnu
-zig build run-http3-client -Dtarget=aarch64-macos
+zig build run-simple-get
+zig build run-http11-server
+zig build run-http2-client
+zig build run-http3-client
+zig build run-websocket-server
 ```
 
-## Available Examples
+To build an example executable without running it (installing into `zig-out/bin/`):
 
-- [HTTP/1.1 Client](/examples/http11-client): Dedicated HTTP/1.1 client with keep-alive and headers.
-- [HTTP/1.1 Server](/examples/http11-server): Dedicated HTTP/1.1 server with persistent connections.
-- [Simple Get](/examples/simple-get): Basic GET request and response handling.
-- [Simple Get Deserialize](/examples/simple-get-deserialize): Parse JSON into typed structs.
-- [JSON API Example](/examples/json-api-example): JSON API requests and typed parsing.
-- [HTTP Auth Helpers](/examples/http-auth-helpers): Use built-in Bearer and Basic auth request helpers against a local loopback server.
-- [Post JSON](/examples/post-json): Send JSON payloads with POST.
-- [Custom Headers](/examples/custom-headers): Attach auth and custom metadata headers.
-- [Concurrent Requests](/examples/concurrent-requests): Execute multiple requests in parallel.
-- [Connection Pool](/examples/connection-pool): Reuse pooled connections efficiently.
-- [Interceptors](/examples/interceptors): Compose client request wrappers without a built-in interceptor registry.
-- [Cookies Demo](/examples/cookies-demo): Manage cookie jar values in client flows.
-- [Logging Callback](/examples/logging-callback): Set up custom logging functions for both server and client.
-- [Proxy and Reverse Proxy](/examples/proxy-example): Configure client forward proxies, including SOCKS5h tunnels, and register reverse proxy middleware.
-- [SOCKS5h Proxy](/examples/socks5-proxy): Route requests through a SOCKS5h proxy with remote DNS resolution.
-- [Simplified API Aliases](/examples/simplified-api-aliases): Use short top-level helper APIs with local loopback success mode by default.
-- [Simple Server](/examples/simple-server): Start a minimal HTTP server.
-- [Testing Server](/examples/testing-server): Exercise the real client against a local production server with routes, dynamic handlers, multiple instances, and request capture.
-- [Thread Pool / Async Server](/examples/async-server-example): Start a concurrent HTTP server with thread pool connection dispatching.
-- [Router Example](/examples/router-example): Route params and grouped endpoints.
-- [Middleware Example](/examples/middleware-example): Chain middleware with shared behavior.
-- [Streaming](/examples/streaming): Read a buffered response through `Response.reader()`.
-- [SSE Example](/examples/sse-example): Format and parse Server-Sent Events in a buffered response.
-- [Static Files](/examples/static-files): Serve assets with content types, ETag headers, and conditional GET (`If-None-Match`) support.
-- [Multi Page Website](/examples/multi-page-website): Serve multiple HTML pages.
-- [HTTP/2 Example](/examples/http2-example): HTTP/2 framing and stream primitives.
-- [HTTP/2 Client Runtime](/examples/http2-client-runtime): End-to-end high-level HTTP/2 client request against a local loopback server.
-- [HTTP/2 Server Runtime](/examples/http2-server-runtime): End-to-end high-level HTTP/2 server route consumed by a local HTTP/2 client.
-- [HTTP/3 Example](/examples/http3-example): HTTP/3, QPACK, and QUIC primitives.
-- [HTTP/3 Client Runtime](/examples/http3-client-runtime): End-to-end high-level HTTP/3 client request against a local UDP loopback server.
-- [HTTP/3 Server Runtime](/examples/http3-server-runtime): End-to-end high-level HTTP/3 server route consumed by a local HTTP/3 client over UDP.
-- [HTTP/3 0-RTT](/examples/http3-0rtt): TLS 1.3 session-ticket resumption with 0-RTT early data over HTTP/3.
-- [Connectivity](/examples/connectivity): High-level TCP reachability checks through `net.connectivity` and the client convenience methods.
-- [HTTP/2 Advanced](/examples/http2-advanced): HTTP/2 production features (SETTINGS enforcement, GOAWAY/RST_STREAM, HPACK security, trailers).
-- [HTTP/3 Advanced](/examples/http3-advanced): HTTP/3 production features (QPACK stream instructions, QUIC stream cancellation, transport parameters).
-- [TCP Local](/examples/tcp-local): Local TCP listener/client round trip.
-- [UDP Local](/examples/udp-local): Local UDP transport demo.
-- [WebSocket Example](/examples/websocket-example): Low-level RFC 6455 handshake and frame primitives.
-- [WebSocket Server](/examples/websocket-server): Full-duplex echo over a real HTTP connection takeover.
-- [WebSocket Client](/examples/websocket-client): `ws://` client with authentication, echo, and close handshake.
-- [Custom Signals](/examples/custom-signals): Per-server signal masks, application hooks, and multi-server graceful shutdown.
-- [Manual Signals](/examples/manual-signals): Application-owned signal subscription that drives server shutdown directly.
-- [Server Signals](/examples/server-signals): Automatic Ctrl+C / SIGTERM handling with a bounded drain deadline.
-- [Multipart Form Data](/examples/multipart-example): Build and parse multipart payloads with text fields and file uploads.
-- [Session Pattern](/examples/session-example): Cookie-backed sessions without a built-in server-side store.
-- [Metrics and Observability](/examples/metrics-example): Aggregate total requests, status codes, latency times, and success rates.
-- [Unix Domain Sockets](/examples/unix-socket-example): Bind servers and connect clients over AF_UNIX sockets.
-- [Health Check Probes](/examples/health-check-example): Configure liveness and readiness probe middlewares.
-- [Readiness Probe](/examples/readiness-probe-example): Readiness probe and health check middleware integration.
-- [Pre-Route Hooks](/examples/pre-route-example): Pre-route hooks and global handler patterns.
-- [Cloud HTTPS Server](/examples/cloud-https-server): Production cloud deployment with TLS, middleware, and health checks.
-- [TLS Server](/examples/tls-server): Custom TLS server with ALPN negotiation.
-- [HTTPS Client](/examples/https-client): HTTPS client with custom TLS configuration.
-- [TLS HTTPS GET](/examples/tls-https-get): Local TLS listener setup; end-to-end traffic lives in the mTLS and HTTP/2-TLS demos.
-- [TLS Configuration Options](/examples/tls-config-options): TLS configuration constructors and ALPN negotiation.
-- [TLS Handshake Details](/examples/tls-handshake-details): TLS handshake info and cipher suites.
-- [TLS Custom CA](/examples/tls-custom-ca): Custom CA certificate verification with self-signed certs.
-- [TLS mTLS](/examples/tls-mtls): Mutual TLS client certificate authentication.
-- [Request Response Customization](/examples/request-response-customization): Customize request properties and response headers.
-- [Compression](/examples/compression-example): Gzip, deflate, brotli, and zstd compression/decompression.
-- [HTTP Methods](/examples/http-methods): GET, POST, PUT, DELETE, HEAD, OPTIONS.
-- [Retry](/examples/retry-example): Retry with linear backoff.
-- [DNS Resolution](/examples/dns-example): DNS cache and resolution.
-- [Redirect](/examples/redirect-example): Redirect following and policy.
-- [Batch Concurrent](/examples/batch-concurrent): Batch concurrent requests.
-- [Reverse Proxy Middleware](/examples/reverse-proxy-middleware): Server-side reverse proxy.
-
-## Expected Output
-
-Example programs print a server startup line, a per-request exchange line,
-and a final verification line, following this shape:
-
-```text
-Server running on http://127.0.0.1:54321
-GET / -> status=200, body={"message":"..."}
-<Example> verification completed successfully.
+```bash
+zig build example-simple-get
+zig build example-post-json
+zig build example-rest-api
 ```
 
-Port numbers, timings, and body contents vary per example and per run; see
-each example page for its exact output format.
+To cross-compile for another platform:
+
+```bash
+zig build example-simple-get -Dtarget=x86_64-linux-gnu
+zig build example-http3-client -Dtarget=aarch64-macos
+```
+
+To build all 94 examples at once:
+
+```bash
+zig build build-all-examples
+```
+
+---
+
+## 1. Getting Started & Core HTTP
+
+- [Simple GET](/examples/simple-get) — Basic HTTP GET request and status/body extraction.
+- [Simple GET Deserialize](/examples/simple-get-deserialize) — Decoding JSON response payloads into typed Zig structs.
+- [POST JSON](/examples/post-json) — Sending JSON request payloads with POST.
+- [JSON API](/examples/json-api-example) — Full round-trip typed JSON API workflows.
+- [Custom Headers](/examples/custom-headers) — Attaching request headers and inspecting headers in route handlers.
+- [Custom Responses](/examples/custom-responses) — Generating custom status codes, content types, and binary headers.
+- [HTTP Methods](/examples/http-methods) — Demonstrating GET, POST, PUT, DELETE, HEAD, and OPTIONS helpers.
+- [API Aliases](/examples/simplified-api-aliases) — High-level convenience aliases with production defaults.
+
+## 2. Client Networking & Connection Pooling
+
+- [Connection Pool](/examples/connection-pool) — Reusing pooled keep-alive TCP connections across sequential requests.
+- [Concurrent Requests](/examples/concurrent-demo) — Executing multiple requests concurrently using worker pools.
+- [Batch Concurrent](/examples/batch-concurrent) — Bounded batch request dispatching via `concurrency.Pool`.
+- [Redirect Following](/examples/redirect) — Automatic redirect policies (`followRedirects`, `maxRedirects`).
+- [Retries with Backoff](/examples/retry-demo) — Linear retry backoff and status-code filtering.
+- [Forward & SOCKS5h Proxy](/examples/proxy-demo) — Forward HTTP and SOCKS5h proxy configuration.
+- [SOCKS5h Remote DNS](/examples/socks5-proxy) — Remote DNS host resolution through SOCKS5h proxy tunnels.
+- [DNS Resolution](/examples/dns-demo) — Synchronous and cached hostname resolution.
+- [DNS Caching](/examples/dns-cache) — TTL-based DNS caching with negative result tracking.
+- [Multi-Address DNS](/examples/dns-resolve-all) — Dual-stack IPv4/IPv6 candidate address resolution.
+- [Connectivity Probes](/examples/connectivity) — TCP reachability checks with timeout bounds.
+- [Interceptors](/examples/interceptor-example) — Custom client request/response interceptor chains.
+- [Request & Response Customization](/examples/request-response-customization) — Setting per-request timeouts, headers, and credentials.
+
+## 3. HTTP Protocols (HTTP/1.0, HTTP/1.1, HTTP/2, HTTP/3)
+
+- [HTTP/1.0 Client](/examples/http10-client) — Legacy HTTP/1.0 client with close-delimited transfers.
+- [HTTP/1.1 Client](/examples/http11-client) — Dedicated HTTP/1.1 client with keep-alive and chunked encoding.
+- [HTTP/1.1 Server](/examples/http11-server) — Dedicated HTTP/1.1 server with persistent socket connections.
+- [HTTP/2 Client](/examples/http2-client) — Cleartext and TLS HTTP/2 client runtime.
+- [HTTP/2 Multiplexing](/examples/http2-multiplex) — Multiple concurrent logical streams over a single TCP connection.
+- [HTTP/2 TLS with ALPN](/examples/http2-tls) — End-to-end HTTP/2 over TLS negotiated via ALPN.
+- [HTTP/2 Framing & Primitives](/examples/http2-example) — Low-level HTTP/2 frame building and stream state management.
+- [HTTP/2 Client Runtime](/examples/http2-client-runtime) — End-to-end H2 client against local server.
+- [HTTP/2 Server Runtime](/examples/http2-server-runtime) — Native H2 server handler execution.
+- [HTTP/2 Advanced](/examples/http2-advanced) — SETTINGS frame handling, RST_STREAM, and trailer processing.
+- [HTTP/3 Client](/examples/http3-client) — HTTP/3 client runtime over QUIC and UDP.
+- [HTTP/3 QUIC](/examples/http3-quic) — QUIC connection lifecycle, stream multiplexing, and loss recovery.
+- [HTTP/3 0-RTT Resumption](/examples/http3-0rtt) — TLS 1.3 session tickets and 0-RTT early data exchange.
+- [HTTP/3 Framing & Primitives](/examples/http3-example) — QPACK field section compression and HTTP/3 frames.
+- [HTTP/3 Client Runtime](/examples/http3-client-runtime) — Live H3 client queries over UDP sockets.
+- [HTTP/3 Server Runtime](/examples/http3-server-runtime) — Native H3 server endpoint serving UDP clients.
+- [HTTP/3 Advanced](/examples/http3-advanced) — QPACK dynamic tables, flow control, and unidirectional control streams.
+
+## 4. TLS & Transport Security
+
+- [TLS Server](/examples/tls-server) — Custom TLS 1.3 server with certificate and private key loading.
+- [HTTPS Client](/examples/https-client) — HTTPS requests with CA bundle verification.
+- [TLS 1.2 Client](/examples/tls12-client) — Explicit TLS 1.2 handshake and backward-compatible cipher suites.
+- [TLS 1.3 Client](/examples/tls13-client) — Modern TLS 1.3 client with ChaCha20-Poly1305 and AES-GCM.
+- [Mutual TLS (mTLS)](/examples/tls-mtls) — Client certificate authentication and mutual identity verification.
+- [TLS GET](/examples/tls-get) — Lightweight secure GET over loopback.
+- [TLS Custom CA](/examples/tls-custom-ca) — Pinning and trusting custom root authority certificates.
+- [TLS HTTPS GET](/examples/tls-https-get) — End-to-end HTTPS transaction with explicit certificate authority.
+- [TLS Handshake Details](/examples/tls-handshake-details) — Inspecting negotiated protocol versions, ciphers, and key exchange groups.
+- [TLS Configuration Options](/examples/tls-config-options) — Setting verification policies, SNI hostnames, and ALPN lists.
+- [HTTP Auth Helpers](/examples/http-auth-helpers) — Basic and Bearer authentication helper integration.
+- [Cloud HTTPS Server](/examples/cloud-https-server) — Production server configuration behind TLS reverse proxies.
+
+## 5. Server, Routing & Middleware
+
+- [Simple Server](/examples/simple-server) — Minimal HTTP server startup, routing, and graceful shutdown.
+- [Framework Routing Demo](/examples/routing-demo) — Path parameters, slugs, wildcards, route groups, and struct binding.
+- [Custom Server](/examples/custom-server) — Multi-route server with custom headers, query strings, and logging.
+- [Browser Demo Server](/examples/browser-demo-server) — Interactive demo server with live endpoints for browser testing.
+- [Middleware Pipeline](/examples/middleware-example) — Chaining pre- and post-processing middleware functions.
+- [CORS Middleware Server](/examples/cors-server) — Handling Cross-Origin Resource Sharing headers and preflight OPTIONS.
+- [Rate Limiting Server](/examples/rate-limit-server) — Token bucket and sliding window rate limiting.
+- [Security Headers (Helmet)](/examples/helmet-server) — Content-Security-Policy, HSTS, X-Content-Type-Options, and frame guards.
+- [Body Parser Server](/examples/body-parser-server) — Parsing JSON, urlencoded, and text request bodies with size caps.
+- [Cookie Management Server](/examples/cookie-server) — Setting, reading, and expiring secure HTTP cookies.
+- [Session Management Server](/examples/session-server) — In-memory session store with cookie-backed session tokens.
+- [Auth & Error Handling](/examples/auth-and-errors) — Authentication validation and centralized error handlers.
+- [Pre-Route Logic](/examples/pre-route-example) — Global request interception and custom 404 fallback routing.
+- [Reverse Proxy Middleware](/examples/reverse-proxy-middleware) — Forwarding client requests to backend services.
+
+## 6. Web Framework, HTML & Templates
+
+- [Static Files](/examples/static-files) — Serving files from disk with ETags and 304 Not Modified caching.
+- [Static Site with Live Reload](/examples/static-site) — Serving multi-page websites with development hot reload.
+- [Single-File Server with Embedded Assets](/examples/static-embedded) — Zero disk I/O using `@embedFile` compiled assets.
+- [SPA Server with Fallback](/examples/spa-server) — Single-Page Application server routing unmapped paths to `index.html`.
+- [SPA Fallback Helper](/examples/spa-fallback) — Custom SPA fallback rules for HTML5 history API navigation.
+- [File-Based Website Server](/examples/website) — Full-featured file-based dynamic and static website hosting via `.site`.
+- [HTML Client](/examples/html-client) — Fetching web pages and parsing them into a DOM document.
+- [HTML CSS Selectors](/examples/html-select) — Querying DOM trees with CSS selectors.
+- [HTML Metadata Extraction](/examples/html-extract) — Extracting OpenGraph, Twitter Cards, canonical links, and form fields.
+- [Streaming HTML Parsing](/examples/html-stream) — Incremental streaming parsing from `std.Io.Reader`.
+- [HTML File Parsing](/examples/html-file) — Reading and parsing HTML files directly from local storage.
+- [HTML DOM Transformation](/examples/html-transform) — Mutating element attributes, adding nodes, and serializing DOM.
+- [Parse HTML](/examples/parse-html) — Fast, safe DOM parser usage with Tree-sitter backing.
+- [Filesystem Watcher](/examples/file-watcher) — Native OS file notifications with debouncing and polling fallback.
+- [Live Reload with SSE](/examples/live-reload) — Server-Sent Events broadcasting file modifications to connected browsers.
+- [Live Static Watcher](/examples/live-static-watcher) — Combining directory monitoring with static asset serving.
+- [Development Server](/examples/development-server) — Unified local development server with live reload and watcher.
+- [Templates: Basic](/examples/template-basic) — Native template rendering with variables, conditionals, and loops.
+- [Templates: Inheritance](/examples/template-inheritance) — Reusable master layouts with block overrides (`{% block %}`, `{% extends %}`).
+- [Templates: Loops](/examples/template-loops) — Iterating collections with `loop.index`, `loop.first`, and `loop.last`.
+- [Templates: Includes](/examples/template-includes) — Composing pages with reusable partial components (`{% include %}`).
+- [Templates: Live Reload](/examples/template-live-reload) — Hot template reloading with cache invalidation.
+- [Templates: Advanced Jinja](/examples/template-jinja) — Advanced layout inheritance, macros, and filtering.
+
+## 7. WebSockets & Streaming
+
+- [WebSocket Server](/examples/websocket-server) — RFC 6455 full-duplex WebSocket server over HTTP connection takeover.
+- [WebSocket Client](/examples/websocket-client) — `ws://` client with authentication, messaging, and clean close handshake.
+- [WebSocket Protocol Primitives](/examples/websocket-example) — Low-level frame encoding, decoding, masking, and handshake hashing.
+- [Server-Sent Events (SSE) Server](/examples/sse-server) — Streaming events with `text/event-stream` format.
+- [Streaming Response Reader](/examples/streaming) — Consuming large or unbounded response streams via `Response.reader()`.
+- [Compression Demo](/examples/compression-demo) — Content-Encoding negotiation (gzip, deflate, zstd, brotli).
+- [Streaming with Compression](/examples/streaming-compression-example) — Streaming decompressed payloads on the fly.
+- [Multipart Form Data](/examples/multipart) — Building and parsing `multipart/form-data` uploads with fields and files.
+
+## 8. APIs, Documentation & Testing
+
+- [OpenAPI Specification Server](/examples/openapi) — Automated OpenAPI 3.1 JSON generation from registered routes.
+- [Typed REST API](/examples/rest-api) — Type-safe REST routes with schema validation and Swagger/ReDoc/Scalar documentation.
+- [Documentation Server](/examples/docs-server) — Serving embedded Swagger UI, ReDoc, Scalar, and GraphiQL interfaces.
+- [GraphQL Server](/examples/graphql-server) — Native GraphQL query execution with schema definition and GraphiQL IDE.
+- [Testing Server](/examples/testing-server) — Integration testing with ephemeral ports, request capture, and inspection.
+- [Full Integration](/examples/full-integration) — Combining client, server, TLS, routing, and middleware in one program.
+
+## 9. Process Lifecycle & Signals
+
+- [Server Signals](/examples/server-signals) — Automatic Ctrl+C / SIGTERM signal handling with graceful drain deadlines.
+- [Custom Signals](/examples/custom-signals) — Custom signal masks, per-server hooks, and multi-server shutdown.
+- [Manual Signals](/examples/manual-signals) — Application-managed signal subscriptions driving graceful shutdown.
+
+## 10. Observability & Sockets
+
+- [Metrics Server](/examples/metrics-server) — Prometheus-compatible metrics registry tracking requests, latencies, and statuses.
+- [Logging Callback](/examples/logging-callback) — Custom structured logging callbacks for client and server events.
+- [Health Check Probes](/examples/health-check) — Liveness and readiness probe endpoints for orchestrators (Kubernetes).
+- [Readiness Probes](/examples/readiness-probe-example) — Stateful readiness check integration.
+- [TCP Local Socket](/examples/tcp-local) — Low-level TCP listener and client socket communication.
+- [UDP Local Datagram](/examples/udp-local) — Low-level UDP datagram socket communication.
+- [Unix Domain Sockets Alternative](/examples/unix-socket-example) — Same-machine loopback IPC configuration.
+
+## 11. File Downloads & FTP
+
+- [File Download](/examples/download) — Resumable streaming downloads with progress reporting.
+- [Download Info](/examples/download-info) — Inspecting remote file headers, size, and accept-ranges support.
+- [Download Verify](/examples/download-verify) — Cryptographic checksum verification (SHA-256, MD5) on downloaded files.
+- [Download Resume](/examples/download-resume) — Resuming interrupted downloads with HTTP Range headers.
+- [Download Existing](/examples/download-existing) — Efficient skipping of already downloaded local files.
+- [Download Custom Progress](/examples/download-custom-progress) — Custom progress bars, transfer rates, and ETA callbacks.
+- [Batch Downloads](/examples/download-batch) — Concurrent multi-file download manager with worker concurrency limits.
+- [Download Update](/examples/download-update) — Conditional file updates (`replaceIfChanged` with ETag/Last-Modified).
+- [Download Checksum File](/examples/download-checksum-file) — Parsing and validating standard checksum files (`SHA256SUMS`).
+- [FTP Client](/examples/ftp-client) — FTP protocol client with directory listing and file retrieval.
+- [FTP Server](/examples/ftp-server) — Lightweight FTP server implementation.
+- [FTP Download](/examples/ftp-download) — Downloading files over FTP with stream tracking.

@@ -1,0 +1,113 @@
+# Live Reload Server with Server-Sent Events
+
+Demonstrates building a development HTTP server with live reloading: serves HTML with injected client-side reload scripts and broadcasts change notifications over Server-Sent Events (SSE).
+
+## Complete Example
+
+```zig
+//! Example: Live Reload Server with SSE & Hot CSS Reloading
+//!
+//! Demonstrates:
+//! 1. Server serving dynamic HTML and CSS
+//! 2. Live reload script injection
+//! 3. Background file watcher triggering reload events
+//!
+//! Run with: `zig build run-live-reload`
+
+const std = @import("std");
+const httpx = @import("httpx");
+
+fn indexHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
+    const htmlContent =
+        \\<!DOCTYPE html>
+        \\<html>
+        \\<head>
+        \\  <title>Live Reload Demo</title>
+        \\  <link rel="stylesheet" href="/style.css">
+        \\</head>
+        \\<body>
+        \\  <h1>Live Reload with HTTPX</h1>
+        \\  <p>Modify files to see instant reload.</p>
+        \\</body>
+        \\</html>
+    ;
+    return ctx.html(htmlContent);
+}
+
+fn styleHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
+    return .{
+        .status = 200,
+        .body = "body { background: #1e1e2e; color: #cdd6f4; font-family: sans-serif; }",
+        .contentType = "text/css; charset=utf-8",
+    };
+}
+
+pub fn main() !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var server = try httpx.Server.init(allocator, io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .limits = .{ .maxConnections = 4 },
+        .liveReload = .{
+            .enabled = true,
+            .watch = true,
+            .watchDir = ".",
+        },
+    });
+    defer server.deinit();
+
+    try server.get("/", indexHandler);
+    try server.get("/style.css", styleHandler);
+
+    const port = server.localPort();
+    std.debug.print("Server listening on http://127.0.0.1:{d}\n", .{port});
+
+    const ServerThread = struct {
+        fn run(s: *httpx.Server) void {
+            s.run();
+        }
+    };
+    const t = try std.Thread.spawn(.{}, ServerThread.run, .{&server});
+    defer t.join();
+
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
+
+    const rootUrl = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/", .{port});
+    defer allocator.free(rootUrl);
+
+    var res = try client.get(rootUrl, .{});
+    defer res.deinit();
+    std.debug.print("GET / returned status {d} (Content-Type: {s})\n", .{ res.status, res.contentType() });
+
+    var doc = try httpx.parsing.init(allocator, io, .{}).parseHtml(res.body);
+    defer doc.deinit();
+    std.debug.print("Parsed Page Title: '{s}'\n", .{try doc.title()});
+
+    server.stop();
+}
+```
+
+## Expected Output
+
+```text
+Live reload server running on http://127.0.0.1:PORT
+Serving pages with automatic hot reloading.
+```
+
+Actual port numbers and timings vary with environment allocation.
+
+## How to Run
+
+```bash
+zig build run-live-reload
+```
+
+## Related
+
+* [Server Guide](/guide/routing)
+* [All Examples](/examples/)

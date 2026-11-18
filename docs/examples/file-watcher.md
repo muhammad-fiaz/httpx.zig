@@ -1,0 +1,91 @@
+# Filesystem Watcher with Native OS Backends
+
+Demonstrates the HTTPX cross-platform filesystem watcher (httpx.Watcher) with native OS change notifications (ReadDirectoryChangesW, inotify, kqueue), debouncing, atomic rename handling, and reliable polling fallback.
+
+## Complete Example
+
+```zig
+//! Example: Production-grade File Watcher with Debouncing & Atomic Saves
+//!
+//! Demonstrates:
+//! 1. Initializing `httpx.Watcher`
+//! 2. Registering watched files and monitoring changes
+//! 3. Detecting file modification and debouncing rapid editor saves
+//!
+//! Run with: `zig build run-file-watcher`
+
+const std = @import("std");
+const httpx = @import("httpx");
+
+fn onFileChanged(event: httpx.WatchEvent, _: ?*anyopaque) void {
+    std.debug.print("==> File event: {s} | Strategy: {s} | Kind: {s}\n", .{
+        event.path,
+        @tagName(event.strategy),
+        @tagName(event.kind),
+    });
+}
+
+pub fn main() !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    const watchTarget = "watcher_demo_asset.txt";
+    try httpx.fs.writeFile(watchTarget, "Version 1");
+    defer httpx.fs.deleteFile(watchTarget) catch {};
+
+    var watcher = try httpx.Watcher.init(allocator, io, .{
+        .dirPath = ".",
+        .debounceMs = 50,
+        .pollMs = 50,
+        .onChange = onFileChanged,
+    });
+    defer watcher.deinit();
+
+    try watcher.watchFile(watchTarget);
+    try watcher.start();
+    std.debug.print("Watcher started on '{s}'...\n", .{watchTarget});
+
+    // Simulate an editor save
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(100), .awake) catch {};
+    try httpx.fs.writeFile(watchTarget, "Version 2 (Modified)");
+
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake) catch {};
+
+    // Consume queued events using next()
+    var eventCount: usize = 0;
+    while (watcher.next()) |event| {
+        eventCount += 1;
+        std.debug.print("Dequeued event #{d}: path='{s}', kind={s}, strategy={s}\n", .{
+            eventCount,
+            event.path,
+            @tagName(event.kind),
+            @tagName(event.strategy),
+        });
+    }
+
+    const changes = watcher.changeCount();
+    std.debug.print("Total changes captured: {d} (dequeued: {d})\n", .{ changes, eventCount });
+}
+```
+
+## Expected Output
+
+```text
+Watcher initialized with native OS backend.
+Watching directory for file modifications...
+```
+
+Actual port numbers and timings vary with environment allocation.
+
+## How to Run
+
+```bash
+zig build run-file-watcher
+```
+
+## Related
+
+* [Server Guide](/guide/routing)
+* [All Examples](/examples/)
