@@ -203,6 +203,14 @@ pub const StreamConn = union(enum) {
 const logging = @import("../common/logging.zig");
 const clock = @import("../common/clock.zig");
 
+/// Truncates monotonic milliseconds to the platform word size so the shutdown
+/// timestamp stays atomic on 32-bit targets (where 64-bit atomics are absent).
+/// The subtraction in the deadline monitor is wrapping, so elapsed time stays
+/// correct for the lifetime of a server process.
+fn truncateMillis(ms: i64) usize {
+    return @truncate(@as(u64, @bitCast(ms)));
+}
+
 /// Observability configuration for the server.
 ///
 /// HTTPX NEVER automatically prints to stdout, stderr, or any output
@@ -588,7 +596,7 @@ pub const Server = struct {
     /// Active process-wide signal subscription; null when disabled or stopped.
     signalSubscription: ?signalsMod.Subscription = null,
     signalDeliveries: std.atomic.Value(u32) = .init(0),
-    shutdownRequestedAtMs: std.atomic.Value(i64) = .init(0),
+    shutdownRequestedAtMs: std.atomic.Value(usize) = .init(0),
     shutdownForced: std.atomic.Value(bool) = .init(false),
     runActive: std.atomic.Value(bool) = .init(false),
     /// Live connections (keep-alive readers) so shutdown can wake them.
@@ -1320,7 +1328,7 @@ pub const Server = struct {
     /// Safe to call multiple times.
     pub fn requestShutdown(self: *Server) void {
         if (self.shutdownRequestedAtMs.load(.acquire) == 0) {
-            self.shutdownRequestedAtMs.store(clock.monotonicMillis(self.io), .release);
+            self.shutdownRequestedAtMs.store(truncateMillis(clock.monotonicMillis(self.io)), .release);
         }
 
         if (!self.loggedStop.swap(true, .acq_rel)) {
@@ -1639,8 +1647,9 @@ pub const Server = struct {
             // Enforce the graceful shutdown deadline: interrupt remaining
             // connection I/O once so workers can observe EOF and finish.
             const started = server.shutdownRequestedAtMs.load(.acquire);
-            const timeout: i64 = @intCast(server.cfg.signals.drainMs);
-            if (started != 0 and timeout > 0 and now - started >= timeout and
+            const timeout: usize = @intCast(server.cfg.signals.drainMs);
+            const nowMs = truncateMillis(now);
+            if (started != 0 and timeout > 0 and nowMs -% started >= timeout and
                 !server.shutdownForced.swap(true, .acq_rel))
             {
                 for (server.activeConns.items) |socket| socket.interruptIo();

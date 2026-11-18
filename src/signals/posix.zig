@@ -64,10 +64,7 @@ pub fn wait() void {
     if (pipeRead < 0) return;
     var buf: [64]u8 = undefined;
     while (true) {
-        const n = std.posix.read(pipeRead, &buf) catch |err| switch (err) {
-            error.Interrupted => continue,
-            else => return,
-        };
+        const n = std.posix.read(pipeRead, &buf) catch return;
         if (n > 0) return;
     }
 }

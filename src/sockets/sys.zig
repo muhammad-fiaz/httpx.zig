@@ -290,16 +290,16 @@ pub const posixC = if (!isWindows and builtin.link_libc) struct {
         usec: isize,
     };
 
-    extern "c" fn recv(fd: Fd, buf: [*]u8, len: usize, flags: c_int) isize;
-    extern "c" fn send(fd: Fd, buf: [*]const u8, len: usize, flags: c_int) isize;
-    extern "c" fn shutdown(fd: Fd, how: c_int) c_int;
-    extern "c" fn close(fd: Fd) c_int;
-    extern "c" fn socket(domain: c_int, sock_type: c_int, protocol: c_int) Fd;
-    extern "c" fn connect(fd: Fd, addr: *const anyopaque, addrlen: u32) c_int;
-    extern "c" fn getsockopt(fd: Fd, level: c_int, optname: c_int, optval: ?*anyopaque, optlen: *u32) c_int;
-    extern "c" fn select(nfds: c_int, r: ?*FdSet, w: ?*FdSet, e: ?*FdSet, tv: ?*Timeval) c_int;
-    extern "c" fn setsockopt(fd: Fd, level: c_int, optname: c_int, optval: ?*const anyopaque, optlen: u32) c_int;
-    extern "c" fn fcntl(fd: Fd, cmd: c_int, ...) c_int;
+    pub extern "c" fn recv(fd: Fd, buf: [*]u8, len: usize, flags: c_int) isize;
+    pub extern "c" fn send(fd: Fd, buf: [*]const u8, len: usize, flags: c_int) isize;
+    pub extern "c" fn shutdown(fd: Fd, how: c_int) c_int;
+    pub extern "c" fn close(fd: Fd) c_int;
+    pub extern "c" fn socket(domain: c_int, sock_type: c_int, protocol: c_int) Fd;
+    pub extern "c" fn connect(fd: Fd, addr: *const anyopaque, addrlen: u32) c_int;
+    pub extern "c" fn getsockopt(fd: Fd, level: c_int, optname: c_int, optval: ?*anyopaque, optlen: *u32) c_int;
+    pub extern "c" fn select(nfds: c_int, r: ?*FdSet, w: ?*FdSet, e: ?*FdSet, tv: ?*Timeval) c_int;
+    pub extern "c" fn setsockopt(fd: Fd, level: c_int, optname: c_int, optval: ?*const anyopaque, optlen: u32) c_int;
+    pub extern "c" fn fcntl(fd: Fd, cmd: c_int, ...) c_int;
 
     pub const SOL_SOCKET: c_int = 1;
     pub const SO_REUSEADDR: c_int = 2;
