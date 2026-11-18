@@ -18,6 +18,8 @@ pub const Route = struct {
     headers: []common.Header,
     handler: ?common.Handler,
     delayMs: u32,
+    /// Optional state pointer handed to `handler` as `ctx.userData`.
+    userData: ?*anyopaque = null,
     requests: std.atomic.Value(usize) = .init(0),
 
     pub fn deinit(self: *Route) void {
@@ -41,7 +43,15 @@ pub const Route = struct {
             std.Io.sleep(ctx.io, std.Io.Duration.fromMilliseconds(route.delayMs), .awake) catch {};
         }
 
-        if (route.handler) |handler| return handlerMod.invoke(handler, ctx);
+        if (route.handler) |handler| {
+            // The route pointer occupies `ctx.userData` for the router. Swap in
+            // the caller's state for the handler, then restore so nested
+            // dispatch keeps working.
+            const previous = ctx.userData;
+            ctx.userData = route.userData;
+            defer ctx.userData = previous;
+            return handlerMod.invoke(handler, ctx);
+        }
 
         return .{
             .status = route.status,

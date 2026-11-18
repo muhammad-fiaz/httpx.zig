@@ -66,7 +66,9 @@ var server = try httpx.testing.Server.init(allocator, io, .{
 | `headers` | `&.{}` | Extra response headers; names and values copied. |
 | `handler` | `null` | Dynamic `fn (*httpx.router.Context) anyerror!httpx.router.Response`. |
 | `delayMs` | `0` | Delay using the request I/O context. |
-| `closeConnection` | `false` | Adds `Connection: close`. |
+| `closeConnection` | `false` | Forces `Connection: close` after this response. |
+| `location` | `null` | Adds a `Location` header without borrowing a temporary array. |
+| `userData` | `null` | Opaque state handed to `.handler` as `ctx.userData`. |
 
 Route options are validated with zigantic through `checkFirst`, matching
 production configuration validation. Duplicate method+path registration returns
@@ -84,6 +86,43 @@ production configuration validation. Duplicate method+path registration returns
 | `httpx.testing.redirect(location, status)` | Location header and status |
 | `httpx.testing.delayed(ms, options)` | Applies a delay |
 | `httpx.testing.echo` | Handler mirroring request body/content type |
+
+## `httpx.testing.websocket.EchoServer`
+
+A real loopback WebSocket server for client development. It wraps
+`httpx.testing.Server`, so the handshake, framing, authentication, and transport
+are the production implementations.
+
+```zig
+var server = try httpx.testing.websocket.EchoServer.init(allocator, io, .{});
+defer server.deinit();
+try server.start();
+defer server.stop();
+
+var urlBuf: [128]u8 = undefined;
+const url = try server.url("/ws", &urlBuf);
+
+var client = try httpx.websocket.Client.init(allocator, io, .{
+    .auth = .{ .scheme = .bearer, .token = "test-token" },
+});
+defer client.deinit();
+
+var session = try client.connect(url);
+defer session.deinit();
+try session.sendText("ping");
+```
+
+| Member | Description |
+|---|---|
+| `init(allocator, io, cfg)` | Binds loopback, installs the authenticated and open echo routes. |
+| `start()` / `stop()` / `deinit()` | Same lifecycle guarantees as `httpx.testing.Server`. |
+| `url(path, buffer)` | Writes a `ws://127.0.0.1:<port><path>` URL. |
+| `httpUrl(path, buffer)` | Writes the matching `http://` URL for non-upgrade checks. |
+| `port()` | Actual bound port. |
+
+`Config` fields are `token` (default `"test-token"`; `null` disables auth),
+`path` (default `"/ws"`), `openPath` (default `"/ws-open"`),
+`maxConnections`, `maxActive`, and `signalHandling` (default `false`).
 
 ## Capture types
 

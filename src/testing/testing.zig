@@ -14,6 +14,10 @@
 //! The server is the production `httpx.Server` with loopback/ephemeral-port
 //! defaults, request capture, and concise route registration. It uses real
 //! sockets and the normal `httpx.Client` transport.
+//!
+//! `httpx.testing.websocket.EchoServer` provides the same real-loopback
+//! experience for WebSocket clients, including authenticated and open echo
+//! routes.
 
 const response = @import("response.zig");
 
@@ -25,6 +29,9 @@ pub const Method = @import("server.zig").Method;
 pub const Header = @import("server.zig").Header;
 pub const Handler = @import("handler.zig").Handler;
 pub const echo = @import("handler.zig").echo;
+
+/// Real loopback WebSocket echo server for client development and tests.
+pub const websocket = @import("websocket.zig");
 
 /// Response fixtures for concise route registration.
 pub const text = response.text;

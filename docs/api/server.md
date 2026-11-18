@@ -6,10 +6,10 @@ The `httpx.zig` server module provides a robust HTTP server with middleware supp
 
 | Protocol | Status | Features |
 |----------|--------|----------|
-| HTTP/1.0 | ✅ Full | Basic request/response |
-| HTTP/1.1 | ✅ Full | Keep-Alive, chunked transfer, trailers |
-| HTTP/2 | ✅ Full | High-level server runtime over TCP/TLS plus full framing/HPACK/stream primitives |
-| HTTP/3 | ✅ Full | High-level server runtime over UDP + QUIC/TLS 1.3 with loss recovery, NewReno congestion control, 0-RTT, Retry, v1/v2 version negotiation, and pooled connections |
+| HTTP/1.0 | Full | Basic request/response |
+| HTTP/1.1 | Full | Keep-Alive, chunked transfer, trailers |
+| HTTP/2 | Full | High-level server runtime over TCP/TLS plus full framing/HPACK/stream primitives |
+| HTTP/3 | Full | High-level server runtime over UDP + QUIC/TLS 1.3 with loss recovery, NewReno congestion control, 0-RTT, Retry, v1/v2 version negotiation, and pooled connections |
 
 ## Server
 
@@ -62,7 +62,7 @@ defer env_server.deinit();
 | `portStrategy` | `PortStrategy` | `.incremental` | Startup behavior when the port is occupied (`.incremental`, `.strict`, `.exit`). |
 | `maxPortAttempts` | `u16` | `50` | Port candidates to try when `portStrategy = .incremental`. |
 | `maxBody` | `usize` | `8MB` | Largest accepted request body. |
-| `limits.maxConns` | `usize` | `0` | Total connections successfully queued before `run()` stops accepting (`0` = unlimited). |
+| `limits.maxConnections` | `usize` | `0` | Total connections successfully queued before `run()` stops accepting (`0` = unlimited). |
 | `limits.maxActive` | `usize` | `128` | Bound across connections being processed or queued. New connections above the limit are closed. Must be greater than zero. |
 | `limits.maxQueued` | `usize` | `128` | Bounded worker queue capacity. Newly accepted sockets are closed when the queue is full. Must be greater than zero. |
 | `limits.workers` | `u16` | `0` | Fixed worker count; zero selects up to 16 CPUs, capped by `limits.maxActive`. |
@@ -153,7 +153,7 @@ active and queued connections together and admits no more than
 `limits.maxActive`; the worker queue independently holds at most
 `limits.maxQueued`. A full queue or connection limit closes the newly
 accepted socket, so the effective queued capacity is bounded by both settings.
-`limits.maxConns` is a separate lifetime limit and counts successfully queued
+`limits.maxConnections` is a separate lifetime limit and counts successfully queued
 connections.
 
 The timeout fields are absolute deadlines for each I/O phase, not inactivity
@@ -325,8 +325,8 @@ literal as the second.
 
 The handler's return type selects the mode automatically:
 
-- `!httpx.router.Result(T)` → typed REST endpoint (JSON body decoding plus OpenAPI 3.1).
-- `!httpx.router.Response` → raw `HandlerFn` route with the same metadata fields.
+- `!httpx.router.Result(T)` ’ typed REST endpoint (JSON body decoding plus OpenAPI 3.1).
+- `!httpx.router.Response` ’ raw `HandlerFn` route with the same metadata fields.
 
 | Method | Description |
 |--------|-------------|

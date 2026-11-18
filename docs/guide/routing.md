@@ -71,7 +71,7 @@ const api = server.router.group("/api", .{});
 const users = api.group("/users", .{});
 try users.get("/", listUsers, .{});
 try users.get("/{id:int}", getUser, .{});
-// → /api/users and /api/users/{id:int}; parent params stay visible.
+// -> /api/users and /api/users/{id:int}; parent params stay visible.
 ```
 
 Groups share a prefix (and optional middleware) without string
@@ -142,7 +142,7 @@ var server = try httpx.Server.init(allocator, io, .{
 
 ## Conflicts and priority
 
-- `/users/{id}` vs `/users/{name}` → registration error (`DuplicateRoute`).
+- `/users/{id}` vs `/users/{name}` -> registration error (`DuplicateRoute`).
 - `/users/me` (static) beats `/users/{id:int}` (typed) beats
   `/users/{name}` (generic) beats `/files/*rest` (wildcard).
 - Equal-specificity ties keep the first registered route (documented;
@@ -157,7 +157,7 @@ returns **405 with an `Allow` header** (e.g. `Allow: GET, POST`).
 
 ## Middleware
 
-Order is deterministic: router middleware → route middleware → handler.
+Order is deterministic: router middleware -> route middleware -> handler.
 
 ```zig
 try server.use(loggingMw);                                   // router-wide

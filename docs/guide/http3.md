@@ -71,6 +71,19 @@ Always prefer `server.http3.port()` over `server.localPort()` when dialling HTTP
 
   Without it, a second request reuses the pooled connection. HTTP/3 over a proxy is rejected: `try client.get("https://example.com/", .{ .httpVersion = .http3, .proxy = "http://127.0.0.1:8080" })` returns `error.Http3ProxyUnsupported`.
 
+- `client.close()` drains the pool and sends an application `CONNECTION_CLOSE`
+  on each pooled QUIC connection before joining its pump, so a server can
+  release the session immediately instead of waiting for its idle timeout. Use
+  it when an application deliberately ends a session, for example before
+  opening a fresh one to exercise 0-RTT resumption.
+
+- HTTP/3 session tickets use keys owned by the `Server`, and 0-RTT replay
+  detection uses a server-wide cache. Tickets therefore remain valid across
+  connections for the lifetime of the server. Supply explicit `.tls = .{
+  .ticketKeys = ... }` values when several server instances must accept each
+  other's tickets; otherwise a single key is generated from OS entropy on
+  first use and wiped on `deinit`.
+
 - Require QUIC address validation before the Initial flight with one inline field:
 
   ```zig
@@ -280,10 +293,10 @@ std.debug.print("Key phase: {}\n", .{decoded.keyPhase});
 
 | Type | Long Header | Description |
 |------|-------------|-------------|
-| Initial | ✅ | Connection establishment |
-| 0-RTT | ✅ | Early data |
-| Handshake | ✅ | TLS handshake completion |
-| Retry | ✅ | Address validation |
+| Initial | Yes | Connection establishment |
+| 0-RTT | Yes | Early data |
+| Handshake | Yes | TLS handshake completion |
+| Retry | Yes | Address validation |
 | 1-RTT | No (short header) | Application data |
 
 ## QUIC Frames

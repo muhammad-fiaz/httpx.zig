@@ -628,7 +628,7 @@ test {
     _ = websocket.Session;
     _ = websocket.protocol.Handshake;
     _ = websocket.protocol.Frame;
-    _ = @import("web/websocket/websocketTests.zig");
+    _ = testing.websocket;
     _ = middleware.rateLimit;
     _ = middleware.cors;
     _ = middleware.helmet;

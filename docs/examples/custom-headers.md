@@ -33,7 +33,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .limits = .{ .maxConns = 1 },
+        .limits = .{ .maxConnections = 1 },
     });
     defer server.deinit();
     try server.router.add(.GET, "/headers", headersHandler, .{});

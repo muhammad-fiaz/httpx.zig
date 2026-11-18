@@ -1525,7 +1525,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                 // For TLS, use the AFD-backed stream path (required for
                 // std.Io.net TLS initialization). For plain HTTP on Windows,
                 // use the direct winsock path (avoids netConnectIpWindows
-                // STATUS_CONNECTION_REFUSED → unexpectedStatus() stderr noise
+                // STATUS_CONNECTION_REFUSED ’ unexpectedStatus() stderr noise
                 // that corrupts the --listen=- test runner protocol).
                 if (isTls) {
                     break :blk tcp.connectAddressStream(io, &da) catch return Error.ConnectFailed;
@@ -2919,7 +2919,7 @@ fn startTestServer(
     errdefer ctx.deinit();
     var srv = try lifecycle.Server.init(a, ctx.io, .{
         .port = 0,
-        .limits = .{ .maxConns = 1 },
+        .limits = .{ .maxConnections = 1 },
         .keepAlive = keepAlive,
     });
     errdefer srv.deinit();
@@ -3001,7 +3001,7 @@ test "keep-alive: second request reuses pooled connection" {
     var S = try startTestServer(a, true, "/ka", "hello-keepalive");
     var srv = &S.srv;
     // Single connection carries BOTH keep-alive requests; run() then exits
-    // its accept loop via maxConns => join needs no listener cancel.
+    // its accept loop via maxConnections => join needs no listener cancel.
     defer srv.deinit();
     defer S.ctx.deinit();
 
@@ -3037,7 +3037,7 @@ test "keep-alive: second request reuses pooled connection" {
 
     // Teardown order matters:
     //   1. purge pool -> closes pooled socket -> server reader sees EOF
-    //   2. join       -> server thread exits (served==maxConns)
+    //   2. join       -> server thread exits (served==maxConnections)
     //   3. shutdown   -> flip flags (listener already idle; no cancel race)
     //   4. client.deinit -> destroys pool/dns structures with zero in-flight IO
     client.pool.purge();
@@ -3223,7 +3223,7 @@ test "connection close response is not pooled" {
     var ctx = try tTcp.IoContext.init(a);
     defer ctx.deinit();
     // keepAlive=false server => always responds Connection: close
-    var srv = try lifecycle.Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConns = 2 } });
+    var srv = try lifecycle.Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConnections = 2 } });
     defer srv.deinit();
     try srv.router.add(.GET, "/x", struct {
         fn h(_: *routerNs.Context) anyerror!routerNs.Response {

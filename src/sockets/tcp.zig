@@ -60,7 +60,14 @@ const ws = sysMod.ws;
 /// Deliberately does not use `windows.unexpectedStatus()`: that path dumps a
 /// stack trace to stderr and corrupts the test runner's binary protocol.
 fn mapConnectError() ConnectError {
-    return switch (ws.WSAGetLastError()) {
+    return mapConnectCode(ws.WSAGetLastError());
+}
+
+/// Maps one winsock error code (already read from `WSAGetLastError`) onto the
+/// connect taxonomy. Split from `mapConnectError` so `SO_ERROR` results and
+/// values read before `closesocket` can be mapped without a second syscall.
+fn mapConnectCode(code: i32) ConnectError {
+    return switch (code) {
         ws.WSAECONNREFUSED => ConnectError.ConnectionRefused,
         ws.WSAEHOSTUNREACH, ws.WSAEHOSTDOWN => ConnectError.HostUnreachable,
         ws.WSAENETUNREACH => ConnectError.NetworkUnreachable,
@@ -68,6 +75,23 @@ fn mapConnectError() ConnectError {
         ws.WSAEACCES => ConnectError.PermissionDenied,
         else => ConnectError.Unexpected,
     };
+}
+
+fn mapSysConnectError(err: sysMod.Error) ConnectError {
+    return switch (err) {
+        error.ConnectionRefused, error.ConnectionReset, error.ConnectionAborted => ConnectError.ConnectionRefused,
+        error.HostUnreachable => ConnectError.HostUnreachable,
+        error.NetworkUnreachable, error.NetworkDown => ConnectError.NetworkUnreachable,
+        error.TimedOut => ConnectError.TimedOut,
+        error.AccessDenied => ConnectError.PermissionDenied,
+        error.OutOfBuffers => ConnectError.OutOfMemory,
+        else => ConnectError.Unexpected,
+    };
+}
+
+fn elapsedMs(io: std.Io, startedMs: i64) u32 {
+    const elapsed = clock.monotonicMillis(io) - startedMs;
+    return @intCast(@max(@as(i64, 0), @min(elapsed, @as(i64, std.math.maxInt(u32)))));
 }
 
 // Public API for socket tuning
@@ -966,7 +990,7 @@ pub fn wakeListenerPort(port: u16) void {
 /// Connect to a parsed Address (IPv4 or IPv6).
 ///
 /// On Windows: uses ws232 directly to avoid netConnectIpWindows which maps
-/// STATUS_CONNECTION_REFUSED → error.Unexpected → unexpectedStatus() stderr
+/// STATUS_CONNECTION_REFUSED -> error.Unexpected -> unexpectedStatus() stderr
 /// output that corrupts the --listen=- test runner binary protocol.
 ///
 /// On other platforms: uses std.Io.net (existing behaviour).
@@ -988,6 +1012,158 @@ pub fn connectAddress(io: std.Io, addr: *const addressMod.Address) ConnectError!
         else => return ConnectError.Unexpected,
     };
     return Socket.init(stream, io);
+}
+
+// Timed reachability connect
+
+/// Connects to `addr` within `timeoutMs`, measures how long the TCP handshake
+/// took, then closes the socket again.
+///
+/// This is the shared primitive for connectivity checks: a completed TCP
+/// handshake (regardless of whether the peer ever `accept`s) proves that the
+/// address and port are reachable from this host. Returning the socket would
+/// be misleading because the caller never performs application I/O with it.
+///
+/// Returns elapsed milliseconds on success. `timeoutMs == 0` immediately
+/// returns `error.TimedOut`; it never means "wait forever".
+///
+/// Windows uses a non-blocking winsock connect plus `select`/`SO_ERROR`
+/// (see the module header for why `std.Io.net` is bypassed there). POSIX uses
+/// a non-blocking fd plus `select`/`SO_ERROR`. The blocking `std.Io.net` path
+/// is only used when libc is unavailable, where no portable fd-level timeout
+/// is exposed; in that build the timeout is not enforced.
+pub fn connectAddressTimed(io: std.Io, addr: *const addressMod.Address, timeoutMs: u32) ConnectError!u32 {
+    if (timeoutMs == 0) return ConnectError.TimedOut;
+    if (isWindows) return connectAddressTimedWindows(io, addr, timeoutMs);
+    if (builtin.link_libc) return connectAddressTimedPosix(io, addr, timeoutMs);
+    return connectAddressTimedBlocking(io, addr);
+}
+
+fn connectAddressTimedWindows(io: std.Io, addr: *const addressMod.Address, timeoutMs: u32) ConnectError!u32 {
+    if (!isWindows) unreachable;
+    ws.startup();
+
+    const af: i32 = if (addr.family == .ip4) ws.AF_INET else ws.AF_INET6;
+    const h = ws.socket(af, ws.SOCK_STREAM, ws.IPPROTO_TCP);
+    if (h == ws.INVALID_SOCKET) return mapConnectError();
+    defer _ = ws.closesocket(h);
+
+    var nonblocking: u32 = 1;
+    if (ws.ioctlsocket(h, ws.FIONBIO, &nonblocking) == ws.SOCKET_ERROR) return ConnectError.Unexpected;
+
+    const started = clock.monotonicMillis(io);
+
+    const rc = switch (addr.family) {
+        .ip4 => blk: {
+            var sa = ws.sockaddrIn{
+                .family = @intCast(ws.AF_INET),
+                .port = std.mem.nativeToBig(u16, addr.port),
+                .addr = addr.bytes[0..4].*,
+            };
+            break :blk ws.connect(h, &sa, @sizeOf(ws.sockaddrIn));
+        },
+        .ip6 => blk: {
+            var sa = ws.sockaddrIn6{
+                .family = @intCast(ws.AF_INET6),
+                .port = std.mem.nativeToBig(u16, addr.port),
+                .addr = addr.bytes,
+                .scopeId = addr.zone,
+            };
+            break :blk ws.connect(h, &sa, @sizeOf(ws.sockaddrIn6));
+        },
+    };
+
+    if (rc == ws.SOCKET_ERROR) {
+        const code = ws.WSAGetLastError();
+        // WSAEWOULDBLOCK / WSAEINPROGRESS: the handshake is still running.
+        if (code != 10035 and code != 10036) return mapConnectCode(code);
+
+        var writeSet = ws.FdSet.zero();
+        writeSet.add(h);
+        var exceptSet = ws.FdSet.zero();
+        exceptSet.add(h);
+        var tv = ws.Timeval{
+            .sec = @intCast(timeoutMs / 1000),
+            .usec = @intCast((timeoutMs % 1000) * 1000),
+        };
+
+        const sel = ws.select(0, null, &writeSet, &exceptSet, &tv);
+        if (sel == ws.SOCKET_ERROR) return ConnectError.Unexpected;
+        if (sel == 0) return ConnectError.TimedOut;
+
+        // select woke us: SO_ERROR distinguishes a completed handshake from a
+        // refused/unreachable attempt. Read it before the deferred close.
+        var so_error: c_int = 0;
+        var len: i32 = @sizeOf(c_int);
+        if (ws.getsockopt(h, ws.SOL_SOCKET, ws.SO_ERROR, &so_error, &len) == ws.SOCKET_ERROR) {
+            return ConnectError.Unexpected;
+        }
+        if (so_error != 0) return mapConnectCode(so_error);
+    }
+
+    return elapsedMs(io, started);
+}
+
+fn connectAddressTimedPosix(io: std.Io, addr: *const addressMod.Address, timeoutMs: u32) ConnectError!u32 {
+    const af: c_int = if (addr.family == .ip4) posix.AF.INET else posix.AF.INET6;
+    const fd = sysMod.posixC.socket(af, posix.SOCK.STREAM, posix.IPPROTO.TCP);
+    if (fd < 0) return mapSysConnectError(sysMod.posixC.getErrno());
+    defer _ = sysMod.posixC.close(fd);
+
+    sysMod.posixC.setNonBlocking(fd, true);
+    const started = clock.monotonicMillis(io);
+
+    const rc = switch (addr.family) {
+        .ip4 => blk: {
+            var sa = posix.sockaddr.in{
+                .family = posix.AF.INET,
+                .port = std.mem.nativeToBig(u16, addr.port),
+                .addr = std.mem.nativeToBig(u32, std.mem.readInt(u32, addr.bytes[0..4], .big)),
+                .zero = @splat(0),
+            };
+            break :blk sysMod.posixC.connect(fd, &sa, @sizeOf(posix.sockaddr.in));
+        },
+        .ip6 => blk: {
+            var sa = posix.sockaddr.in6{
+                .family = posix.AF.INET6,
+                .port = std.mem.nativeToBig(u16, addr.port),
+                .flowinfo = 0,
+                .addr = addr.bytes,
+                .scope_id = addr.zone,
+            };
+            break :blk sysMod.posixC.connect(fd, &sa, @sizeOf(posix.sockaddr.in6));
+        },
+    };
+
+    if (rc != 0) {
+        const errno_val = std.c._errno().*;
+        const pending = errno_val == @backingInt(std.c.E.INPROGRESS) or
+            errno_val == @backingInt(std.c.E.ALREADY) or
+            errno_val == @backingInt(std.c.E.AGAIN);
+        if (!pending) return mapSysConnectError(sysMod.posixC.mapErrno(errno_val));
+
+        const writable = sysMod.posixC.waitWritable(fd, timeoutMs) catch |err| return mapSysConnectError(err);
+        if (!writable) return ConnectError.TimedOut;
+        sysMod.posixC.checkConnected(fd) catch |err| return mapSysConnectError(err);
+    }
+
+    return elapsedMs(io, started);
+}
+
+fn connectAddressTimedBlocking(io: std.Io, addr: *const addressMod.Address) ConnectError!u32 {
+    const stdAddr = addr.toStd(null);
+    const started = clock.monotonicMillis(io);
+    const stream = stdAddr.connect(io, .{ .mode = .stream }) catch |err| switch (err) {
+        error.ConnectionRefused => return ConnectError.ConnectionRefused,
+        error.NetworkUnreachable => return ConnectError.NetworkUnreachable,
+        error.HostUnreachable => return ConnectError.HostUnreachable,
+        error.AccessDenied => return ConnectError.PermissionDenied,
+        error.Timeout => return ConnectError.TimedOut,
+        error.ConnectionResetByPeer => return ConnectError.ConnectionRefused,
+        else => return ConnectError.Unexpected,
+    };
+    stream.close(io);
+    return elapsedMs(io, started);
 }
 
 /// Connect using std.Io.net (always produces a stream-variant Socket with an
@@ -1012,7 +1188,7 @@ pub fn connectAddressStream(io: std.Io, addr: *const addressMod.Address) Connect
 }
 
 /// Windows-native connect: uses ws232.socket() + ws232.connect() directly.
-/// No AFD / NTSTATUS path involved → no unexpectedStatus() side effects.
+/// No AFD / NTSTATUS path involved -> no unexpectedStatus() side effects.
 fn connectAddressWindows(io: std.Io, addr: *const addressMod.Address) ConnectError!Socket {
     if (!isWindows) unreachable;
 

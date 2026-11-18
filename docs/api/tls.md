@@ -25,41 +25,41 @@ its own TLS 1.3 handshake paths**, including:
 
 | Feature | TLS 1.2 (std transport) | TLS 1.3 (native) |
 |---------|-------------------------|------------------|
-| X25519 key exchange | ✅ | ✅ |
-| AES-128-GCM | ✅ | ✅ |
-| AES-256-GCM | ✅ | ✅ |
-| ChaCha20-Poly1305 | ✅ | ✅ |
-| ECDSA P-256 certificate signing | -- | ✅ |
-| Certificate loading (PEM) | ✅ | ✅ |
-| Certificate chain verification | ✅ | ✅ (both sides) |
-| ALPN negotiation | -- | ✅ |
-| SNI extension | ✅ | ✅ (DNS names) |
-| Handshake message encryption | -- | ✅ |
-| Cipher suite selection from client list | -- | ✅ |
-| Mutual TLS enforcement | -- | ✅ |
+| X25519 key exchange | Yes | Yes |
+| AES-128-GCM | Yes | Yes |
+| AES-256-GCM | Yes | Yes |
+| ChaCha20-Poly1305 | Yes | Yes |
+| ECDSA P-256 certificate signing | -- | Yes |
+| Certificate loading (PEM) | Yes | Yes |
+| Certificate chain verification | Yes | Yes (both sides) |
+| ALPN negotiation | -- | Yes |
+| SNI extension | Yes | Yes (DNS names) |
+| Handshake message encryption | -- | Yes |
+| Cipher suite selection from client list | -- | Yes |
+| Mutual TLS enforcement | -- | Yes |
 | Post-handshake `KeyUpdate` | -- | Yes (both roles, RFC 9846 sender cap) |
-| PSK resumption (`psk_dhe_ke` NST tickets) | -- | ✅ (native paths; std HTTPS/1.1 always full handshake) |
-| HelloRetryRequest | -- | ✅ (both sides, single-retry guard) |
+| PSK resumption (`psk_dhe_ke` NST tickets) | -- | Yes (native paths; std HTTPS/1.1 always full handshake) |
+| HelloRetryRequest | -- | Yes (both sides, single-retry guard) |
 | 0-RTT early data | -- | Opt-in via `.earlyData = .{ .enabled = true }`; safe methods by default and bounded `ReplayCache` defense |
 
 ## Architecture
 
 ```
 tls.zig              -- Client/Server owners, Session, Certificate, TrustStore
-├── client.zig       -- Client owner + native TLS client transport
-├── server.zig       -- Server owner + native TLS server transport
-├── engine.zig       -- (internal) TLS 1.3 handshake engine, key schedule
-├── quicTls.zig      -- RFC 9001 key schedule for TLS-in-QUIC
-├── transport.zig    -- (internal) std-based HTTPS/1.1 client transport
-├── handshake.zig    -- handshake message encode/decode, transcript
-├── record.zig       -- record-layer AEAD encrypt/decrypt
-├── certificate.zig  -- X.509 parsing (+ structural DER guard)
-├── verify.zig       -- chain/hostname verification
-├── trustStore.zig  -- system + custom trust anchors
-├── config.zig       -- shared enums (versions, client-auth modes)
-├── alpn.zig         -- ALPN protocol negotiation
-├── key.zig          -- private key parsing (zeroed after use)
-└── errors.zig       -- Unified TLS error set and alert conversion
++-- client.zig       -- Client owner + native TLS client transport
++-- server.zig       -- Server owner + native TLS server transport
++-- engine.zig       -- (internal) TLS 1.3 handshake engine, key schedule
++-- quicTls.zig      -- RFC 9001 key schedule for TLS-in-QUIC
++-- transport.zig    -- (internal) std-based HTTPS/1.1 client transport
++-- handshake.zig    -- handshake message encode/decode, transcript
++-- record.zig       -- record-layer AEAD encrypt/decrypt
++-- certificate.zig  -- X.509 parsing (+ structural DER guard)
++-- verify.zig       -- chain/hostname verification
++-- trustStore.zig  -- system + custom trust anchors
++-- config.zig       -- shared enums (versions, client-auth modes)
++-- alpn.zig         -- ALPN protocol negotiation
++-- key.zig          -- private key parsing (zeroed after use)
++-- errors.zig       -- Unified TLS error set and alert conversion
 ```
 
 The public API is two owners — `httpx.tls.Client` and

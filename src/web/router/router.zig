@@ -122,7 +122,7 @@ pub const Context = struct {
     }
 
     /// Invokes the next middleware in the pipeline, or the route handler if at the end.
-    /// Order is deterministic: router middleware → route middleware → handler.
+    /// Order is deterministic: router middleware -> route middleware -> handler.
     pub fn next(self: *Context) anyerror!Response {
         const r: *Router = @ptrCast(@alignCast(self.activeRouter orelse return error.NoRouter));
         if (self.middlewareIndex < r.middlewares.items.len) {
@@ -176,7 +176,7 @@ pub const Context = struct {
     /// type safety; plain `param()` stays allocation-free and simple).
     /// Field names must match parameter names. Supported field types: ints,
     /// uints, floats, bools, `[]const u8` (borrowed), and optionals of
-    /// those (missing → null). Anything else is a compile error.
+    /// those (missing -> null). Anything else is a compile error.
     pub fn bindParams(self: *const Context, comptime T: type) ParamError!T {
         const info = @typeInfo(T);
         if (info != .@"struct") @compileError("bindParams requires a struct type");
@@ -995,7 +995,7 @@ pub const Group = struct {
         try self.register(.OPTIONS, path, handler, opts);
     }
 
-    /// Nested group: prefixes compose (`/api` + `/users` → `/api/users`),
+    /// Nested group: prefixes compose (`/api` + `/users` -> `/api/users`),
     /// middleware accumulates outer-first. Borrow rules match `group()`.
     pub fn group(self: *const Group, prefix: []const u8, opts: GroupOptions) Group {
         return .{ .router = self.router, .parent = self, .prefix = prefix, .middleware = opts.middleware };

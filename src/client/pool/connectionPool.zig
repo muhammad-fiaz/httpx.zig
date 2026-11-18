@@ -2,7 +2,7 @@
 //!
 //! v2 semantics (documented honestly):
 //!   * The pool PARKS healthy keep-alive connections and hands them back.
-//!   * `maxConns` caps total parked entries (plain + H2 combined).
+//!   * `maxConnections` caps total parked entries (plain + H2 combined).
 //!   * `maxPerHost` caps parked entries per origin ("host", port, scheme).
 //!   * Parked entries expire after `idleMs`, or after
 //!     `maxParkedMs` measured from FIRST parking (plain) or from
@@ -35,7 +35,7 @@ const h3Transport = @import("../../protocols/http3/transport.zig");
 const z = @import("zigantic");
 
 pub const PoolConfigSchema = z.objectOf(.{
-    .maxConns = z.withDefault(z.nonNegativeInt(u32, .{}), 256),
+    .maxConnections = z.withDefault(z.nonNegativeInt(u32, .{}), 256),
     .maxPerHost = z.withDefault(z.nonNegativeInt(u16, .{}), 16),
     .idleMs = z.withDefault(z.nonNegativeInt(i64, .{}), 30_000),
     .maxParkedMs = z.withDefault(z.nonNegativeInt(i64, .{}), 300_000),
@@ -269,7 +269,7 @@ pub const Pool = struct {
     }
 
     fn canParkH2Locked(self: *Pool, key: H2Key) bool {
-        if (self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len >= self.cfg.maxConns) return false;
+        if (self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len >= self.cfg.maxConnections) return false;
         var n: u32 = 0;
         for (self.idleH2.items) |*c| {
             if (c.key.eql(key)) n += 1;
@@ -362,7 +362,7 @@ pub const Pool = struct {
     }
 
     fn canParkH3Locked(self: *Pool, key: H3Key) bool {
-        if (self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len >= self.cfg.maxConns) return false;
+        if (self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len >= self.cfg.maxConnections) return false;
         var n: u32 = 0;
         for (self.idleH3.items) |*c| {
             if (c.key.eql(key)) n += 1;
@@ -503,7 +503,7 @@ pub const Pool = struct {
         const key = ConnKey.init(host, port) orelse return false;
         self.mu.lock();
         defer self.mu.unlock();
-        if (self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len >= self.cfg.maxConns) return false;
+        if (self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len >= self.cfg.maxConnections) return false;
         var n: u32 = 0;
         for (self.idle.items) |*c| {
             if (c.key.eql(key)) n += 1;
@@ -545,7 +545,7 @@ pub const Pool = struct {
     }
 
     fn canParkLocked(self: *Pool, key: ConnKey) bool {
-        if (self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len >= self.cfg.maxConns) return false;
+        if (self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len >= self.cfg.maxConnections) return false;
         var n: u32 = 0;
         for (self.idle.items) |*c| {
             if (c.key.eql(key)) n += 1;
@@ -738,7 +738,7 @@ test "maxPerHost parking cap enforced" {
 
 test "total parking cap enforced" {
     const a = std.testing.allocator;
-    var p = Pool.init(a, undefined, .{ .maxConns = 0 });
+    var p = Pool.init(a, undefined, .{ .maxConnections = 0 });
     defer p.deinit();
     try std.testing.expect(!p.canPark("any", 80));
 }

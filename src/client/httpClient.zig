@@ -218,10 +218,6 @@ pub const RequestOptions = RequestOptionsSchema.Value;
 /// caller can use any of the supported forms: generic `.parts`, the
 /// `.fields` + `.files` shorthand, a single `.file`, or a bare single-part
 /// struct with `.name` and `.data` / `.value`.
-/// Canonical multipart request-option shape. Every member is optional so the
-/// caller can use any of the supported forms: generic `.parts`, the
-/// `.fields` + `.files` shorthand, a single `.file`, or a bare single-part
-/// struct with `.name` and `.data` / `.value`.
 const MultipartOptionsSchema = z.objectOf(.{
     .subtype = z.optional(typedSchema(encoderMod.Subtype)),
     .boundary = z.optional(z.string(.{ .min = 1 })),
@@ -461,11 +457,17 @@ pub const Session = struct {
     }, .{});
     pub const CacheOptions = CacheOptionsSchema.Value;
 
-    pub fn init(allocator: Allocator, io: std.Io, default_tls: ?req.TlsOptions) Session {
+    /// Options for `Session.init`. The default TLS options are used as the
+    /// fallback policy when `cache`/`store` are called without explicit `.tls`.
+    pub const InitOptions = struct {
+        tls: ?req.TlsOptions = null,
+    };
+
+    pub fn init(allocator: Allocator, io: std.Io, options: InitOptions) Session {
         return .{
             .sessions = tlsSessionCache.SessionCache.init(allocator),
             .io = io,
-            .defaultTls = default_tls orelse .{},
+            .defaultTls = options.tls orelse .{},
         };
     }
 
@@ -539,7 +541,7 @@ pub const Client = struct {
             .io = io,
             .pool = Pool.init(allocator, io, config.pool),
             .config = config,
-            .session = Session.init(allocator, io, config.tls),
+            .session = Session.init(allocator, io, .{ .tls = config.tls }),
             .configValid = issue == null,
         };
         if (config.dnsCache.enable) {
@@ -872,30 +874,53 @@ pub const Client = struct {
 
     /// Returns true if the internet is reachable from this machine.
     ///
-    /// Probes a small set of highly-available public endpoints (Cloudflare /
-    /// Google DNS on port 53) using the client's own I/O backend.  IPv4 and
-    /// IPv6 are both attempted.
+    /// Performs a TCP connect to the documented default endpoints (Cloudflare
+    /// and Google DNS over TCP, port 53) using the client's own `io` backend.
+    /// IPv4 is tried before IPv6. `opts.timeoutMs` applies to each endpoint,
+    /// and the check stops at the first success. See `net.connectivity` for
+    /// the full semantics; use `client.checkHosts` to check infrastructure you
+    /// control instead of the public defaults.
     ///
     /// Example:
     /// ```zig
     /// if (!client.isOnline(.{})) return error.NoInternet;
     /// ```
     pub fn isOnline(self: *Client, opts: ConnectivityOptions) bool {
-        return connectivity.checkConnectivity(self.io, opts).online;
+        return self.checkConnectivity(opts).isOnline();
     }
 
-    /// Probes internet connectivity and returns detailed results.
+    /// Checks internet reachability using the documented default endpoints,
+    /// reusing this client's allocator and `io` backend.
     ///
-    /// Returns a `ConnectivityResult` with `.online`, `.family`, `.latencyMs`,
-    /// and `.endpointStr()`.  Useful for diagnostics or choosing IPv4/IPv6.
+    /// This is the high-level entry point. It returns a `ConnectivityResult`
+    /// with `.family`, `.latencyMs`, `.isOnline()`, and `.endpointStr()`.
+    /// `latencyMs` is TCP handshake time only. A successful connect proves the
+    /// selected endpoint and port are reachable; it does not prove every
+    /// internet service is usable. The result borrows no caller memory.
     ///
     /// Example:
     /// ```zig
     /// const r = client.checkConnectivity(.{ .timeoutMs = 2000 });
-    /// if (r.online) std.debug.print("online via {s} ({?d}ms)\n", .{ r.endpointStr(), r.latencyMs });
+    /// if (r.isOnline()) std.debug.print("online via {s} ({?d}ms)\n", .{ r.endpointStr(), r.latencyMs });
     /// ```
     pub fn checkConnectivity(self: *Client, opts: ConnectivityOptions) ConnectivityResult {
-        return connectivity.checkConnectivity(self.io, opts);
+        return connectivity.check(self.io, opts);
+    }
+
+    /// Checks an explicit list of textual IP endpoints such as
+    /// `"10.0.0.5:443"` or `"[::1]:8443"`, reusing this client's `io` backend.
+    ///
+    /// Entries must be IP literals with a port; malformed entries and
+    /// hostnames are skipped, and no DNS lookup is performed. Use this instead
+    /// of constructing internal `address.Address` arrays in application code.
+    /// `hosts` is borrowed for the duration of the call and is never retained.
+    ///
+    /// Example:
+    /// ```zig
+    /// const r = client.checkHosts(&.{ "10.0.0.5:443", "[::1]:8443" }, .{});
+    /// ```
+    pub fn checkHosts(self: *Client, hosts: []const []const u8, opts: ConnectivityOptions) ConnectivityResult {
+        return connectivity.checkHosts(self.io, hosts, opts);
     }
 
     /// Resolves a hostname or IP address to structured Address results,
@@ -2598,7 +2623,7 @@ test "client resumes h2-tls across fresh handshakes via session cache" {
 
     // Pooling disabled so each get performs a fresh handshake; the
     // second must abbreviate via the session cache.
-    var client = Client.init(a, ctx.io, .{ .pool = .{ .maxConns = 0 } });
+    var client = Client.init(a, ctx.io, .{ .pool = .{ .maxConnections = 0 } });
     errdefer client.deinit();
 
     var urlBuf: [64]u8 = undefined;
@@ -3223,7 +3248,7 @@ test "client get over http3 with 0-rtt early data resumes session" {
 
     // Pooling disabled so each get performs a fresh handshake; the
     // TLS layer verifies 0-RTT tickets across independent sessions.
-    var client = Client.init(a, ctx.io, .{ .pool = .{ .maxConns = 0 } });
+    var client = Client.init(a, ctx.io, .{ .pool = .{ .maxConnections = 0 } });
     errdefer client.deinit();
 
     var urlBuf: [64]u8 = undefined;

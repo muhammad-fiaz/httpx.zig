@@ -20,7 +20,7 @@ Enum representing supported Content-Encoding values.
 
 | Member | Description |
 |--------|-------------|
-| `token()` | Convert to wire-format string (e.g., `.gzip` → `"gzip"`) |
+| `token()` | Convert to wire-format string (e.g., `.gzip` -> `"gzip"`) |
 | `fromToken(str)` | Parse from a string; returns `?Encoding` (case-insensitive) |
 | `parseAcceptEncoding(allocator, headerValue)` | Parse an `Accept-Encoding` header into quality-sorted entries (caller owns) |
 | `negotiate(headerValue)` | Pick the best supported encoding for an `Accept-Encoding` header value |

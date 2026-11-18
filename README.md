@@ -29,7 +29,7 @@
 
 
 > [!TIP]
-> If you build with httpx.zig, make sure to give it a star ⭐.
+> If you build with httpx.zig, make sure to give it a star.
 
 ---
 
@@ -131,7 +131,7 @@
 | **Multipart Form Data** | RFC 2046 multipart encoder and parser for text fields and file parts with streaming disk-sink and bounded buffered support. |
 | **FTP & FTPS** | FTP client and server with PASV/EPSV, directory listing, streaming uploads/downloads, and resumption; explicit FTPS (`AUTH TLS`/`PBSZ`/`PROT`) is supported. |
 | **Concurrency & Workers** | Thread-safe bounded `httpx.concurrency.Pool` and concurrent request execution. |
-| **Proxy Support** | Client-side HTTP forward proxy (CONNECT with `Proxy-Authorization` auth, `407` → `error.ProxyAuthRequired`) and SOCKS4/4a plus SOCKS5/SOCKS5h tunneling with remote-DNS delegation. |
+| **Proxy Support** | Client-side HTTP forward proxy (CONNECT with `Proxy-Authorization` auth, `407` -> `error.ProxyAuthRequired`) and SOCKS4/4a plus SOCKS5/SOCKS5h tunneling with remote-DNS delegation. |
 | **Structured Logging** | Zero-allocation level-filtered structured logger supporting custom sinks and terminal formatting. |
 | **Cross-Platform Sockets** | Robust non-blocking Windows socket handling with `WSAEWOULDBLOCK` retry, plus `MSG_NOSIGNAL` on POSIX. |
 | **Observability & Metrics** | Prometheus text exposition (`/metrics`), live request/duration histograms, status counters, and zero-alloc snapshots. |
@@ -369,43 +369,6 @@ pub fn main() !void {
 
 ---
 
-## Testing Your Client
-
-`httpx.testing.Server` runs the real production server on a local loopback
-socket, so your tests exercise the actual `httpx.Client` transport, URL
-parsing, serialization, and response parsing without an external process.
-
-```zig
-var server = try httpx.testing.Server.init(allocator, io, .{});
-defer server.deinit();
-
-try server.route("/get", httpx.testing.json("{\"ok\":true}"));
-try server.route("/echo", .{ .method = .POST, .handler = httpx.testing.echo });
-try server.start();
-
-var client = httpx.Client.init(allocator, io, .{});
-defer client.deinit();
-
-const url = try server.url("/get");
-defer allocator.free(url);
-
-var response = try client.get(url, .{});
-defer response.deinit();
-try std.testing.expectEqual(@as(u16, 200), response.status);
-
-// Bounded capture: method, path, query, headers, and body.
-const captured = try server.requests(allocator);
-defer httpx.testing.freeCaptured(allocator, captured);
-try std.testing.expectEqual(@as(usize, 1), server.routeRequestCount("/get"));
-```
-
-The testing configuration uses the production schema with `127.0.0.1` and
-ephemeral port `0` defaults. Multiple servers run independently, `start()` is
-deterministic, `stop()` is repeatable, and every applicable production server
-method is available.
-
----
-
 ## Performance
 
 Run the benchmarks with:
@@ -446,19 +409,19 @@ Benchmark target: `x86_64-windows`, `ReleaseFast`. Measurements recorded on Nove
 | `basic_auth_encode` | Security | 24.54 ns/op | **40753615 ops/sec** |
 | `basic_auth_decode` | Security | 13.80 ns/op | **72442770 ops/sec** |
 | `bearer_token_parse` | Security | 1.06 ns/op | **947292637 ops/sec** |
-| `gzip_compress` | Compression | 15.46 ┬╡s/op | **64674 ops/sec** |
-| `gzip_decompress` | Compression | 4.26 ┬╡s/op | **234965 ops/sec** |
-| `deflate_compress` | Compression | 14.10 ┬╡s/op | **70932 ops/sec** |
-| `deflate_decompress` | Compression | 4.30 ┬╡s/op | **232776 ops/sec** |
-| `html_parse` | Parsing | 12.00 ┬╡s/op | **83305 ops/sec** |
+| `gzip_compress` | Compression | 15.46 µs/op | **64674 ops/sec** |
+| `gzip_decompress` | Compression | 4.26 µs/op | **234965 ops/sec** |
+| `deflate_compress` | Compression | 14.10 µs/op | **70932 ops/sec** |
+| `deflate_decompress` | Compression | 4.30 µs/op | **232776 ops/sec** |
+| `html_parse` | Parsing | 12.00 µs/op | **83305 ops/sec** |
 | `html_parse_large` | Parsing | 20.50 ms/op | **48 pages/sec** |
-| `template_parse` | Parsing | 2.49 ┬╡s/op | **401097 ops/sec** |
-| `template_render` | Parsing | 1.40 ┬╡s/op | **716827 ops/sec** |
-| `template_incremental` | Parsing | 44.49 ┬╡s/op | **22475 ops/sec** |
-| `json_feed_parse` | Parsing | 3.35 ┬╡s/op | **298141 ops/sec** |
+| `template_parse` | Parsing | 2.49 µs/op | **401097 ops/sec** |
+| `template_render` | Parsing | 1.40 µs/op | **716827 ops/sec** |
+| `template_incremental` | Parsing | 44.49 µs/op | **22475 ops/sec** |
+| `json_feed_parse` | Parsing | 3.35 µs/op | **298141 ops/sec** |
 | `live_reload_inject` | Parsing | 224.73 ns/op | **4449817 ops/sec** |
-| `watcher_scan` | Watcher | 650.99 ┬╡s/op | **1536 ops/sec** |
-| `watcher_deps` | Watcher | 3.41 ┬╡s/op | **292948 ops/sec** |
+| `watcher_scan` | Watcher | 650.99 µs/op | **1536 ops/sec** |
+| `watcher_deps` | Watcher | 3.41 µs/op | **292948 ops/sec** |
 | `static_safe_join` | Static Files | 92.25 ns/op | **10839673 ops/sec** |
 | `spa_fallback_policy` | SPA | 94.22 ns/op | **10613590 ops/sec** |
 | `worker_pool_submit` | Concurrency | 211.88 ns/op | **4719654 ops/sec** |
@@ -472,10 +435,10 @@ Benchmark target: `x86_64-windows`, `ReleaseFast`. Measurements recorded on Nove
 | `h3_frame_header` | Protocols | 2.40 ns/op | **416396009 ops/sec** |
 | `h3_varint_encode` | Protocols | 3.15 ns/op | **317430086 ops/sec** |
 | `h3_varint_decode` | Protocols | 2.96 ns/op | **338002271 ops/sec** |
-| `tls_record_seal` | TLS | 1.09 ┬╡s/op | **919299 ops/sec** |
+| `tls_record_seal` | TLS | 1.09 µs/op | **919299 ops/sec** |
 | `tls_cert_parse` | TLS | 993.24 ns/op | **1006806 ops/sec** |
-| `client_server_get` | Network | 80.86 ┬╡s/op | **12366 req/sec** |
-| `h2_pooled_get` | Network | 51.48 ┬╡s/op | **19423 req/sec** |
+| `client_server_get` | Network | 80.86 µs/op | **12366 req/sec** |
+| `h2_pooled_get` | Network | 51.48 µs/op | **19423 req/sec** |
 | `h3_get` | Network | 203.15 ms/op | **4 req/sec** |
 | `tls_full_handshake` | TLS | 3.42 ms/op | **292 ops/sec** |
 | `tls_resumed_handshake` | TLS | 2.78 ms/op | **359 ops/sec** |

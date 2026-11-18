@@ -90,9 +90,9 @@ const allowed = server.router.allowedMethods("/users/42", &methods);
 // allowed: []httpx.Method, e.g. GET + POST
 ```
 
-`dispatch` uses this automatically: unknown path → 404; known path with
-a wrong method → 405 + `Allow` header; `OPTIONS` without an explicit
-route → 204 + `Allow`.
+`dispatch` uses this automatically: unknown path -> 404; known path with
+a wrong method -> 405 + `Allow` header; `OPTIONS` without an explicit
+route -> 204 + `Allow`.
 
 ## Middleware Note
 

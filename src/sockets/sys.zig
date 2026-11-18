@@ -135,13 +135,15 @@ pub const ws = if (isWindows) struct {
     pub extern "ws2_32" fn closesocket(s: usize) callconv(wsCall) i32;
     pub extern "ws2_32" fn select(nfds: i32, readfds: ?*FdSet, writefds: ?*FdSet, exceptfds: ?*FdSet, timeout: ?*Timeval) callconv(wsCall) i32;
     pub extern "ws2_32" fn setsockopt(s: usize, level: i32, optname: i32, optval: ?*const anyopaque, optlen: i32) callconv(wsCall) i32;
+    pub extern "ws2_32" fn getsockopt(s: usize, level: i32, optname: i32, optval: ?*anyopaque, optlen: *i32) callconv(wsCall) i32;
     pub extern "ws2_32" fn ioctlsocket(s: usize, cmd: i32, argp: *u32) callconv(wsCall) i32;
 
     pub const SOL_SOCKET: i32 = 0xFFFF;
     pub const SO_REUSEADDR: i32 = 0x0004;
     pub const SO_KEEPALIVE: i32 = 0x0008;
+    pub const SO_SNDTIMEO: i32 = 0x1005;
     pub const SO_RCVTIMEO: i32 = 0x1006;
-    pub const SO_SNDTIMEO: i32 = 0x1007;
+    pub const SO_ERROR: i32 = 0x1007;
 
     pub const IPPROTO_TCP: i32 = 6;
     pub const TCP_NODELAY: i32 = 1;
@@ -292,6 +294,9 @@ pub const posixC = if (!isWindows and builtin.link_libc) struct {
     extern "c" fn send(fd: Fd, buf: [*]const u8, len: usize, flags: c_int) isize;
     extern "c" fn shutdown(fd: Fd, how: c_int) c_int;
     extern "c" fn close(fd: Fd) c_int;
+    extern "c" fn socket(domain: c_int, sock_type: c_int, protocol: c_int) Fd;
+    extern "c" fn connect(fd: Fd, addr: *const anyopaque, addrlen: u32) c_int;
+    extern "c" fn getsockopt(fd: Fd, level: c_int, optname: c_int, optval: ?*anyopaque, optlen: *u32) c_int;
     extern "c" fn select(nfds: c_int, r: ?*FdSet, w: ?*FdSet, e: ?*FdSet, tv: ?*Timeval) c_int;
     extern "c" fn setsockopt(fd: Fd, level: c_int, optname: c_int, optval: ?*const anyopaque, optlen: u32) c_int;
     extern "c" fn fcntl(fd: Fd, cmd: c_int, ...) c_int;
@@ -307,7 +312,10 @@ pub const posixC = if (!isWindows and builtin.link_libc) struct {
 
     pub const F_GETFL: c_int = 3;
     pub const F_SETFL: c_int = 4;
-    pub const O_NONBLOCK: c_int = 0x800;
+    pub const O_NONBLOCK: c_int = switch (builtin.os.tag) {
+        .macos, .ios, .tvos, .watchos, .visionos, .freebsd, .netbsd, .openbsd, .dragonfly => 0x0004,
+        else => 0x800,
+    };
 
     pub const MSG_NOSIGNAL: c_int = switch (builtin.os.tag) {
         .linux => 0x4000,
@@ -317,27 +325,27 @@ pub const posixC = if (!isWindows and builtin.link_libc) struct {
 
     pub fn mapErrno(code: c_int) Error {
         return switch (code) {
-            4 => error.Shutdown, // EINTR
-            11 => error.WouldBlock, // EAGAIN / EWOULDBLOCK
-            13 => error.AccessDenied, // EACCES
-            32 => error.ConnectionReset, // EPIPE
-            98 => error.AddressInUse, // EADDRINUSE
-            99 => error.AddressNotAvailable, // EADDRNOTAVAIL
-            104 => error.ConnectionReset, // ECONNRESET
-            105 => error.OutOfBuffers, // ENOBUFS
-            106 => error.IsConnected, // EISCONN
-            107 => error.NotConnected, // ENOTCONN
-            108 => error.Shutdown, // ESHUTDOWN
-            110 => error.TimedOut, // ETIMEDOUT
-            111 => error.ConnectionRefused, // ECONNREFUSED
-            101 => error.NetworkDown, // ENETDOWN
-            102 => error.NetworkUnreachable, // ENETUNREACH
-            113 => error.HostUnreachable, // EHOSTUNREACH
-            9 => error.InvalidHandle, // EBADF
-            88 => error.InvalidHandle, // ENOTSOCK
-            115 => error.InProgress, // EINPROGRESS
-            114 => error.OperationInProgress, // EALREADY
-            22 => error.ProtocolError, // EINVAL
+            @backingInt(std.c.E.INTR) => error.Shutdown,
+            @backingInt(std.c.E.AGAIN) => error.WouldBlock, // EAGAIN / EWOULDBLOCK
+            @backingInt(std.c.E.ACCES) => error.AccessDenied,
+            @backingInt(std.c.E.PIPE) => error.ConnectionReset,
+            @backingInt(std.c.E.ADDRINUSE) => error.AddressInUse,
+            @backingInt(std.c.E.ADDRNOTAVAIL) => error.AddressNotAvailable,
+            @backingInt(std.c.E.CONNRESET) => error.ConnectionReset,
+            @backingInt(std.c.E.NOBUFS) => error.OutOfBuffers,
+            @backingInt(std.c.E.ISCONN) => error.IsConnected,
+            @backingInt(std.c.E.NOTCONN) => error.NotConnected,
+            @backingInt(std.c.E.SHUTDOWN) => error.Shutdown,
+            @backingInt(std.c.E.TIMEDOUT) => error.TimedOut,
+            @backingInt(std.c.E.CONNREFUSED) => error.ConnectionRefused,
+            @backingInt(std.c.E.NETDOWN) => error.NetworkDown,
+            @backingInt(std.c.E.NETUNREACH) => error.NetworkUnreachable,
+            @backingInt(std.c.E.HOSTUNREACH) => error.HostUnreachable,
+            @backingInt(std.c.E.BADF) => error.InvalidHandle,
+            @backingInt(std.c.E.NOTSOCK) => error.InvalidHandle,
+            @backingInt(std.c.E.INPROGRESS) => error.InProgress,
+            @backingInt(std.c.E.ALREADY) => error.OperationInProgress,
+            @backingInt(std.c.E.INVAL) => error.ProtocolError,
             else => blk: {
                 _ = unknownCount.fetchAdd(1, .monotonic);
                 break :blk error.Unknown;
@@ -426,6 +434,37 @@ pub const posixC = if (!isWindows and builtin.link_libc) struct {
         if (flags < 0) return;
         const newFlags = if (nonBlocking) (flags | O_NONBLOCK) else (flags & ~O_NONBLOCK);
         _ = fcntl(fd, F_SETFL, newFlags);
+    }
+
+    /// Waits until a non-blocking connect completes (writable) or `timeoutMs`
+    /// elapses. Returns false on timeout. Interrupted waits are retried.
+    pub fn waitWritable(fd: Fd, timeoutMs: u32) Error!bool {
+        var set = FdSet.zero();
+        set.add(fd);
+        var tv = Timeval{
+            .sec = @intCast(timeoutMs / 1000),
+            .usec = @intCast((timeoutMs % 1000) * 1000),
+        };
+        while (true) {
+            const rc = select(fd + 1, null, &set, null, &tv);
+            if (rc < 0) {
+                if (std.c._errno().* == @backingInt(std.c.E.INTR)) continue;
+                return getErrno();
+            }
+            return rc > 0;
+        }
+    }
+
+    /// Checks `SO_ERROR` after a non-blocking connect reports writability.
+    /// A zero value means the connection is established.
+    pub fn checkConnected(fd: Fd) Error!void {
+        var so_error: c_int = 0;
+        var len: u32 = @sizeOf(c_int);
+        if (getsockopt(fd, @intCast(posix.SOL.SOCKET), @intCast(posix.SO.ERROR), &so_error, &len) != 0) {
+            return getErrno();
+        }
+        if (so_error == 0) return;
+        return mapErrno(so_error);
     }
 } else struct {};
 

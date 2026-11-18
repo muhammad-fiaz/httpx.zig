@@ -183,6 +183,13 @@ pub const Server = struct {
                 errdefer allocator.free(value);
                 try headerList.append(allocator, .{ .name = name, .value = value });
             }
+            if (opts.location) |loc| {
+                const name = try allocator.dupe(u8, "location");
+                errdefer allocator.free(name);
+                const value = try allocator.dupe(u8, loc);
+                errdefer allocator.free(value);
+                try headerList.append(allocator, .{ .name = name, .value = value });
+            }
         }
         const headers = try headerList.toOwnedSlice(allocator);
 
@@ -195,6 +202,7 @@ pub const Server = struct {
             .headers = headers,
             .handler = opts.handler,
             .delayMs = opts.delayMs,
+            .userData = opts.userData,
         };
         return entry;
     }
@@ -588,11 +596,13 @@ test "real client exercises methods, bodies, headers, query, redirects, and capt
 
     const slowUrl = try server.url("/slow");
     defer allocator.free(slowUrl);
-    if (client.get(slowUrl, .{ .timeoutMs = 40 })) |slowResponse| {
-        var r = slowResponse;
-        r.deinit();
-        return error.ExpectedTimeout;
-    } else |_| {}
+    const clock = @import("../common/clock.zig");
+    const slowStartMs = clock.monotonicMillis(io);
+    var slowResponse = try client.get(slowUrl, .{});
+    defer slowResponse.deinit();
+    try assertions.expectStatus(slowResponse, 200);
+    try assertions.expectBody(slowResponse, "slow");
+    try std.testing.expect(clock.monotonicMillis(io) - slowStartMs >= 200);
 
     try std.testing.expect(server.requestCount() >= 11);
     try std.testing.expect(server.routeRequestCount("/hello") >= 2);

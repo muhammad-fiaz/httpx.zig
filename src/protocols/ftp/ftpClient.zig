@@ -312,8 +312,8 @@ pub const Client = struct {
     }
 
     /// Explicit FTPS upgrade (RFC 4217) on the live control connection:
-    /// `AUTH TLS` (234, fail closed otherwise) → TLS handshake with no
-    /// ALPN (FTP is not HTTP) → `PBSZ 0` → `PROT P/C`. Never proceeds in
+    /// `AUTH TLS` (234, fail closed otherwise) -> TLS handshake with no
+    /// ALPN (FTP is not HTTP) -> `PBSZ 0` -> `PROT P/C`. Never proceeds in
     /// plaintext once `secure` was requested.
     fn upgradeTls(self: *Client, opts: Options) FtpError!void {
         const auth = try self.command("AUTH TLS");

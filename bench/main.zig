@@ -1242,7 +1242,7 @@ pub fn main() !void {
     var srv = try httpx.Server.init(benchAllocator, io, .{
         .port = 0,
         .keepAlive = true,
-        .limits = .{ .maxConns = 100000 },
+        .limits = .{ .maxConnections = 100000 },
     });
     try srv.router.get("/ping", loopbackPingHandler, .{});
     loopbackServer = &srv;
@@ -1295,7 +1295,7 @@ pub fn main() !void {
     h3BenchThread = try std.Thread.spawn(.{}, H3BenchServer.run, .{&h3BenchServer});
     h3BenchUrlSlice = try std.fmt.bufPrint(&h3BenchUrl, "https://127.0.0.1:{d}/ping", .{h3port});
     h3BenchClient = httpx.Client.init(benchAllocator, io, .{
-        .pool = .{ .maxConns = 0 },
+        .pool = .{ .maxConnections = 0 },
     });
     defer {
         // Stop flag + pump stop abort in-flight server waits instantly;

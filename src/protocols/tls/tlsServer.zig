@@ -80,7 +80,7 @@ pub const Error = error{
 
 // TLS server listener
 
-/// SNI-based certificate selector. Maps hostname → certificate identity.
+/// SNI-based certificate selector. Maps hostname -> certificate identity.
 /// Reads a PEM buffer or file path (paths lack a PEM header).
 fn loadPemOrFile(allocator: Allocator, pemOrPath: []const u8) ![]u8 {
     if (std.mem.indexOf(u8, pemOrPath, "-----BEGIN") != null) {

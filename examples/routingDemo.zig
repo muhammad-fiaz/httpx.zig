@@ -61,7 +61,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .limits = .{ .maxConns = 32 },
+        .limits = .{ .maxConnections = 32 },
     });
     defer server.deinit();
 

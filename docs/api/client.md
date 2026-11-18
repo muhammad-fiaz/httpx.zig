@@ -6,10 +6,10 @@ The `httpx.zig` client provides a high-level HTTP client for making requests ove
 
 | Protocol | Status | Transport | Notes |
 |----------|--------|-----------|-------|
-| HTTP/1.0 | ✅ Full | TCP | Legacy support |
-| HTTP/1.1 | ✅ Full | TCP/TLS | Default protocol |
-| HTTP/2 | ✅ Client Runtime + Primitives | TCP/TLS | High-level client request execution path plus full framing/HPACK/stream primitives |
-| HTTP/3 | ✅ Reliable paths | QUIC/UDP | High-level client runtime over QUIC/TLS 1.3 with ALPN `h3`, QPACK dynamic tables, loss recovery, NewReno congestion control, 0-RTT resumption, Retry/version negotiation, key updates, and pooled connections for sequential reuse |
+| HTTP/1.0 | Full | TCP | Legacy support |
+| HTTP/1.1 | Full | TCP/TLS | Default protocol |
+| HTTP/2 | Client Runtime + Primitives | TCP/TLS | High-level client request execution path plus full framing/HPACK/stream primitives |
+| HTTP/3 | Reliable paths | QUIC/UDP | High-level client runtime over QUIC/TLS 1.3 with ALPN `h3`, QPACK dynamic tables, loss recovery, NewReno congestion control, 0-RTT resumption, Retry/version negotiation, key updates, and pooled connections for sequential reuse |
 
 HTTP/3 runtime mode performs a QUIC TLS 1.3 handshake and verifies the server certificate. Loopback integration is covered, including dynamic QPACK and response trailers. QUIC loss recovery, NewReno congestion control, Retry/version negotiation, key updates, and connection pooling for sequential requests are active; the remaining transport limits are HelloRetryRequest, connection migration, and concurrent multiplexing over a shared high-level HTTP/3 connection.
 
@@ -80,7 +80,7 @@ var client = httpx.Client.init(allocator, io, .{
     .retryMs = 500,
     .retryStatusCodes = &.{ 502, 503, 504 },
     .httpVersion = .http2,
-    .pool = .{ .maxConns = 64, .maxPerHost = 16 },
+    .pool = .{ .maxConnections = 64, .maxPerHost = 16 },
     .proxy = null,
 });
 defer client.deinit();
@@ -118,7 +118,7 @@ const apiKey = envStore.get("MY_API_KEY");
 | `http2` | `bool` | `false` | Fast toggle to use HTTP/2 as default protocol. |
 | `http3` | `bool` | `false` | Fast toggle to use HTTP/3 as default protocol. |
 | `protocols` | `Protocols` | `{}` | Protocol engine tuning. `protocols.http3.quic` exposes QUIC idle timeout, flow-control windows, stream limits, UDP payload, version, Retry, and role. |
-| `pool` | `PoolConfig` | `{}` | Connection pool limits (`maxConns`, `maxPerHost`, `idleMs`, `maxParkedMs`). |
+| `pool` | `PoolConfig` | `{}` | Connection pool limits (`maxConnections`, `maxPerHost`, `idleMs`, `maxParkedMs`). |
 | `dnsCache` | `DnsCacheOptions` | `{}` | DNS cache settings (`enable`, `ttlMs`, `negativeTtlMs`, `maxEntries`). |
 | `tls` | `?TlsOptions` | `null` | Default TLS overrides for `https://`; null uses system trust verification. |
 | `proxy` | `?[]const u8` | `null` | Default proxy URL (`http://`, `socks5://`, `socks5h://`, `socks4://`, `socks4a://`). |
@@ -227,6 +227,9 @@ All methods are URL-first (`url`, then options):
 | `client.robots.fetch(url, options)` | Fetch and parse a `Robots` document |
 | `client.sitemap.fetch(url, options)` | Fetch and parse a `Sitemap` document |
 | `resolve(host, options)` / `resolveUrl(url, options)` | DNS resolution (port via `options.port`) |
+| `isOnline(options)` | Boolean TCP reachability check; reuses the client's `io` |
+| `checkConnectivity(options)` | Detailed `ConnectivityResult` for the documented default endpoints |
+| `checkHosts(hosts, options)` | Detailed check for textual IP endpoints such as `"10.0.0.5:443"` |
 | `close()` | Purge the connection pool |
 | `reset()` | Close + clear DNS cache |
 

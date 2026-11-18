@@ -38,7 +38,7 @@ pub fn main() !void {
         .host = "127.0.0.1",
         .port = 8080,
         .portStrategy = .incremental,
-        .limits = .{ .maxConns = 10000 },
+        .limits = .{ .maxConnections = 10000 },
         .protocols = .{ .http2 = true, .http3 = false },
         .keepAlive = true,
     });

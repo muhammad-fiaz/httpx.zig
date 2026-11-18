@@ -48,17 +48,17 @@ in this guide when migrating from `0.2.3` (or older).
 
 | Platform | Status | Notes |
 |----------|--------|-------|
-| Linux    | ✅ Full | All major distributions (Ubuntu, Debian, Fedora, Arch, etc.) |
-| Windows  | ✅ Full | Windows 10/11, Server 2019+ |
-| macOS    | ✅ Full | macOS 11+ (Big Sur and later) |
+| Linux    | Full | All major distributions (Ubuntu, Debian, Fedora, Arch, etc.) |
+| Windows  | Full | Windows 10/11, Server 2019+ |
+| macOS    | Full | macOS 11+ (Big Sur and later) |
 
 ### Architectures
 
 | Architecture | Linux | Windows | macOS | Notes |
 |--------------|-------|---------|-------|-------|
-| x86_64 (64-bit) | ✅ | ✅ | ✅ | Primary development target |
-| aarch64 (ARM64) | ✅ | ✅ | ✅ | Apple Silicon, AWS Graviton, Raspberry Pi 4+ |
-| x86 (32-bit) | ✅ | ✅ | ✅ | Legacy x86 support on all platforms |
+| x86_64 (64-bit) | Yes | Yes | Yes | Primary development target |
+| aarch64 (ARM64) | Yes | Yes | Yes | Apple Silicon, AWS Graviton, Raspberry Pi 4+ |
+| x86 (32-bit) | Yes | Yes | Yes | Legacy x86 support on all platforms |
 
 ### Cross-Compilation
 

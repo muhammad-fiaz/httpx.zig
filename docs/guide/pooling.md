@@ -23,7 +23,7 @@ Connection pooling is configured on `Client.init`:
 ```zig
 var client = httpx.Client.init(allocator, io, .{
     .pool = .{
-        .maxConns = 64,
+        .maxConnections = 64,
         .maxPerHost = 16,
         .idleMs = 30_000,
     },
@@ -33,7 +33,7 @@ defer client.deinit();
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `maxConns` | `u32` | `256` | Hard ceiling across all origins |
+| `maxConnections` | `u32` | `256` | Hard ceiling across all origins |
 | `maxPerHost` | `u16` | `16` | Ceiling per origin (host + port) |
 | `idleMs` | `i64` | `30000` | Parked sockets older than this are dropped |
 | `maxParkedMs` | `i64` | `300000` | Max time a connection may stay parked (`0` disables) |

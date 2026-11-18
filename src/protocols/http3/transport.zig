@@ -847,6 +847,12 @@ pub const PooledConn = struct {
     }
 
     pub fn deinit(self: *PooledConn) void {
+        // Tell the peer this session is ending instead of vanishing at the
+        // transport layer: a UDP peer otherwise has to wait out its idle
+        // timeout before it can accept the next connection.
+        const nowMs: u64 = @intCast(clockMod.monotonicMillis(self.io));
+        self.conn.sendConnectionClose(0x100, "client closing", true, nowMs) catch {};
+        _ = self.ep.flush(self.dest) catch {};
         self.pump.stop();
         self.client.deinit();
         self.allocator.destroy(self.client);

@@ -282,7 +282,7 @@ test "capture headers are bounded and can be disabled" {
         .{ .name = "x-two", .value = "22" },
         .{ .name = "x-three", .value = "333" },
     };
-    var ctx = common.Context{ .path = "/headers", .headers = &headers };
+    var ctx = common.Context{ .allocator = allocator, .path = "/headers", .headers = &headers };
     capture.record(&ctx);
     var last = (try capture.last(allocator)).?;
     defer last.deinit();
@@ -304,9 +304,9 @@ test "capture copies requests, bounds bodies, and evicts oldest" {
     defer capture.deinit();
 
     const headers = [_]common.Header{.{ .name = "x-test", .value = "one" }};
-    var ctx1 = common.Context{ .path = "/a", .query = "x=1", .headers = &headers, .body = "abcdef" };
-    var ctx2 = common.Context{ .path = "/b", .method = .POST, .body = "ok" };
-    var ctx3 = common.Context{ .path = "/c", .method = .DELETE };
+    var ctx1 = common.Context{ .allocator = allocator, .path = "/a", .query = "x=1", .headers = &headers, .body = "abcdef" };
+    var ctx2 = common.Context{ .allocator = allocator, .path = "/b", .method = .POST, .body = "ok" };
+    var ctx3 = common.Context{ .allocator = allocator, .path = "/c", .method = .DELETE };
     capture.record(&ctx1);
     capture.record(&ctx2);
     capture.record(&ctx3);

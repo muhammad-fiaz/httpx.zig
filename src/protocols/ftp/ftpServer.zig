@@ -118,10 +118,10 @@ pub const Server = struct {
         return self.listener.localPort();
     }
 
-    /// Serves accepted control connections until shutdown or maxConns.
-    pub fn run(self: *Server, maxConns: usize) Error!void {
+    /// Serves accepted control connections until shutdown or maxConnections.
+    pub fn run(self: *Server, maxConnections: usize) Error!void {
         var served: usize = 0;
-        while (!self.stop.load(.acquire) and (maxConns == 0 or served < maxConns)) {
+        while (!self.stop.load(.acquire) and (maxConnections == 0 or served < maxConnections)) {
             var control = self.listener.accept(self.io) catch return error.AcceptFailed;
             defer control.close();
             control.setReadInactivityTimeoutMs(self.cfg.timeoutMs);

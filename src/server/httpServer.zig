@@ -247,7 +247,7 @@ pub const PortStrategy = enum {
 
 /// Connection and worker limits.
 const ConnectionLimitsSchema = z.objectOf(.{
-    .maxConns = z.withDefault(z.nonNegativeInt(usize, .{}), 0),
+    .maxConnections = z.withDefault(z.nonNegativeInt(usize, .{}), 0),
     .maxActive = z.withDefault(z.positiveInt(usize, .{}), 128),
     .maxQueued = z.withDefault(z.positiveInt(usize, .{}), 128),
     .workers = z.withDefault(z.integer(u16, .{}), 0),
@@ -630,6 +630,13 @@ pub const Server = struct {
     h3Thread: ?std.Thread = null,
     h3Stop: std.atomic.Value(bool) = .init(false),
     h3Ready: std.atomic.Value(bool) = .init(false),
+    /// Stable HTTP/3 session-ticket keys for the lifetime of the server, so a
+    /// ticket issued on one connection can be resumed on the next. Generated
+    /// lazily from OS entropy when TLS config does not provide explicit keys.
+    h3TicketKeys: ?tlsSessionMod.TicketKeys = null,
+    /// Server-wide anti-replay cache for 0-RTT early data. Shared across
+    /// connections so a ticket replay cannot bypass the window by reconnecting.
+    h3ReplayCache: ?tlsSessionMod.ReplayCache = null,
     metricsRegistry: metricsMod.Registry = .{},
     startTimeMs: i64 = 0,
 
@@ -1121,6 +1128,15 @@ pub const Server = struct {
             p.deinit();
             self.h3PlaceholderConn = null;
         }
+        if (self.h3TicketKeys) |*keys| {
+            std.crypto.secureZero(u8, &keys.current);
+            if (keys.previous) |*prev| std.crypto.secureZero(u8, prev);
+            self.h3TicketKeys = null;
+        }
+        if (self.h3ReplayCache) |*cache| {
+            cache.deinit();
+            self.h3ReplayCache = null;
+        }
         if (self.graphqlMounted) {
             graphqlServerMod.unmount(&self.router, self.graphqlCfg);
             self.graphqlMounted = false;
@@ -1530,7 +1546,7 @@ pub const Server = struct {
 
         var accepted: usize = 0;
         while (!self.stopFlag.load(.acquire)) {
-            if (self.cfg.limits.maxConns != 0 and accepted >= self.cfg.limits.maxConns) break;
+            if (self.cfg.limits.maxConnections != 0 and accepted >= self.cfg.limits.maxConnections) break;
             // Yield when paused
             while (self.paused.load(.acquire) and !self.stopFlag.load(.acquire)) {
                 clock.sleepMillis(self.io, 10);
@@ -1927,34 +1943,33 @@ pub const Server = struct {
         }
         ep.conn = qconn;
 
-        var replayCache = tlsSessionMod.ReplayCache.init(self.allocator, 256);
-        defer replayCache.deinit();
-
-        // Prefer the configured keys; otherwise mint a fresh one from OS
-        // entropy so HTTP/3 keeps 0-RTT without falling back to a shared
-        // secret. A hardcoded key here would seal every ticket with a
-        // publicly known value, letting anyone forge one and resume as
-        // any client. If the OS entropy source is unavailable we issue no
-        // tickets, which is what the TCP path does when unconfigured.
-        var generatedKeys: ?tlsSessionMod.TicketKeys = null;
-        const ticketKeys: ?tlsSessionMod.TicketKeys = if (self.cfg.tls) |t|
-            t.ticketKeys
-        else if (tlsSessionMod.TicketKeys.generate(self.io)) |k| blk: {
-            generatedKeys = k;
-            break :blk k;
-        } else |_| null;
-        defer if (generatedKeys != null) {
-            // Wipe the sealing key once this connection is done with it.
-            std.crypto.secureZero(u8, &generatedKeys.?.current);
-        };
+        // Ticket keys and the anti-replay window live on the Server, not on
+        // this connection: tickets issued by one connection must verify on
+        // the next, and replay detection must span reconnects. Configured keys
+        // win; otherwise mint one key from OS entropy on first use. A hardcoded
+        // key would seal every ticket with a publicly known value, letting
+        // anyone forge one and resume as any client. If the OS entropy source
+        // is unavailable we issue no tickets.
+        if (self.h3TicketKeys == null) {
+            if (self.cfg.tls) |t| {
+                if (t.ticketKeys) |k| self.h3TicketKeys = k;
+            }
+            if (self.h3TicketKeys == null) {
+                self.h3TicketKeys = tlsSessionMod.TicketKeys.generate(self.io) catch null;
+            }
+        }
+        if (self.h3ReplayCache == null) {
+            self.h3ReplayCache = tlsSessionMod.ReplayCache.init(self.allocator, 256);
+        }
+        const replayCache = &self.h3ReplayCache.?;
 
         var drv = quicHs.Handshake.init(self.allocator, self.io, .{
             .role = .server,
             .certChainPem = certPem,
             .privateKeyPem = keyPem,
-            .ticketKeys = ticketKeys,
+            .ticketKeys = self.h3TicketKeys,
             .maxEarlyData = 16384,
-            .replayCache = &replayCache,
+            .replayCache = replayCache,
         });
         defer drv.deinit();
 
@@ -2510,14 +2525,30 @@ pub const Server = struct {
         }
 
         conn.setWriteTimeoutMs(self.cfg.timeouts.write);
-        const bytesOut = writeResponse(conn, arena, reqHead.minorVersion, try self.withLiveReload(arena, res, isHead), isHead, if (clientClose) "close" else "keep-alive", ctx.header("Accept-Encoding"), self.cfg.compression, self.cfg.maxCompressionInput) catch {
+        // A response may ask for the connection to close after it is written
+        // (`Connection: close`). That is a valid server-side decision, so it
+        // participates in the reuse decision alongside the client's request.
+        const closeAfterResponse = clientClose or responseWantsClose(res);
+        const bytesOut = writeResponse(conn, arena, reqHead.minorVersion, try self.withLiveReload(arena, res, isHead), isHead, if (closeAfterResponse) "close" else "keep-alive", ctx.header("Accept-Encoding"), self.cfg.compression, self.cfg.maxCompressionInput) catch {
             self.metricsRegistry.recordError();
             return false;
         };
         const durNs: u64 = @intCast(@max(0, (clock.monotonicMillis(self.io) -| t0) * 1_000_000));
         self.metricsRegistry.recordResponseFull(res.status, durNs, bytesOut);
         self.emitAccess(reqHead.method, reqHead.path, res.status, body.len, bytesOut, t0);
-        return !clientClose;
+        return !closeAfterResponse;
+    }
+
+    /// True when a response carries `Connection: close` (any case, token list).
+    fn responseWantsClose(res: Response) bool {
+        for (res.headers) |h| {
+            if (!std.ascii.eqlIgnoreCase(h.name, "connection")) continue;
+            var tokens = std.mem.tokenizeAny(u8, h.value, " \t,");
+            while (tokens.next()) |token| {
+                if (std.ascii.eqlIgnoreCase(token, "close")) return true;
+            }
+        }
+        return false;
     }
 
     /// Attaches the browser live-reload client to HTML responses while
@@ -2565,6 +2596,11 @@ pub const Server = struct {
             lines.append(arena, line) catch return 0;
         }
         for (res.headers) |h| {
+            // `connHdr` is the single source of truth for connection reuse.
+            // Skip any handler-supplied hop-by-hop connection headers so the
+            // response never carries two conflicting Connection lines.
+            if (std.ascii.eqlIgnoreCase(h.name, "connection") or
+                std.ascii.eqlIgnoreCase(h.name, "keep-alive")) continue;
             const line = std.fmt.allocPrint(arena, "{s}: {s}", .{ h.name, h.value }) catch return 0;
             lines.append(arena, line) catch return 0;
         }
@@ -2663,7 +2699,7 @@ test "fragmented cleartext HTTP2 preface is sniffed before HTTP1 dispatch" {
     var srv = try Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .limits = .{ .maxConns = 1 },
+        .limits = .{ .maxConnections = 1 },
         .timeouts = .{ .initialRequest = 2_000 },
     });
     defer srv.deinit();
@@ -2728,7 +2764,7 @@ test "HTTP/1.1 server rejects request without Host before dispatch" {
     var ioContext = try tcp.IoContext.init(a);
     defer ioContext.deinit();
 
-    var srv = Server.init(a, ioContext.io, .{ .port = 0, .limits = .{ .maxConns = 1 } }) catch |err| return err;
+    var srv = Server.init(a, ioContext.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } }) catch |err| return err;
     defer srv.deinit();
     try srv.router.get("/", helloHandler, .{});
 
@@ -2756,7 +2792,7 @@ test "HTTP/1.1 absolute-form target routes by its path" {
     var ioContext = try tcp.IoContext.init(a);
     defer ioContext.deinit();
 
-    var srv = Server.init(a, ioContext.io, .{ .port = 0, .limits = .{ .maxConns = 1 } }) catch |err| return err;
+    var srv = Server.init(a, ioContext.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } }) catch |err| return err;
     defer srv.deinit();
     try srv.router.get("/hello", helloHandler, .{});
 
@@ -2809,7 +2845,7 @@ test "template route renders through tree-sitter pipeline end to end" {
     };
     H.enginePtr = &eng;
 
-    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConns = 2 } }) catch |err| return err;
+    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConnections = 2 } }) catch |err| return err;
     defer srv.deinit();
     try srv.router.get("/", H.handle, .{});
 
@@ -2853,7 +2889,7 @@ test "live reload attaches the browser client to a plain handler's HTML" {
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .limits = .{ .maxConns = 2 },
+        .limits = .{ .maxConnections = 2 },
         .liveReload = .{ .enabled = true },
     }) catch |err| return err;
     defer srv.deinit();
@@ -2899,7 +2935,7 @@ test "live reload is off by default and skips non-HTML responses" {
     var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConns = 1 } }) catch |err| return err;
+    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } }) catch |err| return err;
     defer srv.deinit();
     try std.testing.expect(!srv.cfg.liveReload.enabled);
 
@@ -2921,7 +2957,7 @@ test "server handles POST with content-length body" {
     var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConns = 1 } }) catch |err| return err;
+    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } }) catch |err| return err;
     defer srv.deinit();
     try srv.router.post("/echo", echoRawHandler, .{});
 
@@ -2959,7 +2995,7 @@ test "server decodes chunked request body before dispatch" {
     var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConns = 1 } }) catch |err| return err;
+    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } }) catch |err| return err;
     defer srv.deinit();
     try srv.router.post("/echo", echoRawHandler, .{});
 
@@ -3027,7 +3063,7 @@ test "access log flows through event callback" {
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .limits = .{ .maxConns = 1 },
+        .limits = .{ .maxConnections = 1 },
         .logging = .{ .callback = testEventCallback },
     }) catch |err| return err;
     defer srv.deinit();
@@ -3057,7 +3093,7 @@ test "access log flows through event callback" {
     // Close BEFORE joining so the server can drain and run() can return.
     c.close();
 
-    // maxConns=1 => run() returns only AFTER emitAccess ran.
+    // maxConnections=1 => run() returns only AFTER emitAccess ran.
     t.join();
     srv.requestShutdown();
     try std.testing.expect(gCaptureGotRequest);
@@ -3076,7 +3112,7 @@ test "no callback produces zero events" {
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .limits = .{ .maxConns = 1 },
+        .limits = .{ .maxConnections = 1 },
         .logging = .{}, // null callback — silent by default
     }) catch |err| return err;
     defer srv.deinit();
@@ -3152,7 +3188,7 @@ test "server serves routed GET end to end" {
     var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConns = 1 } }) catch |err| return err;
+    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } }) catch |err| return err;
     defer srv.deinit();
     try srv.router.get("/hello", helloHandler, .{});
 
@@ -3196,7 +3232,7 @@ test "server does not mount documentation routes unless explicitly requested" {
     var ctx = try tcp.IoContext.init(allocator);
     defer ctx.deinit();
 
-    var srv = try Server.init(allocator, ctx.io, .{ .port = 0, .limits = .{ .maxConns = 1 } });
+    var srv = try Server.init(allocator, ctx.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } });
     defer srv.deinit();
 
     const Runner = struct {
@@ -3234,7 +3270,7 @@ test "idle and incomplete headers cannot block a normal request" {
     var srv = try Server.init(a, ctx.io, .{
         .port = 0,
         .limits = .{
-            .maxConns = 3,
+            .maxConnections = 3,
             .maxActive = 3,
             .maxQueued = 3,
             .workers = 3,
@@ -3289,7 +3325,7 @@ test "stalled request body is timed out without blocking another client" {
     var srv = try Server.init(a, ctx.io, .{
         .port = 0,
         .limits = .{
-            .maxConns = 2,
+            .maxConnections = 2,
             .maxActive = 2,
             .maxQueued = 2,
             .workers = 1,
@@ -3492,7 +3528,7 @@ test "server compresses a large body once the input ceiling allows it" {
 
     // Default ceiling: the body is served as-is.
     {
-        var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConns = 1 } }) catch |err| return err;
+        var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } }) catch |err| return err;
         defer srv.deinit();
         try srv.router.get("/big", BigH.h, .{});
         const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch |err| return err;
@@ -3512,7 +3548,7 @@ test "server compresses a large body once the input ceiling allows it" {
     {
         var srv = Server.init(a, ctx.io, .{
             .port = 0,
-            .limits = .{ .maxConns = 1 },
+            .limits = .{ .maxConnections = 1 },
             .maxCompressionInput = 1024 * 1024,
         }) catch |err| return err;
         defer srv.deinit();
@@ -3541,7 +3577,7 @@ test "raw socket 200KB content-length body roundtrip" {
     const a = std.testing.allocator;
     var ctx0 = try tcp.IoContext.init(a);
     defer ctx0.deinit();
-    var srv = Server.init(a, ctx0.io, .{ .port = 0, .limits = .{ .maxConns = 1 } }) catch |err| return err;
+    var srv = Server.init(a, ctx0.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } }) catch |err| return err;
     defer srv.deinit();
     const LenH = struct {
         fn h(ctx: *Context) anyerror!Response {
@@ -3588,7 +3624,7 @@ test "server isTls default is false" {
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .limits = .{ .maxConns = 1 },
+        .limits = .{ .maxConnections = 1 },
     }) catch |err| return err;
     defer srv.deinit();
 
@@ -3602,7 +3638,7 @@ test "server setTls dynamic reconfiguration and key zeroing" {
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .limits = .{ .maxConns = 1 },
+        .limits = .{ .maxConnections = 1 },
     }) catch |err| return err;
     defer srv.deinit();
 
@@ -3629,7 +3665,7 @@ test "strict HTTPS mode rejects plain HTTP with 400 Bad Request" {
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .limits = .{ .maxConns = 1 },
+        .limits = .{ .maxConnections = 1 },
     }) catch |err| return err;
     defer srv.deinit();
 
@@ -3673,7 +3709,7 @@ test "server default TLS ALPN negotiates HTTP/2 and serves a request" {
     var srv = try Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .limits = .{ .maxConns = 1 },
+        .limits = .{ .maxConnections = 1 },
         .tls = .{
             .certificatePem = h3TestCertPem,
             .privateKeyPem = h3TestKeyPem,
@@ -3755,7 +3791,7 @@ test "malformed TLS handshake emits tlsHandshakeFailed event" {
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .limits = .{ .maxConns = 1 },
+        .limits = .{ .maxConnections = 1 },
         .logging = .{ .callback = testTlsEventCallback, .level = .warn },
     }) catch |err| return err;
     defer srv.deinit();
@@ -3801,7 +3837,7 @@ test "StreamConn operations" {
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .limits = .{ .maxConns = 1 },
+        .limits = .{ .maxConnections = 1 },
     }) catch |err| return err;
     defer srv.deinit();
     try srv.router.get("/stream", returnOk, .{});
@@ -3863,7 +3899,7 @@ test "server metrics snapshot and live Prometheus endpoint" {
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .limits = .{ .maxConns = 2 },
+        .limits = .{ .maxConnections = 2 },
     }) catch |err| return err;
     defer srv.deinit();
 
@@ -4051,17 +4087,20 @@ test "Server shares one port number between HTTP/1.1 and HTTP/3 when the port is
     var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    // Probe with UDP, not TCP. Windows keeps the dynamic port ranges for TCP
-    // and UDP separate, so a TCP-chosen port can land in a range the UDP
-    // stack refuses to bind, which is exactly the port HTTP/3 needs.
+    // Find a port that both protocol stacks can take, then hand it to the
+    // server. Scanning a high, unprivileged range is deterministic and avoids
+    // the Windows exclusion lists and TIME_WAIT churn in the dynamic range.
     var boundPort: ?u16 = null;
-    for (0..32) |_| {
-        var probe = try udpMod.Socket.bind(ctx.io, 0);
-        const candidate = switch (probe.socket.address) {
-            .ip4 => |v| v.port,
-            .ip6 => |v| v.port,
+    var candidate: u16 = 20000;
+    while (candidate < 20500) : (candidate += 1) {
+        var udpProbe = udpMod.Socket.bind(ctx.io, candidate) catch continue;
+        var probeAddr = addressMod.Address.unspecified4(candidate);
+        var tcpProbe = tcp.Listener.bindAddress(ctx.io, &probeAddr) catch {
+            udpProbe.close();
+            continue;
         };
-        probe.close();
+        tcpProbe.close(ctx.io);
+        udpProbe.close();
 
         var srv = Server.init(a, ctx.io, .{
             .host = "127.0.0.1",
@@ -4072,10 +4111,7 @@ test "Server shares one port number between HTTP/1.1 and HTTP/3 when the port is
                 .certificatePem = h3TestCertPem,
                 .privateKeyPem = h3TestKeyPem,
             },
-        }) catch |err| switch (err) {
-            error.AddressInUse => continue,
-            else => return err,
-        };
+        }) catch continue;
         defer srv.deinit();
         try std.testing.expectEqual(candidate, srv.localPort());
         try std.testing.expectEqual(candidate, srv.http3.port().?);
@@ -4095,18 +4131,13 @@ test "explicit HTTP/3 port conflict fails instead of silently rebinding" {
     var port: u16 = 0;
     var udpProbe: ?udpMod.Socket = null;
     var tcpProbe: ?tcp.Listener = null;
-    for (0..32) |_| {
-        var candidateUdp = try udpMod.Socket.bind(ctx.io, 0);
-        const candidate = switch (candidateUdp.socket.address) {
-            .ip4 => |v| v.port,
-            .ip6 => |v| v.port,
-        };
+    var candidate: u16 = 20000;
+    while (candidate < 20500) : (candidate += 1) {
+        var candidateUdp = udpMod.Socket.bind(ctx.io, candidate) catch continue;
         var addr = addressMod.Address.unspecified4(candidate);
-        const candidateTcp = tcp.Listener.bindAddress(ctx.io, &addr) catch |err| switch (err) {
-            error.AddressInUse => {
-                candidateUdp.close();
-                continue;
-            },
+        const candidateTcp = tcp.Listener.bindAddress(ctx.io, &addr) catch {
+            candidateUdp.close();
+            continue;
         };
         port = candidate;
         udpProbe = candidateUdp;
@@ -4190,7 +4221,7 @@ test "direct clients cannot spoof the remote address through forwarded headers" 
     var srv = Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .limits = .{ .maxConns = 2 },
+        .limits = .{ .maxConnections = 2 },
         .trustForwardedHeaders = true,
         .trustedProxies = &.{"10.0.0.1"},
     }) catch |err| return err;
@@ -4238,7 +4269,7 @@ test "trusted proxies resolve the rightmost client address" {
     var srv = Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .limits = .{ .maxConns = 2 },
+        .limits = .{ .maxConnections = 2 },
         .trustForwardedHeaders = true,
         .trustedProxies = &.{"127.0.0.1"},
     }) catch |err| return err;

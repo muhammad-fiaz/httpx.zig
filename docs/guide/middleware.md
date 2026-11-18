@@ -60,7 +60,7 @@ then the handler. Groups prepend their middleware to each route:
 ```zig
 const api = server.router.group("/api", .{ .middleware = &.{authMw} });
 try api.get("/users", listUsers, .{ .middleware = &.{auditMw} });
-// order: server.use middlewares → authMw → auditMw → listUsers
+// order: server.use middlewares -> authMw -> auditMw -> listUsers
 ```
 
 ## Compression

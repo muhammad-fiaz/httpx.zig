@@ -43,6 +43,13 @@ const RouteOptionsSchema = z.objectOf(.{
     // Adds `Connection: close`, asking the client to close the connection
     // after this response.
     .closeConnection = z.withDefault(z.boolean(.{}), false),
+    // `Location` header for redirect fixtures. Stored as a plain field so the
+    // value can be runtime data without borrowing a temporary header array.
+    .location = z.optional(z.string(.{})),
+    // Opaque state handed to `.handler` through `ctx.userData`. The testing
+    // server owns the route, not this pointer; the caller keeps it alive for
+    // as long as the route is registered.
+    .userData = z.withDefault(typedSchema(?*anyopaque), null),
 }, .{});
 
 /// Validated route configuration. `.{}` is a `200 OK` empty GET response.
@@ -87,7 +94,7 @@ pub fn empty(status: u16) RouteOptions {
 pub fn redirect(location: []const u8, status: u16) RouteOptions {
     return .{
         .status = status,
-        .headers = &.{.{ .name = "location", .value = location }},
+        .location = location,
     };
 }
 
@@ -101,7 +108,7 @@ pub fn delayed(ms: u32, options: RouteOptions) RouteOptions {
 test "fixture helpers fill expected fields" {
     const r = redirect("/next", 307);
     try std.testing.expectEqual(@as(u16, 307), r.status);
-    try std.testing.expectEqualStrings("/next", r.headers[0].value);
+    try std.testing.expectEqualStrings("/next", r.location.?);
     const d = delayed(25, text("later"));
     try std.testing.expectEqual(@as(u32, 25), d.delayMs);
     try std.testing.expectEqualStrings("text/plain; charset=utf-8", d.contentType.?);

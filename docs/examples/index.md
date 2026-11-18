@@ -49,6 +49,8 @@ zig build run-http3-client -Dtarget=aarch64-macos
 - [HTTP/3 Example](/examples/http3-example): HTTP/3, QPACK, and QUIC primitives.
 - [HTTP/3 Client Runtime](/examples/http3-client-runtime): End-to-end high-level HTTP/3 client request against a local UDP loopback server.
 - [HTTP/3 Server Runtime](/examples/http3-server-runtime): End-to-end high-level HTTP/3 server route consumed by a local HTTP/3 client over UDP.
+- [HTTP/3 0-RTT](/examples/http3-0rtt): TLS 1.3 session-ticket resumption with 0-RTT early data over HTTP/3.
+- [Connectivity](/examples/connectivity): High-level TCP reachability checks through `net.connectivity` and the client convenience methods.
 - [HTTP/2 Advanced](/examples/http2-advanced): HTTP/2 production features (SETTINGS enforcement, GOAWAY/RST_STREAM, HPACK security, trailers).
 - [HTTP/3 Advanced](/examples/http3-advanced): HTTP/3 production features (QPACK stream instructions, QUIC stream cancellation, transport parameters).
 - [TCP Local](/examples/tcp-local): Local TCP listener/client round trip.

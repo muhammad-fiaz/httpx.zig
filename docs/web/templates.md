@@ -303,8 +303,8 @@ pub fn main() !void {
 
 ## Security: HTML escaping
 
-Template variables are HTML-escaped by default (`&` → `&amp;`, `<` → `&lt;`,
-`>` → `&gt;`, `"` → `&quot;`, `'` → `&#39;`). Bypass escaping only for
+Template variables are HTML-escaped by default (`&` -> `&amp;`, `<` -> `&lt;`,
+`>` -> `&gt;`, `"` -> `&quot;`, `'` -> `&#39;`). Bypass escaping only for
 trusted markup with `templates.raw(...)` (see above). Rendered output is
 capped (`.maxOutput`, default 64 MiB), macro nesting is bounded
 (`.maxMacroDepth`), and `range()` sequences are capped

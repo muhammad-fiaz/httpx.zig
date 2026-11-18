@@ -27,7 +27,7 @@ fn handler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
 |---|---|---|
 | `subprotocols` | `&.{}` | Supported subprotocols, preference order. |
 | `compression` | `false` | Negotiate permessage-deflate. |
-| `originCheck` | `null` | `*const fn (*httpx.router.Context) bool`; false → 403. |
+| `originCheck` | `null` | `*const fn (*httpx.router.Context) bool`; false -> 403. |
 | `auth` | `.{}` | `{ .scheme = .none/.basic/.bearer, .username, .password, .token, .realm }`. |
 | `session` | `.{}` | Session limits/timeouts. |
 | `callbacks` | `.{}` | `context`, `onOpen`, `onMessage`, `onClose`. |

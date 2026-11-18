@@ -6,7 +6,7 @@ The connection pool (`httpx.client.pool`) reuses plain-TCP keep-alive connection
 
 ```zig
 pub const PoolConfig = struct {
-    maxConns: u32 = 256,
+    maxConnections: u32 = 256,
     maxPerHost: u16 = 16,
     idleMs: i64 = 30_000,
     maxParkedMs: i64 = 300_000,
@@ -15,7 +15,7 @@ pub const PoolConfig = struct {
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `maxConns` | `u32` | `256` | Hard ceiling across all origins |
+| `maxConnections` | `u32` | `256` | Hard ceiling across all origins |
 | `maxPerHost` | `u16` | `16` | Ceiling per origin |
 | `idleMs` | `i64` | `30_000` | Parked connections older than this are dropped |
 | `maxParkedMs` | `i64` | `300_000` | Max time a connection may stay parked. 0 disables |
@@ -24,7 +24,7 @@ pub const PoolConfig = struct {
 
 ```zig
 var pool = httpx.client.pool.init(allocator, io, .{
-    .maxConns = 100,
+    .maxConnections = 100,
     .maxPerHost = 10,
     .idleMs = 30_000,
 });
@@ -66,7 +66,7 @@ Use `pool.statsSnapshot()` for observability. `Stats.snapshot()` returns the sam
 const httpx = @import("httpx");
 
 var pool = httpx.client.pool.init(allocator, io, .{
-    .maxConns = 20,
+    .maxConnections = 20,
     .maxPerHost = 5,
     .idleMs = 60_000,
 });

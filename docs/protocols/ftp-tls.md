@@ -1,7 +1,7 @@
 # FTPS (FTP over TLS)
 
 > Status: implemented. `.secure = true` performs explicit FTPS
-> (RFC 4217): `AUTH TLS` → TLS 1.3 handshake → `PBSZ 0` → `PROT P`
+> (RFC 4217): `AUTH TLS` -> TLS 1.3 handshake -> `PBSZ 0` -> `PROT P`
 > (or `PROT C` with `protPrivate = false`). A server that refuses the
 > upgrade fails the connection loudly; there is no silent plaintext
 > fallback.

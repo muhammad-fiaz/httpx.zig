@@ -112,10 +112,19 @@ pub fn main() !void {
         return error.MissingSessionTicket;
     }
 
+    // End the first QUIC session gracefully. `close` drains the pool and
+    // sends CONNECTION_CLOSE, so the single-connection HTTP/3 accept loop can
+    // take the resumed handshake without waiting for an idle timeout.
+    client.close();
+    var settled: usize = 0;
+    while (server.isHttp3Ready() and settled < 200) : (settled += 1) {
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake) catch {};
+    }
+
     // Second request resumes with 0-RTT early data.
     const url2 = try std.fmt.bufPrint(&urlBuf, "https://127.0.0.1:{d}/early-data", .{port});
     std.debug.print("Step 3: Sending second request with 0-RTT early data enabled...\n", .{});
-    var res2 = try client.get(url2, .{
+    var res2 = client.get(url2, .{
         .httpVersion = .http3,
         .tls = .{
             .verify = .caBundle,
@@ -123,7 +132,12 @@ pub fn main() !void {
         },
         .earlyData = .{ .enabled = true },
         .timeoutMs = 15_000,
-    });
+    }) catch |err| {
+        std.debug.print("Second request failed: {any}\n", .{err});
+        server.requestShutdown();
+        srvThread.join();
+        return err;
+    };
     defer res2.deinit();
 
     std.debug.print("  -> Status: {d}\n", .{res2.status});

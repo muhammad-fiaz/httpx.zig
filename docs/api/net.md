@@ -7,9 +7,9 @@ macOS (`src/sockets/`, `src/net/`).
 
 | Platform | TCP | UDP | TLS | Notes |
 |----------|-----|-----|-----|-------|
-| Linux | ✅ | ✅ | ✅ | `MSG_NOSIGNAL` prevents SIGPIPE on broken connections |
-| Windows | ✅ | ✅ | ✅ | Winsock-native connects with full error mapping |
-| macOS | ✅ | ✅ | ✅ | |
+| Linux | Yes | Yes | Yes | `MSG_NOSIGNAL` prevents SIGPIPE on broken connections |
+| Windows | Yes | Yes | Yes | Winsock-native connects with full error mapping |
+| macOS | Yes | Yes | Yes | |
 
 ## TCP (`httpx.tcp`)
 
@@ -94,7 +94,7 @@ surface the flag, so truncated datagrams are still returned there.
 
 DNS resolution goes through `client.resolve(...)`, `httpx.net.resolve.Resolver`,
 and the client DNS cache (`.dnsCache` in the `Client.init` options); SOCKS/proxy dialing via
-`httpx.socks5` / `httpx.proxy`; reachability via `httpx.connectivity`.
+`httpx.socks5` / `httpx.proxy`; reachability via `httpx.net.connectivity`.
 
 ## See Also
 
