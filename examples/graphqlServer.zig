@@ -113,7 +113,7 @@ pub fn main() !void {
         .host = "127.0.0.1",
         .port = 0,
         .logging = .{},
-        .limits = .{ .maxConnections = 5 },
+        .limits = .{ .maxConns = 5 },
     });
     defer server.deinit();
 

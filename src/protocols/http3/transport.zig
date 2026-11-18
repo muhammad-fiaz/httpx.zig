@@ -97,7 +97,7 @@ const RespState = struct {
     body: std.ArrayList(u8) = .empty,
     headerBytes: usize = 0,
     maxBytes: usize = 64 * 1024 * 1024,
-    maxHeaderBytes: usize = 1024 * 1024,
+    maxHeader: usize = 1024 * 1024,
     done: bool = false,
     failed: bool = false,
     overflow: bool = false,
@@ -127,7 +127,7 @@ pub const Client = struct {
     controlDone: bool = false,
     responses: std.AutoHashMap(u64, RespState),
     maxBytes: usize = 64 * 1024 * 1024,
-    maxHeaderBytes: usize = 1024 * 1024,
+    maxHeader: usize = 1024 * 1024,
     ioError: ?anyerror = null,
 
     pub fn init(allocator: Allocator, ep: *quicEp.Endpoint) Client {
@@ -260,7 +260,7 @@ pub const Client = struct {
         for (fields) |f| {
             if (f.name.len > 0 and f.name[0] == ':') continue;
             r.headerBytes +|= f.name.len +| f.value.len;
-            if (r.headerBytes > r.maxHeaderBytes) {
+            if (r.headerBytes > r.maxHeader) {
                 r.overflow = true;
                 return;
             }
@@ -416,7 +416,7 @@ pub const Client = struct {
         try self.responses.put(sid, .{
             .sid = sid,
             .maxBytes = @min(maxBytes, 64 * 1024 * 1024),
-            .maxHeaderBytes = self.maxHeaderBytes,
+            .maxHeader = self.maxHeader,
         });
 
         var qextra = std.ArrayList(h3qpack.FieldLine).empty;
@@ -954,7 +954,7 @@ test "http3 response collector caps header bytes and copies fields" {
     var endpoint: quicEp.Endpoint = undefined;
     var client = Client.init(a, &endpoint);
     defer client.deinit();
-    try client.responses.put(0, .{ .sid = 0, .maxHeaderBytes = 8 });
+    try client.responses.put(0, .{ .sid = 0, .maxHeader = 8 });
 
     const fields = [_]h3qpack.FieldLine{
         .{ .name = ":status", .value = "200" },

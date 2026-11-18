@@ -2,9 +2,9 @@
 //!
 //! v2 semantics (documented honestly):
 //!   * The pool PARKS healthy keep-alive connections and hands them back.
-//!   * `maxConnections` caps total parked entries (plain + H2 combined).
+//!   * `maxConns` caps total parked entries (plain + H2 combined).
 //!   * `maxPerHost` caps parked entries per origin ("host", port, scheme).
-//!   * Parked entries expire after `idleTimeoutMs`, or after
+//!   * Parked entries expire after `idleMs`, or after
 //!     `maxParkedMs` measured from FIRST parking (plain) or from
 //!     connection creation (H2, which carries its creation ledger).
 //!   * HTTP/2 connections are pooled per origin+scheme (h2c vs h2-TLS
@@ -35,9 +35,9 @@ const h3Transport = @import("../../protocols/http3/transport.zig");
 const z = @import("zigantic");
 
 pub const PoolConfigSchema = z.objectOf(.{
-    .maxConnections = z.withDefault(z.nonNegativeInt(u32, .{}), 256),
+    .maxConns = z.withDefault(z.nonNegativeInt(u32, .{}), 256),
     .maxPerHost = z.withDefault(z.nonNegativeInt(u16, .{}), 16),
-    .idleTimeoutMs = z.withDefault(z.nonNegativeInt(i64, .{}), 30_000),
+    .idleMs = z.withDefault(z.nonNegativeInt(i64, .{}), 30_000),
     .maxParkedMs = z.withDefault(z.nonNegativeInt(i64, .{}), 300_000),
 }, .{});
 pub const PoolConfig = PoolConfigSchema.Value;
@@ -269,7 +269,7 @@ pub const Pool = struct {
     }
 
     fn canParkH2Locked(self: *Pool, key: H2Key) bool {
-        if (self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len >= self.cfg.maxConnections) return false;
+        if (self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len >= self.cfg.maxConns) return false;
         var n: u32 = 0;
         for (self.idleH2.items) |*c| {
             if (c.key.eql(key)) n += 1;
@@ -299,7 +299,7 @@ pub const Pool = struct {
                     if (!c.key.eql(key)) continue;
                     // A full reap batch can leave expired entries parked.
                     // Never hand one out just because its key matches.
-                    const idleExpired = now - c.parkedAtMs > self.cfg.idleTimeoutMs;
+                    const idleExpired = now - c.parkedAtMs > self.cfg.idleMs;
                     const lifeExpired = self.cfg.maxParkedMs != 0 and
                         now - c.createdAtMs > self.cfg.maxParkedMs;
                     if (idleExpired or lifeExpired) continue;
@@ -362,7 +362,7 @@ pub const Pool = struct {
     }
 
     fn canParkH3Locked(self: *Pool, key: H3Key) bool {
-        if (self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len >= self.cfg.maxConnections) return false;
+        if (self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len >= self.cfg.maxConns) return false;
         var n: u32 = 0;
         for (self.idleH3.items) |*c| {
             if (c.key.eql(key)) n += 1;
@@ -381,7 +381,7 @@ pub const Pool = struct {
         var i: usize = 0;
         while (i < self.idleH3.items.len) {
             const c = &self.idleH3.items[i];
-            const idleExpired = now - c.parkedAtMs > self.cfg.idleTimeoutMs;
+            const idleExpired = now - c.parkedAtMs > self.cfg.idleMs;
             const lifeExpired = self.cfg.maxParkedMs != 0 and
                 now - c.createdAtMs > self.cfg.maxParkedMs;
             if (idleExpired or lifeExpired) {
@@ -418,7 +418,7 @@ pub const Pool = struct {
         var i: usize = 0;
         while (i < self.idleH2.items.len) {
             const c = &self.idleH2.items[i];
-            const idleExpired = now - c.parkedAtMs > self.cfg.idleTimeoutMs;
+            const idleExpired = now - c.parkedAtMs > self.cfg.idleMs;
             const lifeExpired = self.cfg.maxParkedMs != 0 and
                 now - c.createdAtMs > self.cfg.maxParkedMs;
             if (idleExpired or lifeExpired) {
@@ -434,7 +434,7 @@ pub const Pool = struct {
 
     /// Pop a healthy reusable connection for this origin, or null (miss).
     /// Lazily sweeps globally-expired entries first, so idle connections to
-    /// cold origins do not sit ESTABLISHED past idleTimeoutMs/maxParkedMs.
+    /// cold origins do not sit ESTABLISHED past idleMs/maxParkedMs.
     pub fn acquire(self: *Pool, host: []const u8, port: u16) ?tcp.Socket {
         const key = ConnKey.init(host, port) orelse {
             _ = self.stats.misses.fetchAdd(1, .monotonic);
@@ -458,7 +458,7 @@ pub const Pool = struct {
         var i: usize = 0;
         while (i < self.idle.items.len) {
             const c = &self.idle.items[i];
-            const idleExpired = now - c.parkedAtMs > self.cfg.idleTimeoutMs;
+            const idleExpired = now - c.parkedAtMs > self.cfg.idleMs;
             const parkedExpired = self.cfg.maxParkedMs != 0 and
                 now - c.parkedAtMs > self.cfg.maxParkedMs;
             if (idleExpired or parkedExpired or !c.socket.isAlive()) {
@@ -478,7 +478,7 @@ pub const Pool = struct {
                 i += 1;
                 continue;
             }
-            const idleExpired = now - c.parkedAtMs > self.cfg.idleTimeoutMs;
+            const idleExpired = now - c.parkedAtMs > self.cfg.idleMs;
             const parkedExpired = self.cfg.maxParkedMs != 0 and
                 now - c.parkedAtMs > self.cfg.maxParkedMs;
             if (idleExpired or parkedExpired or !c.socket.isAlive()) {
@@ -503,7 +503,7 @@ pub const Pool = struct {
         const key = ConnKey.init(host, port) orelse return false;
         self.mu.lock();
         defer self.mu.unlock();
-        if (self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len >= self.cfg.maxConnections) return false;
+        if (self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len >= self.cfg.maxConns) return false;
         var n: u32 = 0;
         for (self.idle.items) |*c| {
             if (c.key.eql(key)) n += 1;
@@ -545,7 +545,7 @@ pub const Pool = struct {
     }
 
     fn canParkLocked(self: *Pool, key: ConnKey) bool {
-        if (self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len >= self.cfg.maxConnections) return false;
+        if (self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len >= self.cfg.maxConns) return false;
         var n: u32 = 0;
         for (self.idle.items) |*c| {
             if (c.key.eql(key)) n += 1;
@@ -596,7 +596,7 @@ pub const Pool = struct {
         var i: usize = 0;
         while (i < self.idle.items.len) {
             const c = &self.idle.items[i];
-            const idleExpired = now - c.parkedAtMs > self.cfg.idleTimeoutMs;
+            const idleExpired = now - c.parkedAtMs > self.cfg.idleMs;
             const parkedExpired = self.cfg.maxParkedMs != 0 and
                 now - c.parkedAtMs > self.cfg.maxParkedMs;
             if (idleExpired or parkedExpired or !c.socket.isAlive()) {
@@ -738,7 +738,7 @@ test "maxPerHost parking cap enforced" {
 
 test "total parking cap enforced" {
     const a = std.testing.allocator;
-    var p = Pool.init(a, undefined, .{ .maxConnections = 0 });
+    var p = Pool.init(a, undefined, .{ .maxConns = 0 });
     defer p.deinit();
     try std.testing.expect(!p.canPark("any", 80));
 }
@@ -755,7 +755,7 @@ test "lazy sweep evicts expired idle connections without a reaper thread" {
     const a = std.testing.allocator;
     // Negative idle timeout: every parked connection is instantly stale,
     // so the sweep is fully deterministic (no sleeps, no wall-clock race).
-    var p = Pool.init(a, ctx.io, .{ .idleTimeoutMs = -1 });
+    var p = Pool.init(a, ctx.io, .{ .idleMs = -1 });
     defer p.deinit();
 
     const port = l.localPort();

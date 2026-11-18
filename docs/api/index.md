@@ -24,8 +24,9 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 
 - `httpx.Server.init(allocator, io, config)` — initialize server with allocator, io, and configuration (or `.{}` for defaults)
 - `server.run()` — blocking loop; `server.start()` — background thread
-- `server.requestShutdown()` / `server.stop()` / `server.pause()` / `server.resumeAccepting()`
+- `server.requestShutdown()` / `server.stop()` / `server.shutdown()` / `server.pause()` / `server.resumeAccepting()`
 - `server.localPort()` — actual bound port
+- `.signals = .{}` — automatic Ctrl+C / `SIGTERM` handling with a bounded drain deadline; `.signals = .{ .enabled = false }` transfers ownership to the application
 
 ### Inline Configuration
 
@@ -48,7 +49,7 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 
 - `client.resolve(host, options)` / `client.resolveUrl(url, options)`
 - `httpx.net.resolve.Resolver`, `httpx.net.dns`, `httpx.net.socks5`, `httpx.net.proxy`
-- `httpx.socket.tcp`, `httpx.socket.udp`, `httpx.Address`, `httpx.net.connectivity`
+- `httpx.tcp`, `httpx.udp`, `httpx.Address`, `httpx.net.connectivity`
 
 ### Utility Aliases
 
@@ -64,8 +65,17 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 
 ### WebSocket
 
-- `httpx.websocket.Handshake.computeAccept / buildUpgradeRequest / validateUpgradeResponse`
-- `httpx.websocket.Frame.parseFrameHeader / buildFrameHeader / applyMask / generateKey`
+- `httpx.websocket.connect(allocator, io, url, .{})` / `httpx.websocket.Client.init(allocator, io, .{}).connect(url)`
+- `httpx.websocket.accept(ctx, .{})` — server upgrade + session takeover
+- `httpx.websocket.Session.sendText / sendBinary / receiveText / receiveBinary / ping / pong / close`
+- `httpx.websocket.protocol.Handshake.computeAccept / buildUpgradeRequest / validateUpgradeResponse`
+- `httpx.websocket.protocol.Frame.parseFrameHeader / buildFrameHeader / applyMask / generateKey`
+
+### Signals
+
+- `httpx.signals.register(context, notifyFn, .{})` / `Subscription.unregister()`
+- `httpx.signals.Kind`, `Event`, `Mask`, `supported`
+- Server hooks: `.signals = .{ .onSignal = hook, .ctx = &state }`
 
 ## API Groups
 
@@ -85,6 +95,8 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 - [Protocol API](/api/protocol)
 - [Router API](/api/router)
 - [Server API](/api/server)
+- [Signals API](/api/signals)
+- [WebSocket API](/api/websocket)
 - [TLS API](/api/tls)
 - [Utilities API](/api/utils)
 
@@ -100,5 +112,5 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 - Server event callbacks via `.logging = .{ .callback = onEvent }` in the options passed to `httpx.Server.init`
 - Client event callbacks via `.eventCallback` in the `Client.init` options
 - Response JSON helpers: `Response.json(T)`, `Response.jsonAlloc(T, allocator)`
-- Socket primitives: `httpx.socket.tcp.Socket` / `httpx.socket.tcp.Listener`, `httpx.socket.udp`
+- Socket primitives: `httpx.tcp.Socket` / `httpx.tcp.Listener`, `httpx.udp`
 - Custom middleware: `fn (ctx: *Context, next: NextFn) anyerror!Response`

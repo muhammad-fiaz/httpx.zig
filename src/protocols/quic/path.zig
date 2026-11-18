@@ -115,7 +115,7 @@ pub const PathValidator = struct {
     pub fn onTimeout(self: *PathValidator, nowMs: u64, rng: std.Random) bool {
         if (self.state != .validating) return false;
 
-        const timeout = self.probeTimeoutMs();
+        const timeout = self.probeMs();
         var expired = false;
         for (self.queue[0..self.sentLen]) |q| {
             if (nowMs >= q.tsMs + timeout) {
@@ -127,7 +127,7 @@ pub const PathValidator = struct {
 
         self.round += 1;
         if (self.round > MAX_ROUNDS or
-            nowMs >= self.startedTsMs +| self.totalTimeoutMs())
+            nowMs >= self.startedTsMs +| self.totalMs())
         {
             self.state = .failed;
             self.len = 0;
@@ -144,7 +144,7 @@ pub const PathValidator = struct {
     pub fn onTimeoutSecure(self: *PathValidator, nowMs: u64, io: std.Io) error{EntropyUnavailable}!?bool {
         if (self.state != .validating or self.sentLen == 0) return null;
 
-        const timeout = self.probeTimeoutMs();
+        const timeout = self.probeMs();
         var expired = false;
         for (self.queue[0..self.sentLen]) |challenge| {
             if (nowMs >= challenge.tsMs + timeout) {
@@ -156,7 +156,7 @@ pub const PathValidator = struct {
 
         self.round += 1;
         if (self.round > MAX_ROUNDS or
-            nowMs >= self.startedTsMs +| self.totalTimeoutMs())
+            nowMs >= self.startedTsMs +| self.totalMs())
         {
             self.state = .failed;
             self.len = 0;
@@ -171,12 +171,12 @@ pub const PathValidator = struct {
         return false;
     }
 
-    fn probeTimeoutMs(self: *const PathValidator) u64 {
+    fn probeMs(self: *const PathValidator) u64 {
         return 3 * self.ptoBaseMs;
     }
 
-    pub fn totalTimeoutMs(self: *const PathValidator) u64 {
-        return 3 * self.probeTimeoutMs();
+    pub fn totalMs(self: *const PathValidator) u64 {
+        return 3 * self.probeMs();
     }
 
     pub fn isValidated(self: *const PathValidator) bool {

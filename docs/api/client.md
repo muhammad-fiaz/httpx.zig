@@ -77,10 +77,10 @@ var client = httpx.Client.init(allocator, io, .{
     .followRedirects = true,
     .maxRedirects = 5,
     .maxRetries = 3,
-    .retryDelayMs = 500,
+    .retryMs = 500,
     .retryStatusCodes = &.{ 502, 503, 504 },
     .httpVersion = .http2,
-    .pool = .{ .maxConnections = 64, .maxPerHost = 16 },
+    .pool = .{ .maxConns = 64, .maxPerHost = 16 },
     .proxy = null,
 });
 defer client.deinit();
@@ -108,7 +108,7 @@ const apiKey = envStore.get("MY_API_KEY");
 | `followRedirects` | `bool` | `true` | Whether to automatically follow redirects. |
 | `maxRedirects` | `u8` | `10` | Maximum redirects to follow per request. |
 | `maxRetries` | `u32` | `0` | Retry attempts for failed requests (`0` = disabled). |
-| `retryDelayMs` | `u64` | `1000` | Base delay between retries in milliseconds. |
+| `retryMs` | `u64` | `1000` | Base delay between retries in milliseconds. |
 | `retryStatusCodes` | `[]const u16` | `&.{ 502, 503, 504 }` | Status codes that trigger a retry. |
 | `retryUnsafeMethods` | `bool` | `false` | Also retry POST, PATCH, and CONNECT; leave false unless the server deduplicates. |
 | `earlyData` | `EarlyDataOptions` | `{}` | Default 0-RTT early-data settings. |
@@ -118,7 +118,7 @@ const apiKey = envStore.get("MY_API_KEY");
 | `http2` | `bool` | `false` | Fast toggle to use HTTP/2 as default protocol. |
 | `http3` | `bool` | `false` | Fast toggle to use HTTP/3 as default protocol. |
 | `protocols` | `Protocols` | `{}` | Protocol engine tuning. `protocols.http3.quic` exposes QUIC idle timeout, flow-control windows, stream limits, UDP payload, version, Retry, and role. |
-| `pool` | `PoolConfig` | `{}` | Connection pool limits (`maxConnections`, `maxPerHost`, `idleTimeoutMs`, `maxParkedMs`). |
+| `pool` | `PoolConfig` | `{}` | Connection pool limits (`maxConns`, `maxPerHost`, `idleMs`, `maxParkedMs`). |
 | `dnsCache` | `DnsCacheOptions` | `{}` | DNS cache settings (`enable`, `ttlMs`, `negativeTtlMs`, `maxEntries`). |
 | `tls` | `?TlsOptions` | `null` | Default TLS overrides for `https://`; null uses system trust verification. |
 | `proxy` | `?[]const u8` | `null` | Default proxy URL (`http://`, `socks5://`, `socks5h://`, `socks4://`, `socks4a://`). |

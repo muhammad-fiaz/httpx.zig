@@ -18,8 +18,8 @@ const LimitsSchema = z.objectOf(.{
     .maxHeaders = z.withDefault(z.positiveInt(usize, .{}), 128),
     .maxNameLen = z.withDefault(z.positiveInt(usize, .{}), 256),
     .maxValueLen = z.withDefault(z.positiveInt(usize, .{}), 8192),
-    .maxHeaderBytes = z.withDefault(z.positiveInt(usize, .{}), 32 * 1024),
-    .maxBodyBytes = z.withDefault(z.nonNegativeInt(usize, .{}), 64 * 1024 * 1024),
+    .maxHeader = z.withDefault(z.positiveInt(usize, .{}), 32 * 1024),
+    .maxBody = z.withDefault(z.nonNegativeInt(usize, .{}), 64 * 1024 * 1024),
 }, .{});
 pub const Limits = LimitsSchema.Value;
 

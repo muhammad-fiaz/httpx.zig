@@ -53,8 +53,12 @@ zig build run-http3-client -Dtarget=aarch64-macos
 - [HTTP/3 Advanced](/examples/http3-advanced): HTTP/3 production features (QPACK stream instructions, QUIC stream cancellation, transport parameters).
 - [TCP Local](/examples/tcp-local): Local TCP listener/client round trip.
 - [UDP Local](/examples/udp-local): Local UDP transport demo.
-- [WebSocket Example](/examples/websocket-example): Read upgrade headers, handshake keys, and process frame inputs.
-- [WebSocket Server](/examples/websocket-server): WebSocket handshake response plus frame encoding/decoding primitives.
+- [WebSocket Example](/examples/websocket-example): Low-level RFC 6455 handshake and frame primitives.
+- [WebSocket Server](/examples/websocket-server): Full-duplex echo over a real HTTP connection takeover.
+- [WebSocket Client](/examples/websocket-client): `ws://` client with authentication, echo, and close handshake.
+- [Custom Signals](/examples/custom-signals): Per-server signal masks, application hooks, and multi-server graceful shutdown.
+- [Manual Signals](/examples/manual-signals): Application-owned signal subscription that drives server shutdown directly.
+- [Server Signals](/examples/server-signals): Automatic Ctrl+C / SIGTERM handling with a bounded drain deadline.
 - [Multipart Form Data](/examples/multipart-example): Build and parse multipart payloads with text fields and file uploads.
 - [Session Pattern](/examples/session-example): Cookie-backed sessions without a built-in server-side store.
 - [Metrics and Observability](/examples/metrics-example): Aggregate total requests, status codes, latency times, and success rates.

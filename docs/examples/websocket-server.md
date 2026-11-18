@@ -1,12 +1,13 @@
 # WebSocket Server Example
 
-Demonstrates serving an interactive browser WebSocket client and handling WebSocket upgrade requests with `httpx.websocket.computeAccept` and frame codecs.
+Serves a browser page and a real RFC 6455 endpoint. The route calls
+`httpx.websocket.accept`, and the HTTP worker hands the connection to the
+session after the handler returns.
 
 ## Example
 
 ```zig
 //! WebSocket Server and Browser Client Example.
-//! Demonstrates serving an interactive browser WebSocket client and handling WebSocket requests.
 //! Run with: `zig build run-websocket-server`
 
 const std = @import("std");
@@ -21,7 +22,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .limits = .{ .maxConnections = 5 },
+        .limits = .{ .maxConns = 5 },
     });
     defer server.deinit();
 
@@ -56,45 +57,32 @@ fn indexHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.html(
         \\<!DOCTYPE html>
         \\<html lang="en">
-        \\<head>
-        \\  <meta charset="UTF-8">
-        \\  <title>httpx.zig WebSocket Demo</title>
-        \\  <style>
-        \\    body { font-family: 'Segoe UI', sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; }
-        \\    .box { max-width: 600px; margin: 0 auto; background: #1e293b; padding: 2rem; border-radius: 12px; border: 1px solid #334155; }
-        \\    h1 { color: #38bdf8; margin-top: 0; }
-        \\    .status { padding: 0.5rem 1rem; border-radius: 6px; background: #0369a1; color: white; display: inline-block; margin-bottom: 1rem; }
-        \\    pre { background: #020617; padding: 1rem; border-radius: 6px; color: #a5f3fc; }
-        \\  </style>
-        \\</head>
+        \\<head><meta charset="UTF-8"><title>httpx.zig WebSocket Demo</title></head>
         \\<body>
-        \\  <div class="box">
-        \\    <h1>httpx.zig WebSocket Endpoint</h1>
-        \\    <div class="status">WebSocket Ready (RFC 6455)</div>
-        \\    <p>This endpoint supports RFC 6455 upgrade handshakes, frame encoding, and framing.</p>
-        \\    <pre>Endpoint URL: ws://127.0.0.1:8080/ws</pre>
-        \\  </div>
+        \\  <h1>httpx.zig WebSocket Endpoint</h1>
+        \\  <p>Endpoint URL: ws://127.0.0.1:8080/ws</p>
         \\</body>
         \\</html>
     );
 }
 
 fn wsHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    // If request contains Sec-WebSocket-Key, compute Sec-WebSocket-Accept
-    if (ctx.header("sec-websocket-key")) |key| {
-        var acceptBuf: [28]u8 = undefined;
-        httpx.websocket.computeAccept(key, &acceptBuf);
-        return .{
-            .status = 101,
-            .headers = try ctx.allocator.dupe(httpx.router.Header, &[_]httpx.router.Header{
-                .{ .name = "Upgrade", .value = "websocket" },
-                .{ .name = "Connection", .value = "Upgrade" },
-                .{ .name = "Sec-WebSocket-Accept", .value = try ctx.allocator.dupe(u8, &acceptBuf) },
-            }),
-            .body = "",
-        };
+    // The HTTP worker hands the connection to the session after this returns.
+    try httpx.websocket.accept(ctx, .{
+        .callbacks = .{ .onMessage = echo },
+    });
+    return .{};
+}
+
+fn echo(
+    session: *httpx.websocket.Session,
+    message: *httpx.websocket.Message,
+    _: ?*anyopaque,
+) anyerror!void {
+    switch (message.kind) {
+        .text => try session.sendText(message.data),
+        .binary => try session.sendBinary(message.data),
     }
-    return ctx.html("<h1>WebSocket Endpoint</h1><p>Connect with a WebSocket client.</p>");
 }
 ```
 
@@ -106,10 +94,28 @@ GET / -> status=200, len=812
 WebSocket server verification completed successfully.
 ```
 
-The ephemeral loopback port varies per run; response body length varies with the served HTML. Loopback only, no external prerequisites. Frame opcodes live on `httpx.websocket.Frame.Opcode` (`.text`, `.binary`, `.close`, `.ping`, `.pong`); `applyMask` masks payloads in place.
+The ephemeral loopback port varies per run. Loopback only, no external
+prerequisites.
+
+## Verify the upgrade
+
+```bash
+# Any RFC 6455 client works; the bundled client covers ws:// and wss://.
+zig build run-websocket-client
+```
+
+The upgrade reuses the accepted TCP connection. Buffered bytes after the
+request head are preserved, the HTTP writer is skipped, and exactly one
+component owns the final close.
 
 ## Run
 
-```
+```bash
 zig build run-websocket-server
 ```
+
+## Related
+
+* [Guide: WebSockets](/guide/websockets)
+* [API: WebSocket](/api/websocket)
+* [Example: WebSocket Client](/examples/websocket-client)

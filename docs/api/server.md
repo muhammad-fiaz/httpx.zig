@@ -48,7 +48,7 @@ else
 var env_server = try httpx.Server.init(allocator, io, .{
     .host = httpx.env.get("HOST") orelse "0.0.0.0",
     .port = port,
-    .limits = .{ .workerCount = httpx.env.getInt(u16, "HTTPX_WORKERS") orelse 0 },
+    .limits = .{ .workers = httpx.env.getInt(u16, "HTTPX_WORKERS") orelse 0 },
 });
 defer env_server.deinit();
 ```
@@ -62,10 +62,10 @@ defer env_server.deinit();
 | `portStrategy` | `PortStrategy` | `.incremental` | Startup behavior when the port is occupied (`.incremental`, `.strict`, `.exit`). |
 | `maxPortAttempts` | `u16` | `50` | Port candidates to try when `portStrategy = .incremental`. |
 | `maxBody` | `usize` | `8MB` | Largest accepted request body. |
-| `limits.maxConnections` | `usize` | `0` | Total connections successfully queued before `run()` stops accepting (`0` = unlimited). |
-| `limits.maxConcurrentConnections` | `usize` | `128` | Bound across connections being processed or queued. New connections above the limit are closed. Must be greater than zero. |
-| `limits.maxQueuedConnectionTasks` | `usize` | `128` | Bounded worker queue capacity. Newly accepted sockets are closed when the queue is full. Must be greater than zero. |
-| `limits.workerCount` | `u16` | `0` | Fixed worker count; zero selects up to 16 CPUs, capped by `limits.maxConcurrentConnections`. |
+| `limits.maxConns` | `usize` | `0` | Total connections successfully queued before `run()` stops accepting (`0` = unlimited). |
+| `limits.maxActive` | `usize` | `128` | Bound across connections being processed or queued. New connections above the limit are closed. Must be greater than zero. |
+| `limits.maxQueued` | `usize` | `128` | Bounded worker queue capacity. Newly accepted sockets are closed when the queue is full. Must be greater than zero. |
+| `limits.workers` | `u16` | `0` | Fixed worker count; zero selects up to 16 CPUs, capped by `limits.maxActive`. |
 | `timeouts.initialRequest` | `u32` | `5000` | Maximum time from accept to the first request bytes and protocol sniff. Zero disables the deadline. |
 | `timeouts.headerRead` | `u32` | `10000` | Absolute time to finish request headers after the first byte. Zero disables the deadline. |
 | `timeouts.requestBody` | `u32` | `30000` | Absolute time to receive a complete body. Zero disables the deadline. |
@@ -85,7 +85,7 @@ defer env_server.deinit();
 | `protocols.http3` | `bool` | `false` | HTTP/3 server runtime path. |
 | `http3Options.retry` | `bool` | `false` | Require a Retry token before accepting the QUIC Initial, validating the peer address and limiting amplification. |
 | `http3Options.retryKey` | `?[32]u8` | `null` | HMAC key for Retry tokens; a fresh random key per connection is used when null. |
-| `http3Options.maxIdleTimeoutMs` | `u64` | `30000` | QUIC idle timeout; effective value is the minimum of this and the peer's advertised timeout. Zero disables enforcement. |
+| `http3Options.maxIdleMs` | `u64` | `30000` | QUIC idle timeout; effective value is the minimum of this and the peer's advertised timeout. Zero disables enforcement. |
 | `http3Options.initialMaxData` | `u64` | `1048576` | Connection-level QUIC receive window. |
 | `http3Options.initialMaxStreamDataBidiLocal` | `u64` | `65535` | Receive window for locally initiated bidirectional streams. |
 | `http3Options.initialMaxStreamDataBidiRemote` | `u64` | `65535` | Receive window for peer-initiated bidirectional streams. |
@@ -129,7 +129,7 @@ Server configuration remains pure explicit Zig options via `.{}`. If an applicat
 var server = try httpx.Server.init(allocator, io, .{
     .host = httpx.env.get("HOST") orelse "0.0.0.0",
     .port = httpx.env.getInt(u16, "PORT") orelse 8080,
-    .limits = .{ .workerCount = httpx.env.getInt(u16, "WORKERS") orelse 0 },
+    .limits = .{ .workers = httpx.env.getInt(u16, "WORKERS") orelse 0 },
 });
 defer server.deinit();
 
@@ -150,10 +150,10 @@ Application routes, middleware composition, handler logic, and internal buffers 
 
 The accept loop submits connections to a fixed worker pool. The server tracks
 active and queued connections together and admits no more than
-`limits.maxConcurrentConnections`; the worker queue independently holds at most
-`limits.maxQueuedConnectionTasks`. A full queue or connection limit closes the newly
+`limits.maxActive`; the worker queue independently holds at most
+`limits.maxQueued`. A full queue or connection limit closes the newly
 accepted socket, so the effective queued capacity is bounded by both settings.
-`limits.maxConnections` is a separate lifetime limit and counts successfully queued
+`limits.maxConns` is a separate lifetime limit and counts successfully queued
 connections.
 
 The timeout fields are absolute deadlines for each I/O phase, not inactivity

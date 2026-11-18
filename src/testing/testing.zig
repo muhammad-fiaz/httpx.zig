@@ -18,7 +18,6 @@
 const response = @import("response.zig");
 
 pub const Server = @import("server.zig").Server;
-pub const Config = @import("server.zig").Config;
 pub const RouteOptions = @import("server.zig").RouteOptions;
 pub const CaptureConfig = @import("server.zig").CaptureConfig;
 pub const CapturedRequest = @import("server.zig").CapturedRequest;

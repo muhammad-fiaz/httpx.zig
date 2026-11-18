@@ -142,7 +142,7 @@ const ConfigSchema = z.objectOf(.{
     .timeoutMs = z.optional(z.integer(u64, .{})),
     .maxResponseSize = z.optional(z.integer(usize, .{})),
     .maxRetries = z.withDefault(z.integer(u32, .{}), 0),
-    .retryDelayMs = z.withDefault(z.integer(u64, .{}), 1000),
+    .retryMs = z.withDefault(z.integer(u64, .{}), 1000),
     .retryStatusCodes = z.withDefault(z.array(z.integer(u16, .{}), .{}), &.{ 502, 503, 504 }),
     .retryUnsafeMethods = z.withDefault(z.boolean(.{}), false),
     .proxy = z.optional(z.string(.{ .min = 1 })),
@@ -1064,7 +1064,7 @@ pub const Client = struct {
         while (attempt < maxAttempts) : (attempt += 1) {
             var result = self.doRequestInner(false, method, urlOverride, opts) catch |err| {
                 if (!canReplay or attempt + 1 >= maxAttempts) return err;
-                clock.sleepMillis(self.io, self.config.retryDelayMs * (attempt + 1));
+                clock.sleepMillis(self.io, self.config.retryMs * (attempt + 1));
                 continue;
             };
             if (canReplay and self.config.maxRetries > 0 and attempt + 1 < maxAttempts) {
@@ -1077,7 +1077,7 @@ pub const Client = struct {
                 }
                 if (shouldRetry) {
                     result.deinit();
-                    clock.sleepMillis(self.io, self.config.retryDelayMs * (attempt + 1));
+                    clock.sleepMillis(self.io, self.config.retryMs * (attempt + 1));
                     continue;
                 }
             }
@@ -1757,7 +1757,7 @@ test "client http3 quic options propagate to a real quic connection" {
     const io = std.Io.Threaded.global_single_threaded.io();
     var client = Client.init(a, io, .{
         .protocols = .{ .http3 = .{ .quic = .{
-            .maxIdleTimeoutMs = 1_234,
+            .maxIdleMs = 1_234,
             .initialMaxData = 4096,
             .initialMaxStreamsBidi = 7,
             .maxUdpPayload = 1400,
@@ -1765,7 +1765,7 @@ test "client http3 quic options propagate to a real quic connection" {
     });
     defer client.deinit();
 
-    try std.testing.expectEqual(@as(u64, 1_234), client.config.protocols.http3.quic.maxIdleTimeoutMs);
+    try std.testing.expectEqual(@as(u64, 1_234), client.config.protocols.http3.quic.maxIdleMs);
 
     const conn = try quicModule.Connection.init(a, io, client.config.protocols.http3.quic);
     defer conn.deinit();
@@ -2598,7 +2598,7 @@ test "client resumes h2-tls across fresh handshakes via session cache" {
 
     // Pooling disabled so each get performs a fresh handshake; the
     // second must abbreviate via the session cache.
-    var client = Client.init(a, ctx.io, .{ .pool = .{ .maxConnections = 0 } });
+    var client = Client.init(a, ctx.io, .{ .pool = .{ .maxConns = 0 } });
     errdefer client.deinit();
 
     var urlBuf: [64]u8 = undefined;
@@ -3223,7 +3223,7 @@ test "client get over http3 with 0-rtt early data resumes session" {
 
     // Pooling disabled so each get performs a fresh handshake; the
     // TLS layer verifies 0-RTT tickets across independent sessions.
-    var client = Client.init(a, ctx.io, .{ .pool = .{ .maxConnections = 0 } });
+    var client = Client.init(a, ctx.io, .{ .pool = .{ .maxConns = 0 } });
     errdefer client.deinit();
 
     var urlBuf: [64]u8 = undefined;
@@ -3783,4 +3783,9 @@ test "client request option names are validated at compile time" {
     try std.testing.expect(@hasField(RequestOptions, "cancel"));
     try std.testing.expect(!@hasField(RequestOptions, "timeOutMs"));
     try std.testing.expect(!@hasField(RequestOptions, "cancelFlag"));
+}
+
+/// Flat module entry point: `httpx.Client.init(allocator, io, .{})`.
+pub fn init(allocator: Allocator, io: std.Io, config: Config) Client {
+    return Client.init(allocator, io, config);
 }

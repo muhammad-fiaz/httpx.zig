@@ -40,7 +40,7 @@ pub const ParamId = enum(u64) {
 
 /// Numeric parameter set with RFC defaults for absent entries.
 const ParamsSchema = z.objectOf(.{
-    .maxIdleTimeoutMs = z.withDefault(z.integer(u64, .{}), 0), // 0 = disabled
+    .maxIdleMs = z.withDefault(z.integer(u64, .{}), 0), // 0 = disabled
     .maxUdpPayloadSize = z.withDefault(z.integer(u64, .{ .min = 1200, .max = 65527 }), 65527),
     .initialMaxData = z.withDefault(z.integer(u64, .{}), 0),
     .initialMaxStreamDataBidiLocal = z.withDefault(z.integer(u64, .{}), 0),
@@ -49,7 +49,7 @@ const ParamsSchema = z.objectOf(.{
     .initialMaxStreamsBidi = z.withDefault(z.integer(u64, .{}), 0),
     .initialMaxStreamsUni = z.withDefault(z.integer(u64, .{}), 0),
     .ackDelayExponent = z.withDefault(z.integer(u64, .{ .max = 20 }), 3),
-    .maxAckDelayMs = z.withDefault(z.integer(u64, .{}), 25),
+    .maxAckMs = z.withDefault(z.integer(u64, .{}), 25),
     .disableActiveMigration = z.withDefault(z.boolean(.{}), false),
     .activeConnectionIdLimit = z.withDefault(z.integer(u64, .{ .min = 2 }), 2),
 }, .{});
@@ -84,11 +84,11 @@ fn putVarintParam(out: *std.ArrayList(u8), gpa: Allocator, id: u64, v: u64) !voi
 /// connection layer since they carry raw bytes).
 pub fn encode(out: *std.ArrayList(u8), gpa: Allocator, p: Params) !void {
     if (p.maxUdpPayloadSize < 1200 or p.maxUdpPayloadSize > 65527) return Error.InvalidParameter;
-    if (p.ackDelayExponent > 20 or p.maxAckDelayMs >= (1 << 14)) return Error.InvalidParameter;
+    if (p.ackDelayExponent > 20 or p.maxAckMs >= (1 << 14)) return Error.InvalidParameter;
     if (p.activeConnectionIdLimit < 2) return Error.InvalidParameter;
     // Only emit non-default values where the spec allows omission.
-    if (p.maxIdleTimeoutMs != 0)
-        try putVarintParam(out, gpa, @backingInt(ParamId.maxIdleTimeout), p.maxIdleTimeoutMs);
+    if (p.maxIdleMs != 0)
+        try putVarintParam(out, gpa, @backingInt(ParamId.maxIdleTimeout), p.maxIdleMs);
     try putVarintParam(out, gpa, @backingInt(ParamId.maxUdpPayloadSize), p.maxUdpPayloadSize);
     if (p.initialMaxData != 0)
         try putVarintParam(out, gpa, @backingInt(ParamId.initialMaxData), p.initialMaxData);
@@ -104,8 +104,8 @@ pub fn encode(out: *std.ArrayList(u8), gpa: Allocator, p: Params) !void {
         try putVarintParam(out, gpa, @backingInt(ParamId.initialMaxStreamsUni), p.initialMaxStreamsUni);
     if (p.ackDelayExponent != 3)
         try putVarintParam(out, gpa, @backingInt(ParamId.ackDelayExponent), p.ackDelayExponent);
-    if (p.maxAckDelayMs != 25)
-        try putVarintParam(out, gpa, @backingInt(ParamId.maxAckDelay), p.maxAckDelayMs);
+    if (p.maxAckMs != 25)
+        try putVarintParam(out, gpa, @backingInt(ParamId.maxAckDelay), p.maxAckMs);
     if (p.disableActiveMigration)
         try putParam(out, gpa, @backingInt(ParamId.disableActiveMigration), &.{});
     if (p.activeConnectionIdLimit != 2)
@@ -172,7 +172,7 @@ pub fn decode(data: []const u8) Error!Params {
 
         switch (id) {
             .disableActiveMigration => p.disableActiveMigration = true,
-            .maxIdleTimeout => p.maxIdleTimeoutMs = valueBe,
+            .maxIdleTimeout => p.maxIdleMs = valueBe,
             .maxUdpPayloadSize => {
                 if (valueBe < 1200) return Error.InvalidParameter;
                 p.maxUdpPayloadSize = valueBe;
@@ -189,7 +189,7 @@ pub fn decode(data: []const u8) Error!Params {
             },
             .maxAckDelay => {
                 if (valueBe >= 1 << 14) return Error.InvalidParameter;
-                p.maxAckDelayMs = valueBe;
+                p.maxAckMs = valueBe;
             },
             .activeConnectionIdLimit => {
                 if (valueBe < 2) return Error.InvalidParameter;
@@ -263,20 +263,20 @@ test "encode/decode roundtrip preserves values" {
     defer list.deinit(std.testing.allocator);
 
     try encode(&list, std.testing.allocator, .{
-        .maxIdleTimeoutMs = 30_000,
+        .maxIdleMs = 30_000,
         .initialMaxData = 1 << 20,
         .initialMaxStreamsBidi = 128,
         .ackDelayExponent = 5,
-        .maxAckDelayMs = 40,
+        .maxAckMs = 40,
         .activeConnectionIdLimit = 8,
     });
 
     const got = try decode(list.items);
-    try std.testing.expectEqual(@as(u64, 30_000), got.maxIdleTimeoutMs);
+    try std.testing.expectEqual(@as(u64, 30_000), got.maxIdleMs);
     try std.testing.expectEqual(@as(u64, 1 << 20), got.initialMaxData);
     try std.testing.expectEqual(@as(u64, 128), got.initialMaxStreamsBidi);
     try std.testing.expectEqual(@as(u64, 5), got.ackDelayExponent);
-    try std.testing.expectEqual(@as(u64, 40), got.maxAckDelayMs);
+    try std.testing.expectEqual(@as(u64, 40), got.maxAckMs);
     try std.testing.expectEqual(@as(u64, 8), got.activeConnectionIdLimit);
 }
 
@@ -300,7 +300,7 @@ test "empty encoding yields all defaults" {
     const got = try decode(list.items);
     try std.testing.expectEqual(@as(u64, 65527), got.maxUdpPayloadSize);
     try std.testing.expectEqual(@as(u64, 3), got.ackDelayExponent);
-    try std.testing.expectEqual(@as(u64, 25), got.maxAckDelayMs);
+    try std.testing.expectEqual(@as(u64, 25), got.maxAckMs);
     try std.testing.expectEqual(@as(u64, 2), got.activeConnectionIdLimit);
 }
 
@@ -386,7 +386,7 @@ test "numeric values use the canonical varint encoding" {
     var list = std.ArrayList(u8).empty;
     defer list.deinit(std.testing.allocator);
     try encode(&list, std.testing.allocator, .{
-        .maxIdleTimeoutMs = 30_000,
+        .maxIdleMs = 30_000,
         .maxUdpPayloadSize = 1472,
         .initialMaxData = 1 << 20,
         .initialMaxStreamsBidi = 128,
@@ -403,7 +403,7 @@ test "numeric values use the canonical varint encoding" {
 
     // The values survive a round trip.
     const got = try decode(list.items);
-    try std.testing.expectEqual(@as(u64, 30_000), got.maxIdleTimeoutMs);
+    try std.testing.expectEqual(@as(u64, 30_000), got.maxIdleMs);
     try std.testing.expectEqual(@as(u64, 1472), got.maxUdpPayloadSize);
     try std.testing.expectEqual(@as(u64, 1 << 20), got.initialMaxData);
     try std.testing.expectEqual(@as(u64, 128), got.initialMaxStreamsBidi);

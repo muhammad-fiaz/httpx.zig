@@ -255,7 +255,7 @@ pub const Limits = struct {
     maxMemoryBytes: usize = 32 * 1024 * 1024, // 32 MB
     maxFields: usize = 1_000,
     maxFiles: usize = 100,
-    maxHeaderBytes: usize = 64 * 1024,
+    maxHeader: usize = 64 * 1024,
     maxBoundaryBytes: usize = 128,
 };
 ```

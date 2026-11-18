@@ -49,7 +49,7 @@ pub fn main() !void {
     var watcher = try httpx.Watcher.init(allocator, io, .{
         .dirPath = ".",
         .debounceMs = 50,
-        .pollIntervalMs = 50,
+        .pollMs = 50,
     });
     defer watcher.deinit();
     try watcher.start();
@@ -58,7 +58,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .limits = .{ .maxConnections = 4 },
+        .limits = .{ .maxConns = 4 },
     });
     defer server.deinit();
 

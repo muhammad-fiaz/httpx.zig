@@ -38,6 +38,25 @@ pub const HandlerFn = *const fn (*Context) anyerror!Response;
 pub const NextFn = *const fn (*Context) anyerror!Response;
 pub const MiddlewareFn = *const fn (*Context, NextFn) anyerror!Response;
 
+/// Byte-stream transport handed to a connection-takeover handler. See
+/// `common/stream.zig`: the stream borrows the connection and never closes it.
+pub const UpgradeTransport = @import("../../common/stream.zig").Stream;
+
+/// Runs after the route handler returns and the HTTP layer has decided not to
+/// write a normal response. `buffered` holds bytes already read past the
+/// request head/body; the handler must consume them before reading further.
+/// The handler runs synchronously on the connection's worker. When it
+/// returns, the HTTP layer closes the connection exactly once.
+pub const UpgradeHandler = *const fn (*Context, UpgradeTransport, buffered: []const u8) anyerror!void;
+
+/// Explicit connection takeover request. Setting this on a context transfers
+/// the connection to `handler`; the HTTP layer skips response serialization
+/// and normal keep-alive handling.
+pub const Upgrade = struct {
+    handler: UpgradeHandler,
+    userData: ?*anyopaque = null,
+};
+
 /// Typed REST result carrier for `httpx.router.Result(T)` handlers, defined
 /// here rather than re-exported from `rest` so the router namespace stays
 /// the single place for handler signature types.
@@ -55,6 +74,10 @@ pub const Context = struct {
     /// header arrays) MUST come from here; the transport resets it after the
     /// response is written. Slices placed in Response are borrowed.
     allocator: Allocator,
+    /// Long-lived allocator owned by the transport (the server's allocator).
+    /// Handlers that keep state past the request arena's lifetime, such as a
+    /// connection-takeover session, allocate here. Null means `allocator`.
+    baseAllocator: ?Allocator = null,
     /// Raw request headers as provided by the transport (may be empty).
     headers: []const Header = &.{},
     params: [16]struct { name: []const u8, value: []const u8 } = undefined,
@@ -87,6 +110,16 @@ pub const Context = struct {
     /// Proxy IPs/CIDRs whose entries are skipped when resolving the client
     /// from an X-Forwarded-For chain.
     trustedProxies: []const []const u8 = &.{},
+    /// Set by a handler that takes over the connection (WebSocket upgrade,
+    /// custom protocol). The transport skips normal response writing.
+    upgrade: ?Upgrade = null,
+
+    /// Requests connection takeover. The route handler should return
+    /// immediately afterwards; its `Response` is ignored. `handler` runs after
+    /// the handler returns, with any already-buffered bytes preserved.
+    pub fn takeOver(self: *Context, upgradeValue: Upgrade) void {
+        self.upgrade = upgradeValue;
+    }
 
     /// Invokes the next middleware in the pipeline, or the route handler if at the end.
     /// Order is deterministic: router middleware → route middleware → handler.

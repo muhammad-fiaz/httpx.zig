@@ -165,7 +165,7 @@ pub const Handshake = struct {
     fn buildLocalTransportParams(a: Allocator, conn: *Connection) ![]u8 {
         const cfg = conn.cfg;
         const p = paramsMod.Params{
-            .maxIdleTimeoutMs = cfg.maxIdleTimeoutMs,
+            .maxIdleMs = cfg.maxIdleMs,
             .maxUdpPayloadSize = @intCast(cfg.maxUdpPayload),
             .disableActiveMigration = cfg.disableActiveMigration,
             .initialMaxData = cfg.initialMaxData,
@@ -251,7 +251,7 @@ pub const Handshake = struct {
         conn.sendWindowUni = p.initialMaxStreamDataUni;
         conn.maxStreamsBidiRemote = p.initialMaxStreamsBidi;
         conn.maxStreamsUniRemote = p.initialMaxStreamsUni;
-        conn.recovery.cfg.maxAckDelayMs = p.maxAckDelayMs;
+        conn.recovery.cfg.maxAckMs = p.maxAckMs;
         conn.peerParams = p;
     }
 
@@ -975,7 +975,7 @@ test "peer transport parameters apply to connection windows" {
     p.initialMaxStreamDataUni = 256 << 10;
     p.initialMaxStreamsBidi = 64;
     p.initialMaxStreamsUni = 8;
-    p.maxAckDelayMs = 42;
+    p.maxAckMs = 42;
 
     const fakeIscid = [_]u8{ 0xAA, 0xBB, 0xCC, 0xDD, 0x01, 0x02, 0x03, 0x04 };
     const wrongCid = (@as([8]u8, @splat(0x11)));
@@ -995,7 +995,7 @@ test "peer transport parameters apply to connection windows" {
     try std.testing.expectEqual(@as(u64, 256 << 10), conn.sendWindowUni);
     try std.testing.expectEqual(@as(u64, 64), conn.maxStreamsBidiRemote);
     try std.testing.expectEqual(@as(u64, 8), conn.maxStreamsUniRemote);
-    try std.testing.expectEqual(@as(u64, 42), conn.recovery.cfg.maxAckDelayMs);
+    try std.testing.expectEqual(@as(u64, 42), conn.recovery.cfg.maxAckMs);
     try std.testing.expect(conn.peerParams != null);
 
     // Our locally initiated stream uses the peer's bidi-remote allowance,

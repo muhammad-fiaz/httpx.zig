@@ -144,7 +144,7 @@ pub const Session = struct {
 
     /// END_STREAM flag carried by an in-progress HEADERS/CONTINUATION chain.
     continuationEndStream: bool = false,
-    maxHeaderBlockBytes: usize = DEFAULT_MAX_HEADER_BLOCK_BYTES,
+    maxHeaderBlock: usize = DEFAULT_MAX_HEADER_BLOCK_BYTES,
     /// Last stream ID accepted by the peer's most recent GOAWAY.
     goawayLastStream: ?u31 = null,
 
@@ -481,7 +481,7 @@ pub const Session = struct {
     }
 
     fn handleHeadersStart(self: *Session, sid: u31, block: []const u8, endHeaders: bool, endStream: bool, selfDependency: bool) Error!void {
-        if (block.len > self.maxHeaderBlockBytes) return self.connError(.enhanceYourCalm);
+        if (block.len > self.maxHeaderBlock) return self.connError(.enhanceYourCalm);
 
         var st: *Stream = undefined;
         // A discarded block is still decoded: the HPACK context is
@@ -574,7 +574,7 @@ pub const Session = struct {
         const st = self.continuationStream orelse return self.connError(.protocolError);
         if (st.id != sid) return self.connError(.protocolError);
         const accumulated = st.headerBlock.?.items.len;
-        if (block.len > self.maxHeaderBlockBytes -| accumulated) return self.connError(.enhanceYourCalm);
+        if (block.len > self.maxHeaderBlock -| accumulated) return self.connError(.enhanceYourCalm);
         st.headerBlock.?.appendSlice(self.allocator, block) catch return Error.OutOfMemory;
         if (!endHeaders) return;
 
@@ -2366,7 +2366,7 @@ test "header list validation rejects malformed method, scheme, authority and Hos
 test "continued header blocks are rejected before exceeding configured budget" {
     var session = try Session.init(std.testing.allocator, .server, .{});
     defer session.deinit();
-    session.maxHeaderBlockBytes = 5;
+    session.maxHeaderBlock = 5;
 
     try session.handleHeadersStart(1, "1234", false, false, false);
     try std.testing.expectError(Error.ProtocolViolation, session.handleContinuation(1, "56", true));

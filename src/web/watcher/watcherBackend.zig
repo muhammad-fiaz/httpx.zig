@@ -65,7 +65,7 @@ pub const StatusCallback = *const fn (status: WatcherStatus, detail: ?[]const u8
 const ConfigSchema = z.objectOf(.{
     .dirPath = z.withDefault(z.string(.{}), ""),
     .extensions = z.withDefault(z.array(z.string(.{}), .{}), &.{}),
-    .pollIntervalMs = z.withDefault(z.positiveInt(u64, .{}), 50),
+    .pollMs = z.withDefault(z.positiveInt(u64, .{}), 50),
     .debounceMs = z.withDefault(z.nonNegativeInt(i64, .{}), 50),
     .mode = z.withDefault(z.enumType(BackendMode, .{}), .auto),
     .allowFallback = z.withDefault(z.boolean(.{}), true),
@@ -98,7 +98,7 @@ const ConfigSchema = z.objectOf(.{
 pub const Config = ConfigSchema.Value;
 
 const configSchema = z.object(Config, .{
-    .pollIntervalMs = z.positiveInt(u64, .{}),
+    .pollMs = z.positiveInt(u64, .{}),
     .maxFiles = z.positiveInt(usize, .{}),
     .maxDepth = z.positiveInt(usize, .{}),
 }, .{});
@@ -850,7 +850,7 @@ pub const Watcher = struct {
             while (self.running.load(.acquire)) {
                 _ = self.scan() catch false;
                 self.dispatchCallbacks();
-                clock.sleepMillis(self.io, self.config.pollIntervalMs);
+                clock.sleepMillis(self.io, self.config.pollMs);
             }
         }
         self.dispatchCallbacks();
@@ -869,7 +869,7 @@ pub const Watcher = struct {
         }
         if (builtin.os.tag == .windows) {
             const nb = &(self.native orelse return false);
-            const timeout: i32 = @intCast(self.config.pollIntervalMs);
+            const timeout: i32 = @intCast(self.config.pollMs);
             const evs = nb.poll(self.allocator, timeout) catch return false;
             defer {
                 for (evs) |*e| {
@@ -885,7 +885,7 @@ pub const Watcher = struct {
             }
         } else if (builtin.os.tag == .linux) {
             const nb = &(self.native orelse return false);
-            const timeout: i32 = @intCast(self.config.pollIntervalMs);
+            const timeout: i32 = @intCast(self.config.pollMs);
             const evs = nb.poll(self.allocator, timeout) catch return false;
             defer {
                 for (evs) |*e| {
@@ -901,7 +901,7 @@ pub const Watcher = struct {
             }
         } else if (builtin.os.tag == .macos) {
             const nb = &(self.native orelse return false);
-            const timeout: i32 = @intCast(self.config.pollIntervalMs);
+            const timeout: i32 = @intCast(self.config.pollMs);
             const evs = nb.poll(self.allocator, timeout) catch return false;
             defer {
                 for (evs) |*e| {

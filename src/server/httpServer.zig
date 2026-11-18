@@ -27,6 +27,7 @@ fn typedSchema(comptime T: type) type {
 }
 
 const tcp = @import("../sockets/tcp.zig");
+const signalsMod = @import("../signals/signals.zig");
 const compression = @import("../compression/codec.zig");
 const parserMod = @import("../protocols/http1/parser.zig");
 const semanticsMod = @import("../protocols/http1/semantics.zig");
@@ -64,6 +65,7 @@ const http3Stream = @import("../protocols/http3/stream.zig");
 const http3Qpack = @import("../protocols/http3/qpack.zig");
 const versionInfo = @import("../common/version.zig");
 const statusMod = @import("../common/status.zig");
+const commonStream = @import("../common/stream.zig");
 
 pub const maxHeadBytes = 32 * 1024;
 
@@ -148,6 +150,54 @@ pub const StreamConn = union(enum) {
             .tls => |t| t.socket.peerAddress(),
         };
     }
+
+    /// Type-erased view for connection-takeover handlers. The returned stream
+    /// borrows this `StreamConn` and is valid only while it does.
+    pub fn asStream(self: *StreamConn) commonStream.Stream {
+        return .{ .context = self, .vtable = &streamVtable };
+    }
+
+    const streamVtable: commonStream.Stream.VTable = .{
+        .read = streamRead,
+        .writeAll = streamWriteAll,
+        .setReadTimeoutMs = streamSetReadTimeout,
+        .setWriteTimeoutMs = streamSetWriteTimeout,
+        .peerAddress = streamPeerAddress,
+        .isTls = streamIsTls,
+    };
+
+    fn streamRead(context: *anyopaque, buf: []u8) anyerror!usize {
+        const self: *StreamConn = @ptrCast(@alignCast(context));
+        return self.read(buf);
+    }
+
+    fn streamWriteAll(context: *anyopaque, bytes: []const u8) anyerror!void {
+        const self: *StreamConn = @ptrCast(@alignCast(context));
+        return self.writeAll(bytes);
+    }
+
+    fn streamSetReadTimeout(context: *anyopaque, timeoutMs: u32) void {
+        const self: *StreamConn = @ptrCast(@alignCast(context));
+        self.setReadTimeoutMs(timeoutMs);
+    }
+
+    fn streamSetWriteTimeout(context: *anyopaque, timeoutMs: u32) void {
+        const self: *StreamConn = @ptrCast(@alignCast(context));
+        self.setWriteTimeoutMs(timeoutMs);
+    }
+
+    fn streamPeerAddress(context: *anyopaque) []const u8 {
+        const self: *StreamConn = @ptrCast(@alignCast(context));
+        return self.peerAddress();
+    }
+
+    fn streamIsTls(context: *anyopaque) bool {
+        const self: *StreamConn = @ptrCast(@alignCast(context));
+        return switch (self.*) {
+            .tls => true,
+            .plain => false,
+        };
+    }
 };
 
 const logging = @import("../common/logging.zig");
@@ -197,10 +247,10 @@ pub const PortStrategy = enum {
 
 /// Connection and worker limits.
 const ConnectionLimitsSchema = z.objectOf(.{
-    .maxConnections = z.withDefault(z.nonNegativeInt(usize, .{}), 0),
-    .maxConcurrentConnections = z.withDefault(z.positiveInt(usize, .{}), 128),
-    .maxQueuedConnectionTasks = z.withDefault(z.positiveInt(usize, .{}), 128),
-    .workerCount = z.withDefault(z.integer(u16, .{}), 0),
+    .maxConns = z.withDefault(z.nonNegativeInt(usize, .{}), 0),
+    .maxActive = z.withDefault(z.positiveInt(usize, .{}), 128),
+    .maxQueued = z.withDefault(z.positiveInt(usize, .{}), 128),
+    .workers = z.withDefault(z.integer(u16, .{}), 0),
 }, .{});
 pub const ConnectionLimits = ConnectionLimitsSchema.Value;
 
@@ -237,7 +287,7 @@ pub const LiveReload = LiveReloadSchema.Value;
 const Http3OptionsSchema = z.objectOf(.{
     .retry = z.withDefault(z.boolean(.{}), false),
     .retryKey = z.optional(typedSchema([32]u8)),
-    .maxIdleTimeoutMs = z.withDefault(z.integer(u64, .{}), 30_000),
+    .maxIdleMs = z.withDefault(z.integer(u64, .{}), 30_000),
     .initialMaxData = z.withDefault(z.integer(u64, .{}), 1 << 20),
     .initialMaxStreamDataBidiLocal = z.withDefault(z.integer(u64, .{}), 65_535),
     .initialMaxStreamDataBidiRemote = z.withDefault(z.integer(u64, .{}), 65_535),
@@ -247,6 +297,33 @@ const Http3OptionsSchema = z.objectOf(.{
     .maxUdpPayload = z.withDefault(z.integer(usize, .{ .min = 1200, .max = 65527 }), 1472),
 }, .{});
 pub const Http3Options = Http3OptionsSchema.Value;
+
+/// Application notification delivered from normal execution context, never
+/// from an asynchronous signal handler.
+pub const SignalEvent = signalsMod.Event;
+pub const SignalCallback = *const fn (event: SignalEvent, context: ?*anyopaque) void;
+
+/// Automatic Ctrl+C / SIGTERM handling.
+///
+/// `.signals = .{}` installs process-wide handling the first time any server
+/// runs and restores the previous handlers when the last server stops. Set
+/// `.enabled = false` to keep full ownership of process signals.
+const SignalsSchema = z.objectOf(.{
+    .enabled = z.withDefault(z.boolean(.{}), true),
+    .interrupt = z.withDefault(z.boolean(.{}), true),
+    .terminate = z.withDefault(z.boolean(.{}), true),
+    .close = z.withDefault(z.boolean(.{}), true),
+    .logoff = z.withDefault(z.boolean(.{}), false),
+    .shutdown = z.withDefault(z.boolean(.{}), true),
+    .drainMs = z.withDefault(z.integer(u32, .{}), 10_000),
+    .onSignal = z.withDefault(z.custom(?SignalCallback, .{ .check = struct {
+        fn accept(_: ?SignalCallback) bool {
+            return true;
+        }
+    }.accept }), null),
+    .ctx = z.withDefault(typedSchema(?*anyopaque), null),
+}, .{});
+pub const Signals = SignalsSchema.Value;
 
 /// Bind defaults that differ between production and local testing. Everything
 /// else in the configuration schema is shared, so both surfaces accept the
@@ -274,6 +351,7 @@ fn makeConfigSchema(comptime defaults: ConfigDefaults) type {
         .protocols = z.withDefault(ProtocolsSchema, .{}),
         .http3Options = z.withDefault(Http3OptionsSchema, .{}),
         .liveReload = z.withDefault(LiveReloadSchema, .{}),
+        .signals = z.withDefault(SignalsSchema, .{}),
         .templates = z.optional(templatesMod.ConfigSchema),
         .site = z.optional(siteMod.SiteConfigSchema),
         .tls = z.optional(tlsServerMod.Server.ConfigSchema),
@@ -303,44 +381,15 @@ pub fn fromTestingConfig(cfg: TestingConfig) Config {
     return out;
 }
 
-/// Global pointer to the active server for the Ctrl+C handler.
-var gActiveServer: ?*Server = null;
-
-fn installShutdownHandler(self: *Server) void {
-    gActiveServer = self;
-    const builtin = @import("builtin");
-    switch (builtin.os.tag) {
-        .windows => {
-            const handlerFn = struct {
-                fn callback(ctrlType: std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL {
-                    if (ctrlType <= 2) {
-                        if (gActiveServer) |s| s.requestShutdown();
-                        return @fromBackingInt(@intCast(1));
-                    }
-                    return @fromBackingInt(@intCast(0));
-                }
-            };
-            _ = SetConsoleCtrlHandler(&handlerFn.callback, @fromBackingInt(@intCast(1)));
-        },
-        else => {
-            const handlerFn = struct {
-                fn sigHandler(sig: std.posix.SIG) callconv(.c) void {
-                    _ = sig;
-                    if (gActiveServer) |s| s.requestShutdown();
-                }
-            };
-            var act: std.posix.Sigaction = std.mem.zeroes(std.posix.Sigaction);
-            act.handler = .{ .handler = @ptrCast(&handlerFn.sigHandler) };
-            act.flags = 0;
-            std.posix.sigaction(std.posix.SIG.INT, &act, null);
-        },
-    }
+/// Flat module entry point: `httpx.Server.init(allocator, io, .{})`.
+///
+/// Reuses the explicit allocator and `std.Io` for the whole server lifetime;
+/// omitted configuration fields keep their schema defaults.
+pub fn init(allocator: Allocator, io: std.Io, cfg: Config) !Server {
+    return Server.init(allocator, io, cfg);
 }
 
-extern "kernel32" fn SetConsoleCtrlHandler(
-    handler: *const fn (std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL,
-    add: std.os.windows.BOOL,
-) callconv(.winapi) std.os.windows.BOOL;
+pub const signals = signalsMod;
 
 /// One in-flight HTTP/3 request. Requests are keyed by QUIC stream ID so
 /// multiple request streams can be served concurrently on one connection.
@@ -536,6 +585,12 @@ pub const Server = struct {
     /// Resolved event callback — null means silent (no events generated).
     eventCallback: ?logging.ServerEventCallback = null,
     loggedStop: std.atomic.Value(bool) = .init(false),
+    /// Active process-wide signal subscription; null when disabled or stopped.
+    signalSubscription: ?signalsMod.Subscription = null,
+    signalDeliveries: std.atomic.Value(u32) = .init(0),
+    shutdownRequestedAtMs: std.atomic.Value(i64) = .init(0),
+    shutdownForced: std.atomic.Value(bool) = .init(false),
+    runActive: std.atomic.Value(bool) = .init(false),
     /// Live connections (keep-alive readers) so shutdown can wake them.
     connsMu: sync.Spinlock = .{},
     activeConns: std.ArrayList(*tcp.Socket) = .empty,
@@ -1018,6 +1073,7 @@ pub const Server = struct {
     }
 
     pub fn deinit(self: *Server) void {
+        self.uninstallSignals();
         if (self.siteHost) |*host| {
             host.deinit();
             self.siteHost = null;
@@ -1193,11 +1249,64 @@ pub const Server = struct {
         return self.listener.localPort();
     }
 
+    fn signalMask(self: *const Server) signalsMod.Mask {
+        const cfg = self.cfg.signals;
+        return .{
+            .interrupt = cfg.interrupt,
+            .terminate = cfg.terminate,
+            .close = cfg.close,
+            .logoff = cfg.logoff,
+            .shutdown = cfg.shutdown,
+        };
+    }
+
+    /// Subscribes this server to the process-wide manager. The OS backend is
+    /// installed once per process, not once per server.
+    fn installSignals(self: *Server) void {
+        if (!self.cfg.signals.enabled or self.signalSubscription != null) return;
+        if (!signalsMod.supported) {
+            self.emit(.{
+                .kind = .serverStarted,
+                .level = .warn,
+                .message = "signals unavailable on this target",
+            });
+            return;
+        }
+        self.signalSubscription = signalsMod.register(self, handleSignal, self.signalMask()) catch {
+            self.emit(.{
+                .kind = .serverStarted,
+                .level = .warn,
+                .message = "signal registration failed",
+            });
+            return;
+        };
+    }
+
+    fn uninstallSignals(self: *Server) void {
+        if (self.signalSubscription) |subscription| {
+            subscription.unregister();
+            self.signalSubscription = null;
+        }
+    }
+
+    /// Runs on the manager's notification thread, never inside the OS handler.
+    fn handleSignal(context: ?*anyopaque, event: SignalEvent) void {
+        const self: *Server = @ptrCast(@alignCast(context.?));
+        const delivered = self.signalDeliveries.fetchAdd(1, .acq_rel) + 1;
+        if (self.cfg.signals.onSignal) |hook| hook(event, self.cfg.signals.ctx);
+        // First signal: graceful. Repeated signals: expedite.
+        if (delivered >= 2) self.stop() else self.requestShutdown();
+    }
+
     /// Stops accepting and lets active requests finish. Active I/O is bounded
     /// by the configured phase deadlines; queued sockets are closed by workers
     /// without beginning new requests. Use stop() for immediate cancellation.
     /// Safe to call multiple times.
     pub fn requestShutdown(self: *Server) void {
+        if (self.shutdownRequestedAtMs.load(.acquire) == 0) {
+            self.shutdownRequestedAtMs.store(clock.monotonicMillis(self.io), .release);
+        }
+
         if (!self.loggedStop.swap(true, .acq_rel)) {
             self.emit(.{ .kind = .serverStopped, .level = .info, .message = "shutting down" });
         }
@@ -1222,6 +1331,27 @@ pub const Server = struct {
         self.connsMu.lock();
         for (self.activeConns.items) |conn| conn.interruptIo();
         self.connsMu.unlock();
+    }
+
+    /// Graceful shutdown with a bounded wait.
+    ///
+    /// Requests a shutdown, then waits until `run()` has finished or the
+    /// configured deadline expires (at which point the deadline monitor
+    /// interrupts remaining connection I/O). Returns immediately when the
+    /// server is not running. Must not be called from the thread executing
+    /// `run()`.
+    pub fn shutdown(self: *Server) void {
+        self.requestShutdown();
+        if (!self.runActive.load(.acquire)) return;
+        const timeout: i64 = @intCast(self.cfg.signals.drainMs);
+        const started = clock.monotonicMillis(self.io);
+        while (self.runActive.load(.acquire)) {
+            if (timeout > 0 and clock.monotonicMillis(self.io) - started >= timeout) {
+                self.stop();
+                return;
+            }
+            clock.sleepMillis(self.io, 5);
+        }
     }
 
     /// Canonical alias for run(). Starts the blocking request serving loop.
@@ -1271,11 +1401,20 @@ pub const Server = struct {
 
     /// Blocking accept loop. Connections are handed to a fixed-size worker
     /// pool. Active plus queued connections are bounded by
-    /// maxConcurrentConnections; overload is handled by closing the newest
+    /// maxActive; overload is handled by closing the newest
     /// accepted socket. requestShutdown stops acceptance and drains in-flight
     /// work; stop additionally closes active sockets immediately.
     /// Installs a Ctrl+C handler for graceful shutdown.
     pub fn run(self: *Server) void {
+        self.runActive.store(true, .release);
+        self.signalDeliveries.store(0, .release);
+        self.shutdownRequestedAtMs.store(0, .release);
+        self.shutdownForced.store(false, .release);
+        defer {
+            self.runActive.store(false, .release);
+            self.uninstallSignals();
+        }
+
         // Mount the file-based website last so explicit code routes win
         // ties over generated routes. Like the docs mount above.
         if (self.siteHost) |*host| {
@@ -1350,7 +1489,7 @@ pub const Server = struct {
             }
         }
 
-        installShutdownHandler(self);
+        self.installSignals();
         self.emit(.{
             .kind = .serverStarted,
             .level = .info,
@@ -1369,15 +1508,15 @@ pub const Server = struct {
                 }
             }
         }
-        var workerCount: usize = self.cfg.limits.workerCount;
-        if (workerCount == 0) {
-            workerCount = std.Thread.getCpuCount() catch 4;
-            workerCount = @min(workerCount, 16);
+        var workerTotal: usize = self.cfg.limits.workers;
+        if (workerTotal == 0) {
+            workerTotal = std.Thread.getCpuCount() catch 4;
+            workerTotal = @min(workerTotal, 16);
         }
-        workerCount = @max(1, @min(workerCount, self.cfg.limits.maxConcurrentConnections));
+        workerTotal = @max(1, @min(workerTotal, self.cfg.limits.maxActive));
         var workers = ConnectionPool.init(self.allocator, self.io, .{
-            .workers = @intCast(workerCount),
-            .queueCapacity = @intCast(@min(self.cfg.limits.maxQueuedConnectionTasks, std.math.maxInt(u32))),
+            .workers = @intCast(workerTotal),
+            .queueCapacity = @intCast(@min(self.cfg.limits.maxQueued, std.math.maxInt(u32))),
             .autoStart = false,
         }) catch return;
         defer workers.deinit();
@@ -1391,7 +1530,7 @@ pub const Server = struct {
 
         var accepted: usize = 0;
         while (!self.stopFlag.load(.acquire)) {
-            if (self.cfg.limits.maxConnections != 0 and accepted >= self.cfg.limits.maxConnections) break;
+            if (self.cfg.limits.maxConns != 0 and accepted >= self.cfg.limits.maxConns) break;
             // Yield when paused
             while (self.paused.load(.acquire) and !self.stopFlag.load(.acquire)) {
                 clock.sleepMillis(self.io, 10);
@@ -1412,7 +1551,7 @@ pub const Server = struct {
             const sock = &task.socket;
             self.connsMu.lock();
             var admitted = false;
-            if (!self.stopFlag.load(.acquire) and self.activeConns.items.len < self.cfg.limits.maxConcurrentConnections) {
+            if (!self.stopFlag.load(.acquire) and self.activeConns.items.len < self.cfg.limits.maxActive) {
                 self.activeConns.append(self.allocator, sock) catch {};
                 admitted = self.activeConns.items.len > 0 and self.activeConns.items[self.activeConns.items.len - 1] == sock;
             }
@@ -1481,6 +1620,15 @@ pub const Server = struct {
             const now = clock.monotonicMillis(server.io);
             server.connsMu.lock();
             for (server.activeConns.items) |socket| socket.closeIfIoDeadlineExpired(now);
+            // Enforce the graceful shutdown deadline: interrupt remaining
+            // connection I/O once so workers can observe EOF and finish.
+            const started = server.shutdownRequestedAtMs.load(.acquire);
+            const timeout: i64 = @intCast(server.cfg.signals.drainMs);
+            if (started != 0 and timeout > 0 and now - started >= timeout and
+                !server.shutdownForced.swap(true, .acq_rel))
+            {
+                for (server.activeConns.items) |socket| socket.interruptIo();
+            }
             server.connsMu.unlock();
             clock.sleepMillis(server.io, 5);
         }
@@ -1764,7 +1912,7 @@ pub const Server = struct {
             .role = .server,
             .retry = self.cfg.http3Options.retry,
             .retryKey = self.cfg.http3Options.retryKey,
-            .maxIdleTimeoutMs = self.cfg.http3Options.maxIdleTimeoutMs,
+            .maxIdleMs = self.cfg.http3Options.maxIdleMs,
             .initialMaxData = self.cfg.http3Options.initialMaxData,
             .initialMaxStreamDataBidiLocal = self.cfg.http3Options.initialMaxStreamDataBidiLocal,
             .initialMaxStreamDataBidiRemote = self.cfg.http3Options.initialMaxStreamDataBidiRemote,
@@ -2200,6 +2348,8 @@ pub const Server = struct {
 
         // Body: Content-Length or chunked (both bounded by cfg.maxBody).
         var body: []u8 = "";
+        // Bytes read past the request body. Preserved for connection takeover.
+        var upgradeInitial: []const u8 = "";
         const framing = parserMod.framingFull(fields[0..blk.count], .{
             .isHttp10 = reqHead.minorVersion == 0,
         }) catch {
@@ -2245,6 +2395,9 @@ pub const Server = struct {
                         if (n == 0) return false;
                         have += n;
                     }
+                    if (buffered > fr.length) {
+                        upgradeInitial = headBuf[blk.end + fr.length ..][0 .. buffered - fr.length];
+                    }
                 },
                 .chunked => {
                     // Persistent decoder with bounded retained wire data.
@@ -2272,9 +2425,10 @@ pub const Server = struct {
 
                         if (dec.isDone()) {
                             // The request body is complete; any bytes already
-                            // read beyond it cannot be retained for the next
-                            // request, so force connection close.
+                            // read beyond it are preserved for takeover and
+                            // otherwise force connection close.
                             if (pending != 0) clientClose = true;
+                            upgradeInitial = raw.items[0..pending];
                             break;
                         }
                         const n = conn.read(headBuf[0..]) catch return false;
@@ -2324,6 +2478,7 @@ pub const Server = struct {
 
         var ctx = Context{
             .allocator = arena,
+            .baseAllocator = self.allocator,
             .io = self.io,
             .headers = hdrs,
             .path = cleanPath,
@@ -2337,6 +2492,22 @@ pub const Server = struct {
         };
         self.notifyRequest(&ctx);
         const res: Response = self.router.dispatch(&ctx);
+
+        // Explicit connection takeover: the handler owns the wire from here.
+        // No HTTP response is serialized, no keep-alive state is kept, and the
+        // connection worker performs the single final close after the
+        // takeover handler returns.
+        if (ctx.upgrade) |upgradeRequest| {
+            var transportConn = conn;
+            const upgradeStream = transportConn.asStream();
+            upgradeRequest.handler(&ctx, upgradeStream, upgradeInitial) catch {
+                self.metricsRegistry.recordError();
+            };
+            const takeoverDurNs: u64 = @intCast(@max(0, (clock.monotonicMillis(self.io) -| t0) * 1_000_000));
+            self.metricsRegistry.recordResponseFull(101, takeoverDurNs, 0);
+            self.emitAccess(reqHead.method, reqHead.path, 101, body.len, 0, t0);
+            return false;
+        }
 
         conn.setWriteTimeoutMs(self.cfg.timeouts.write);
         const bytesOut = writeResponse(conn, arena, reqHead.minorVersion, try self.withLiveReload(arena, res, isHead), isHead, if (clientClose) "close" else "keep-alive", ctx.header("Accept-Encoding"), self.cfg.compression, self.cfg.maxCompressionInput) catch {
@@ -2492,7 +2663,7 @@ test "fragmented cleartext HTTP2 preface is sniffed before HTTP1 dispatch" {
     var srv = try Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .limits = .{ .maxConnections = 1 },
+        .limits = .{ .maxConns = 1 },
         .timeouts = .{ .initialRequest = 2_000 },
     });
     defer srv.deinit();
@@ -2557,7 +2728,7 @@ test "HTTP/1.1 server rejects request without Host before dispatch" {
     var ioContext = try tcp.IoContext.init(a);
     defer ioContext.deinit();
 
-    var srv = Server.init(a, ioContext.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } }) catch |err| return err;
+    var srv = Server.init(a, ioContext.io, .{ .port = 0, .limits = .{ .maxConns = 1 } }) catch |err| return err;
     defer srv.deinit();
     try srv.router.get("/", helloHandler, .{});
 
@@ -2585,7 +2756,7 @@ test "HTTP/1.1 absolute-form target routes by its path" {
     var ioContext = try tcp.IoContext.init(a);
     defer ioContext.deinit();
 
-    var srv = Server.init(a, ioContext.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } }) catch |err| return err;
+    var srv = Server.init(a, ioContext.io, .{ .port = 0, .limits = .{ .maxConns = 1 } }) catch |err| return err;
     defer srv.deinit();
     try srv.router.get("/hello", helloHandler, .{});
 
@@ -2638,7 +2809,7 @@ test "template route renders through tree-sitter pipeline end to end" {
     };
     H.enginePtr = &eng;
 
-    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConnections = 2 } }) catch |err| return err;
+    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConns = 2 } }) catch |err| return err;
     defer srv.deinit();
     try srv.router.get("/", H.handle, .{});
 
@@ -2682,7 +2853,7 @@ test "live reload attaches the browser client to a plain handler's HTML" {
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .limits = .{ .maxConnections = 2 },
+        .limits = .{ .maxConns = 2 },
         .liveReload = .{ .enabled = true },
     }) catch |err| return err;
     defer srv.deinit();
@@ -2728,7 +2899,7 @@ test "live reload is off by default and skips non-HTML responses" {
     var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } }) catch |err| return err;
+    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConns = 1 } }) catch |err| return err;
     defer srv.deinit();
     try std.testing.expect(!srv.cfg.liveReload.enabled);
 
@@ -2750,7 +2921,7 @@ test "server handles POST with content-length body" {
     var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } }) catch |err| return err;
+    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConns = 1 } }) catch |err| return err;
     defer srv.deinit();
     try srv.router.post("/echo", echoRawHandler, .{});
 
@@ -2788,7 +2959,7 @@ test "server decodes chunked request body before dispatch" {
     var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } }) catch |err| return err;
+    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConns = 1 } }) catch |err| return err;
     defer srv.deinit();
     try srv.router.post("/echo", echoRawHandler, .{});
 
@@ -2856,7 +3027,7 @@ test "access log flows through event callback" {
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .limits = .{ .maxConnections = 1 },
+        .limits = .{ .maxConns = 1 },
         .logging = .{ .callback = testEventCallback },
     }) catch |err| return err;
     defer srv.deinit();
@@ -2886,7 +3057,7 @@ test "access log flows through event callback" {
     // Close BEFORE joining so the server can drain and run() can return.
     c.close();
 
-    // maxConnections=1 => run() returns only AFTER emitAccess ran.
+    // maxConns=1 => run() returns only AFTER emitAccess ran.
     t.join();
     srv.requestShutdown();
     try std.testing.expect(gCaptureGotRequest);
@@ -2905,7 +3076,7 @@ test "no callback produces zero events" {
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .limits = .{ .maxConnections = 1 },
+        .limits = .{ .maxConns = 1 },
         .logging = .{}, // null callback — silent by default
     }) catch |err| return err;
     defer srv.deinit();
@@ -2981,7 +3152,7 @@ test "server serves routed GET end to end" {
     var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } }) catch |err| return err;
+    var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConns = 1 } }) catch |err| return err;
     defer srv.deinit();
     try srv.router.get("/hello", helloHandler, .{});
 
@@ -3025,7 +3196,7 @@ test "server does not mount documentation routes unless explicitly requested" {
     var ctx = try tcp.IoContext.init(allocator);
     defer ctx.deinit();
 
-    var srv = try Server.init(allocator, ctx.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } });
+    var srv = try Server.init(allocator, ctx.io, .{ .port = 0, .limits = .{ .maxConns = 1 } });
     defer srv.deinit();
 
     const Runner = struct {
@@ -3063,10 +3234,10 @@ test "idle and incomplete headers cannot block a normal request" {
     var srv = try Server.init(a, ctx.io, .{
         .port = 0,
         .limits = .{
-            .maxConnections = 3,
-            .maxConcurrentConnections = 3,
-            .maxQueuedConnectionTasks = 3,
-            .workerCount = 3,
+            .maxConns = 3,
+            .maxActive = 3,
+            .maxQueued = 3,
+            .workers = 3,
         },
         .timeouts = .{
             .initialRequest = 1_000,
@@ -3118,10 +3289,10 @@ test "stalled request body is timed out without blocking another client" {
     var srv = try Server.init(a, ctx.io, .{
         .port = 0,
         .limits = .{
-            .maxConnections = 2,
-            .maxConcurrentConnections = 2,
-            .maxQueuedConnectionTasks = 2,
-            .workerCount = 1,
+            .maxConns = 2,
+            .maxActive = 2,
+            .maxQueued = 2,
+            .workers = 1,
         },
         .timeouts = .{
             .initialRequest = 1_000,
@@ -3178,9 +3349,9 @@ test "connection limit rejects overload then accepts clients after a stalled upl
     var srv = try Server.init(a, ctx.io, .{
         .port = 0,
         .limits = .{
-            .maxConcurrentConnections = 1,
-            .maxQueuedConnectionTasks = 1,
-            .workerCount = 1,
+            .maxActive = 1,
+            .maxQueued = 1,
+            .workers = 1,
         },
         .timeouts = .{
             .initialRequest = 2_000,
@@ -3321,7 +3492,7 @@ test "server compresses a large body once the input ceiling allows it" {
 
     // Default ceiling: the body is served as-is.
     {
-        var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } }) catch |err| return err;
+        var srv = Server.init(a, ctx.io, .{ .port = 0, .limits = .{ .maxConns = 1 } }) catch |err| return err;
         defer srv.deinit();
         try srv.router.get("/big", BigH.h, .{});
         const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch |err| return err;
@@ -3341,7 +3512,7 @@ test "server compresses a large body once the input ceiling allows it" {
     {
         var srv = Server.init(a, ctx.io, .{
             .port = 0,
-            .limits = .{ .maxConnections = 1 },
+            .limits = .{ .maxConns = 1 },
             .maxCompressionInput = 1024 * 1024,
         }) catch |err| return err;
         defer srv.deinit();
@@ -3370,7 +3541,7 @@ test "raw socket 200KB content-length body roundtrip" {
     const a = std.testing.allocator;
     var ctx0 = try tcp.IoContext.init(a);
     defer ctx0.deinit();
-    var srv = Server.init(a, ctx0.io, .{ .port = 0, .limits = .{ .maxConnections = 1 } }) catch |err| return err;
+    var srv = Server.init(a, ctx0.io, .{ .port = 0, .limits = .{ .maxConns = 1 } }) catch |err| return err;
     defer srv.deinit();
     const LenH = struct {
         fn h(ctx: *Context) anyerror!Response {
@@ -3417,7 +3588,7 @@ test "server isTls default is false" {
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .limits = .{ .maxConnections = 1 },
+        .limits = .{ .maxConns = 1 },
     }) catch |err| return err;
     defer srv.deinit();
 
@@ -3431,7 +3602,7 @@ test "server setTls dynamic reconfiguration and key zeroing" {
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .limits = .{ .maxConnections = 1 },
+        .limits = .{ .maxConns = 1 },
     }) catch |err| return err;
     defer srv.deinit();
 
@@ -3458,7 +3629,7 @@ test "strict HTTPS mode rejects plain HTTP with 400 Bad Request" {
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .limits = .{ .maxConnections = 1 },
+        .limits = .{ .maxConns = 1 },
     }) catch |err| return err;
     defer srv.deinit();
 
@@ -3502,7 +3673,7 @@ test "server default TLS ALPN negotiates HTTP/2 and serves a request" {
     var srv = try Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .limits = .{ .maxConnections = 1 },
+        .limits = .{ .maxConns = 1 },
         .tls = .{
             .certificatePem = h3TestCertPem,
             .privateKeyPem = h3TestKeyPem,
@@ -3584,7 +3755,7 @@ test "malformed TLS handshake emits tlsHandshakeFailed event" {
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .limits = .{ .maxConnections = 1 },
+        .limits = .{ .maxConns = 1 },
         .logging = .{ .callback = testTlsEventCallback, .level = .warn },
     }) catch |err| return err;
     defer srv.deinit();
@@ -3630,7 +3801,7 @@ test "StreamConn operations" {
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .limits = .{ .maxConnections = 1 },
+        .limits = .{ .maxConns = 1 },
     }) catch |err| return err;
     defer srv.deinit();
     try srv.router.get("/stream", returnOk, .{});
@@ -3692,7 +3863,7 @@ test "server metrics snapshot and live Prometheus endpoint" {
 
     var srv = Server.init(a, ctx.io, .{
         .port = 0,
-        .limits = .{ .maxConnections = 2 },
+        .limits = .{ .maxConns = 2 },
     }) catch |err| return err;
     defer srv.deinit();
 
@@ -4019,7 +4190,7 @@ test "direct clients cannot spoof the remote address through forwarded headers" 
     var srv = Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .limits = .{ .maxConnections = 2 },
+        .limits = .{ .maxConns = 2 },
         .trustForwardedHeaders = true,
         .trustedProxies = &.{"10.0.0.1"},
     }) catch |err| return err;
@@ -4067,7 +4238,7 @@ test "trusted proxies resolve the rightmost client address" {
     var srv = Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .limits = .{ .maxConnections = 2 },
+        .limits = .{ .maxConns = 2 },
         .trustForwardedHeaders = true,
         .trustedProxies = &.{"127.0.0.1"},
     }) catch |err| return err;

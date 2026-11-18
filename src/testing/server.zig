@@ -16,7 +16,7 @@ const routeMod = @import("route.zig");
 const assertions = @import("assertions.zig");
 const fixtures = @import("fixtures.zig");
 
-pub const Config = common.httpServer.TestingConfig;
+const Config = common.httpServer.TestingConfig;
 pub const CaptureConfig = requestMod.CaptureConfig;
 pub const CapturedRequest = requestMod.CapturedRequest;
 pub const RouteOptions = responseMod.RouteOptions;
@@ -624,7 +624,7 @@ test "capture retention and body limits are bounded" {
 
     var server = try Server.init(allocator, io, .{});
     defer server.deinit();
-    try server.capture(.{ .maxEntries = 2, .maxBodyBytes = 4 });
+    try server.capture(.{ .maxEntries = 2, .maxBody = 4 });
     try server.route("/echo", .{ .method = .POST, .handler = handlerMod.echo });
     try server.start();
 

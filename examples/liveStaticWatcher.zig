@@ -89,7 +89,7 @@ pub fn main() !void {
     // 2. Initialize Watcher with reload callbacks
     var fileWatcher = try httpx.static.Watcher.init(allocator, io, .{
         .dirPath = ".",
-        .pollIntervalMs = 50,
+        .pollMs = 50,
     });
     defer fileWatcher.deinit();
     try fileWatcher.watchFile(testAsset);
@@ -101,7 +101,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .limits = .{ .maxConnections = 4 },
+        .limits = .{ .maxConns = 4 },
         .logging = .{},
     });
     defer server.deinit();

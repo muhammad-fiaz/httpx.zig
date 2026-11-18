@@ -49,32 +49,6 @@
 
 ---
 
-<details>
-<summary><strong>Dependency Architecture</strong> (click to expand)</summary>
-
-Httpx imports these packages directly inside the modules that need them. They
-are implementation details and are not re-exported from `httpx`; only the
-Httpx-owned APIs below are public.
-
-| Package | Used for | Public Httpx surface |
-|---|---|---|
-| `zigantic` | Schema definitions and validation for configuration, route metadata, and protocol options | Typed configuration structs only (internal) |
-| `env` | Process environment and `.env` parsing | `httpx.env` |
-| `tint` | ANSI terminal styling in logging and download diagnostics | Logging output only |
-| `loaders` | Download progress bars and loading indicators | `httpx.client.download` progress output |
-| `brotli` | Brotli content coding | `httpx.compression` |
-| `zstd` | Zstandard content coding | `httpx.compression` |
-| `regex` | Pattern matching in security headers and document parsing | Web/parsing behavior |
-| `treesitter` | Tree-sitter runtime used by document and template parsing | `httpx.parsing`, `httpx.templates` |
-
-Color and progress output are opt-in presentation. They never alter HTTP
-framing, validation results, or response bodies. Applications that need the
-full package API can depend on that package directly.
-
-</details>
-
----
-
 ## Why Use httpx.zig?
 
 **One native Zig library for HTTP, networking, and web applications.**

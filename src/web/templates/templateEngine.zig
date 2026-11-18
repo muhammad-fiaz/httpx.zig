@@ -25,7 +25,7 @@ pub const ConfigSchema = z.objectOf(.{
     .maxInheritanceDepth = z.withDefault(z.positiveInt(usize, .{}), 16),
     .strictUndefined = z.withDefault(z.boolean(.{}), false),
     .autoescape = z.withDefault(z.boolean(.{}), true),
-    .maxOutputBytes = z.withDefault(z.positiveInt(usize, .{}), 64 << 20),
+    .maxOutput = z.withDefault(z.positiveInt(usize, .{}), 64 << 20),
     .maxMacroDepth = z.withDefault(z.positiveInt(usize, .{}), 64),
     .maxRangeItems = z.withDefault(z.positiveInt(usize, .{}), 1 << 20),
 }, .{});
@@ -87,7 +87,7 @@ pub const Engine = struct {
                     .maxInheritanceDepth = config.maxInheritanceDepth,
                     .strictUndefined = config.strictUndefined,
                     .autoescapeDefault = config.autoescape,
-                    .maxOutputBytes = config.maxOutputBytes,
+                    .maxOutput = config.maxOutput,
                     .maxMacroDepth = config.maxMacroDepth,
                     .maxRangeItems = config.maxRangeItems,
                 },

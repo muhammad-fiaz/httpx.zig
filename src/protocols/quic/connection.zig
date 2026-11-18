@@ -212,7 +212,7 @@ pub const Callbacks = struct {
 };
 
 pub const ConfigSchema = z.objectOf(.{
-    .maxIdleTimeoutMs = z.withDefault(z.integer(u64, .{}), 30_000),
+    .maxIdleMs = z.withDefault(z.integer(u64, .{}), 30_000),
     .initialMaxData = z.withDefault(z.integer(u64, .{ .max = MAX_VARINT }), 1 << 20),
     .initialMaxStreamDataBidiLocal = z.withDefault(z.integer(u64, .{ .max = MAX_VARINT }), 65_535),
     .initialMaxStreamDataBidiRemote = z.withDefault(z.integer(u64, .{ .max = MAX_VARINT }), 65_535),
@@ -1221,7 +1221,7 @@ pub const Connection = struct {
             }
         }
         if (sampleTs) |ts| {
-            self.recovery.rtt.onAckReceived(ts, nowMs, self.recovery.cfg.maxAckDelayMs);
+            self.recovery.rtt.onAckReceived(ts, nowMs, self.recovery.cfg.maxAckMs);
             self.recovery.onAckOfInFlight();
         }
         try self.runLossDetection(sp, nowMs);
@@ -1333,9 +1333,9 @@ pub const Connection = struct {
     /// enforcement. A peer that omits the parameter is treated as
     /// advertising our own value.
     pub fn effectiveIdleTimeoutMs(self: *const Connection) u64 {
-        const local = self.cfg.maxIdleTimeoutMs;
+        const local = self.cfg.maxIdleMs;
         if (local == 0) return 0;
-        const peer = if (self.peerParams) |p| p.maxIdleTimeoutMs else local;
+        const peer = if (self.peerParams) |p| p.maxIdleMs else local;
         if (peer == 0) return 0;
         return @min(local, peer);
     }
@@ -1892,7 +1892,7 @@ pub const Connection = struct {
             sp.ackElicitingCount = 0;
             sp.ackDeadlineMs = null;
         } else if (sp.ackDeadlineMs == null) {
-            sp.ackDeadlineMs = nowMs +| self.recovery.cfg.maxAckDelayMs;
+            sp.ackDeadlineMs = nowMs +| self.recovery.cfg.maxAckMs;
         }
     }
 
@@ -3516,7 +3516,7 @@ test "idle timeout uses the smaller advertised value and can be disabled" {
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    const conn = try Connection.init(a, io, .{ .maxIdleTimeoutMs = 1000 });
+    const conn = try Connection.init(a, io, .{ .maxIdleMs = 1000 });
     defer conn.deinit();
     conn.lastActivityMs = 100;
     try conn.pollTimeouts(1099);
@@ -3524,15 +3524,15 @@ test "idle timeout uses the smaller advertised value and can be disabled" {
     try std.testing.expectError(Error.Draining, conn.pollTimeouts(1100));
     try std.testing.expectEqual(State.draining, conn.state);
 
-    const shorter = try Connection.init(a, io, .{ .maxIdleTimeoutMs = 1000 });
+    const shorter = try Connection.init(a, io, .{ .maxIdleMs = 1000 });
     defer shorter.deinit();
-    shorter.peerParams = .{ .maxIdleTimeoutMs = 200 };
+    shorter.peerParams = .{ .maxIdleMs = 200 };
     shorter.lastActivityMs = 0;
     try std.testing.expectEqual(@as(u64, 200), shorter.effectiveIdleTimeoutMs());
     try std.testing.expectError(Error.Draining, shorter.pollTimeouts(200));
     try std.testing.expectEqual(State.draining, shorter.state);
 
-    const disabled = try Connection.init(a, io, .{ .maxIdleTimeoutMs = 0 });
+    const disabled = try Connection.init(a, io, .{ .maxIdleMs = 0 });
     defer disabled.deinit();
     disabled.lastActivityMs = 0;
     try std.testing.expectEqual(@as(u64, 0), disabled.effectiveIdleTimeoutMs());
@@ -4951,7 +4951,7 @@ test "regression: quic transport parameters decoding and validation" {
     defer list.deinit(std.testing.allocator);
 
     const initialParams = paramsMod.Params{
-        .maxIdleTimeoutMs = 30_000,
+        .maxIdleMs = 30_000,
         .maxUdpPayloadSize = 1472,
         .initialMaxData = 1048576,
         .initialMaxStreamDataBidiLocal = 65536,
@@ -4960,7 +4960,7 @@ test "regression: quic transport parameters decoding and validation" {
         .initialMaxStreamsBidi = 100,
         .initialMaxStreamsUni = 100,
         .ackDelayExponent = 3,
-        .maxAckDelayMs = 25,
+        .maxAckMs = 25,
         .activeConnectionIdLimit = 4,
     };
     try paramsMod.encode(&list, std.testing.allocator, initialParams);

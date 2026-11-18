@@ -96,8 +96,8 @@ requests are bounded by entry count, body bytes, and header bytes.
 try server.capture(.{
     .enabled = true,
     .maxEntries = 128,
-    .maxBodyBytes = 32 * 1024,
-    .maxHeaderBytes = 8 * 1024,
+    .maxBody = 32 * 1024,
+    .maxHeader = 8 * 1024,
 });
 
 const requests = try server.requests(allocator);

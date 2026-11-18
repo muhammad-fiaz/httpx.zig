@@ -790,6 +790,11 @@ pub const Listener = struct {
         listener.allocator = allocator;
         return listener;
     }
+    /// Binds a listener with explicit ownership. Flat spelling:
+    /// `httpx.tcp.listen(allocator, io, .{ .port = 8080 })`.
+    pub fn listen(allocator: Allocator, io: std.Io, cfg: Config) !Listener {
+        return init(allocator, io, cfg);
+    }
 
     /// Bind 0.0.0.0:port. port=0 lets OS choose an ephemeral port.
     pub fn bind(io: std.Io, port: u16) !Listener {
@@ -1185,4 +1190,9 @@ test "accepted sockets capture the peer IP" {
     defer conn.close();
     try std.testing.expectEqualStrings("127.0.0.1", conn.peerAddress());
     t.join();
+}
+
+/// Flat listener constructor: `httpx.tcp.listen(allocator, io, .{})`.
+pub fn listen(allocator: Allocator, io: std.Io, cfg: Listener.Config) !Listener {
+    return Listener.listen(allocator, io, cfg);
 }

@@ -39,7 +39,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .limits = .{ .maxConnections = 4 },
+        .limits = .{ .maxConns = 4 },
         .templates = .{ .enabled = true },
     });
     defer server.deinit();

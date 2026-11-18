@@ -443,7 +443,7 @@ QUIC transport parameters can be encoded:
 var list = std.ArrayList(u8).empty;
 defer list.deinit(allocator);
 try httpx.quic.transportParameters.encode(&list, allocator, .{
-    .maxIdleTimeoutMs = 30000,
+    .maxIdleMs = 30000,
     .maxUdpPayloadSize = 1350,
     .initialMaxData = 1048576,
     .initialMaxStreamDataBidiLocal = 262144,
@@ -481,7 +481,7 @@ never by constructing a protocol config object of their own:
 var client = httpx.Client.init(allocator, io, .{
     .http3 = true,
     .protocols = .{ .http3 = .{ .quic = .{
-        .maxIdleTimeoutMs = 30_000,
+        .maxIdleMs = 30_000,
         .initialMaxData = 10 * 1024 * 1024,
         .initialMaxStreamsBidi = 128,
         .maxUdpPayload = 1472,
@@ -497,7 +497,7 @@ peer's advertised `max_idle_timeout`; zero disables enforcement. When it
 expires, `pollTimeouts` transitions the connection to `.draining` and
 returns `error.Draining`.
 
-On the server these values are exposed as `http3Options.maxIdleTimeoutMs`,
+On the server these values are exposed as `http3Options.maxIdleMs`,
 `http3Options.initialMaxData`, `http3Options.initialMaxStreamDataBidiLocal`,
 `http3Options.initialMaxStreamDataBidiRemote`, `http3Options.initialMaxStreamDataUni`,
 `http3Options.maxStreamsBidi`, `http3Options.maxStreamsUni`, and `http3Options.maxUdpPayload`.

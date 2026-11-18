@@ -54,27 +54,28 @@ pub const concurrency = struct {
 };
 pub const logging = @import("common/logging.zig");
 
-// Sockets: one `socket` namespace over TCP and UDP. The short primary
-// form is `httpx.socket.tcp.init(...)` / `httpx.socket.udp.init(...)`;
-// `Socket` (connection) and `Listener` (TCP backlog) remain reachable
-// for explicit type references.
-pub const socket = struct {
-    pub const tcp = struct {
-        const inner = @import("sockets/tcp.zig");
-        pub const init = inner.Listener.init;
-        pub const Listener = inner.Listener;
-        pub const Socket = inner.Socket;
-        pub const connect = inner.connect;
-        pub const wakeListenerPort = inner.wakeListenerPort;
-        pub const connectAddress = inner.connectAddress;
-        pub const connectAddressStream = inner.connectAddressStream;
-    };
-    pub const udp = struct {
-        const inner = @import("sockets/udp.zig");
-        pub const init = inner.Socket.init;
-        pub const Socket = inner.Socket;
-    };
+// Sockets: flat `httpx.tcp` / `httpx.udp` namespaces over one shared
+// implementation. `tcp.Connection` and `tcp.Listener` are the explicit types;
+// `tcp.connect` and `tcp.listen` are the entry points.
+pub const tcp = struct {
+    const inner = @import("sockets/tcp.zig");
+    pub const Connection = inner.Socket;
+    pub const Listener = inner.Listener;
+    pub const connect = inner.connect;
+    pub const connectAddress = inner.connectAddress;
+    pub const connectAddressStream = inner.connectAddressStream;
+    pub const listen = inner.listen;
+    pub const setNoDelay = inner.setNoDelay;
+    pub const setKeepAlive = inner.setKeepAlive;
+    pub const wakeListenerPort = inner.wakeListenerPort;
 };
+pub const udp = struct {
+    const inner = @import("sockets/udp.zig");
+    pub const Socket = inner.Socket;
+    pub const init = inner.Socket.init;
+};
+/// Type-erased stream transport used by connection-takeover handlers.
+pub const Stream = @import("common/stream.zig").Stream;
 /// Winsock syscall layer.
 pub const sys = @import("sockets/sys.zig");
 
@@ -286,7 +287,7 @@ pub const Context = router.Context;
 // Canonical root types
 pub const Client = @import("client/httpClient.zig").Client;
 pub const Server = server.Server;
-/// Client-side HTTP response (what `Client.get` and friends return).
+/// Client-side HTTP response (what `httpx.Client.get` and friends return).
 /// Server handlers return `httpx.router.Response` instead.
 pub const Response = @import("client/requestBuilder.zig").Response;
 pub const Headers = headers.Headers;
@@ -304,11 +305,32 @@ pub const sse = struct {
     pub const Parser = @import("web/sse/sseParser.zig").EventParser;
 };
 pub const websocket = struct {
-    pub const Handshake = @import("web/websocket/websocketHandshake.zig");
-    pub const Frame = @import("web/websocket/websocketFrame.zig");
-    pub const deflate = @import("web/websocket/websocketDeflate.zig");
-    pub const computeAccept = Handshake.computeAccept;
-    pub const buildUpgradeRequest = Handshake.buildUpgradeRequest;
+    const serverMod = @import("web/websocket/websocketServer.zig");
+    const clientMod = @import("web/websocket/websocketClient.zig");
+    const sessionMod = @import("web/websocket/websocketSession.zig");
+
+    /// RFC 6455 session over an existing transport.
+    pub const Session = sessionMod.Session;
+    pub const Message = sessionMod.Message;
+    pub const CloseInfo = sessionMod.CloseInfo;
+    pub const Opcode = sessionMod.Opcode;
+    /// Reusable client: `Client.init(allocator, io, .{}).connect(url)`.
+    /// All configuration is passed inline as `.{}`; the option types are not
+    /// part of the public surface.
+    pub const Client = clientMod.Client;
+
+    /// Client: `ws://` and `wss://`.
+    pub const connect = clientMod.connect;
+    /// Server: call from a router handler, then return.
+    pub const accept = serverMod.accept;
+
+    /// Low-level RFC 6455 codecs (handshake, frame, permessage-deflate).
+    pub const protocol = struct {
+        pub const Handshake = @import("web/websocket/websocketHandshake.zig");
+        pub const Frame = @import("web/websocket/websocketFrame.zig");
+        pub const deflate = @import("web/websocket/websocketDeflate.zig");
+    };
+    pub const computeAccept = protocol.Handshake.computeAccept;
 };
 
 // Native Template Engine
@@ -382,6 +404,10 @@ pub const client = struct {
     pub const Error = httpClientMod.Error;
     pub const ResolvedAddresses = httpClientMod.ResolvedAddresses;
     pub const AddressFamilyPreference = httpClientMod.AddressFamilyPreference;
+
+    /// Reusable HTTP client: `httpx.Client.init(allocator, io, .{})`.
+    pub const Client = httpClientMod.Client;
+    pub const init = httpClientMod.init;
 
     // Request construction: httpx.client.builder, httpx.client.request
     pub const builder = httpClientMod.Client.RequestBuilder;
@@ -473,8 +499,27 @@ pub const parsing = struct {
     pub const detectKind = document.detectKind;
 };
 
-// Server API
-const server = @import("server/httpServer.zig");
+// Server API: flat `httpx.Server.init(...)`, `httpx.server.init(...)`, configs.
+// The module is wrapped so configuration/option types stay internal.
+pub const server = struct {
+    const mod = @import("server/httpServer.zig");
+
+    pub const Server = mod.Server;
+    pub const init = mod.init;
+    pub const signals = mod.signals;
+
+    /// Signal hook vocabulary; the configuration itself is passed inline.
+    pub const SignalEvent = mod.SignalEvent;
+    pub const SignalCallback = mod.SignalCallback;
+
+    pub const HttpVersion = mod.HttpVersion;
+    pub const PortStrategy = mod.PortStrategy;
+    pub const RequestObserver = mod.RequestObserver;
+    pub const StreamConn = mod.StreamConn;
+    pub const maxHeadBytes = mod.maxHeadBytes;
+};
+/// Cross-platform process signal management and graceful shutdown helpers.
+pub const signals = @import("signals/signals.zig");
 
 // Concurrency & Utilities
 const rateLimitMod = @import("web/middleware/rateLimiter.zig");
@@ -517,7 +562,8 @@ test {
     _ = logging;
     _ = concurrency.queue;
     _ = concurrency.workerPool;
-    _ = socket;
+    _ = tcp;
+    _ = udp;
     _ = sys;
     _ = net.address;
     _ = net.dns;
@@ -579,8 +625,10 @@ test {
     _ = router.metadata;
     _ = @import("web/sse/sseWriter.zig");
     _ = @import("web/sse/sseParser.zig");
-    _ = websocket.Handshake;
-    _ = websocket.Frame;
+    _ = websocket.Session;
+    _ = websocket.protocol.Handshake;
+    _ = websocket.protocol.Frame;
+    _ = @import("web/websocket/websocketTests.zig");
     _ = middleware.rateLimit;
     _ = middleware.cors;
     _ = middleware.helmet;
@@ -717,6 +765,26 @@ test "public facade exposes non-redundant canonical namespaces and types" {
     try std_testing.expect(@sizeOf(tls.Client) > 0);
     try std_testing.expect(@sizeOf(Router) > 0);
     try std_testing.expect(@sizeOf(net.address.Address) > 0);
+
+    // Owners are reachable both from the root and through their flat
+    // namespaces, but no option/config type is publicly exported.
+    try std_testing.expect(@hasDecl(@This(), "Client"));
+    try std_testing.expect(@hasDecl(@This(), "Server"));
+    try std_testing.expect(@hasDecl(client, "init"));
+    try std_testing.expect(@hasDecl(server, "init"));
+    try std_testing.expect(!@hasDecl(client, "Config"));
+    try std_testing.expect(!@hasDecl(server, "Config"));
+    try std_testing.expect(!@hasDecl(server, "TestingConfig"));
+    try std_testing.expect(!@hasDecl(server, "Signals"));
+    try std_testing.expect(!@hasDecl(server, "Http3Options"));
+    try std_testing.expect(!@hasDecl(server, "LiveReload"));
+    try std_testing.expect(!@hasDecl(testing, "Config"));
+    try std_testing.expect(!@hasDecl(tcp, "Config"));
+    try std_testing.expect(!@hasDecl(udp, "Config"));
+    try std_testing.expect(!@hasDecl(websocket, "Config"));
+    try std_testing.expect(!@hasDecl(websocket, "ClientConfig"));
+    try std_testing.expect(!@hasDecl(websocket, "ServerConfig"));
+    try std_testing.expect(!@hasDecl(websocket, "SessionConfig"));
 
     // Test defaultable options with .{}
     var hdrs = Headers.init(a);

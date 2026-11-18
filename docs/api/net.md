@@ -11,9 +11,9 @@ macOS (`src/sockets/`, `src/net/`).
 | Windows | ✅ | ✅ | ✅ | Winsock-native connects with full error mapping |
 | macOS | ✅ | ✅ | ✅ | |
 
-## TCP (`httpx.socket.tcp`)
+## TCP (`httpx.tcp`)
 
-Cross-platform stream sockets (`init` for the listening side, `connect`
+Cross-platform stream sockets (`listen` for the listening side, `connect`
 for the client side; use `std.Io.Threaded.global_single_threaded.io()` in tests).
 
 ### Basic Usage
@@ -22,7 +22,7 @@ for the client side; use `std.Io.Threaded.global_single_threaded.io()` in tests)
 const std = @import("std");
 const httpx = @import("httpx");
 
-var socket = try httpx.socket.tcp.connect(io, "93.184.216.34", 80);
+var socket = try httpx.tcp.connect(io, "93.184.216.34", 80);
 defer socket.close();
 
 try socket.writeAll("GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n");
@@ -44,7 +44,7 @@ std.debug.print("{s}\n", .{buf[0..n]});
 | `Socket.isAlive()` | Local close-guard state |
 | `Socket.netSocketHandle()` | Raw handle for tuning |
 | `setTimeouts(sock, ms)` / `setNoDelay(sock)` / `setKeepAlive(sock, idleSecs)` | Socket tuning |
-| `init(allocator, io, .{ .port = 0 })` / `init(allocator, io, .{ .address = addr })` | Bind (`0` = ephemeral) |
+| `httpx.tcp.listen(allocator, io, .{ .port = 0 })` / `... .{ .address = addr }` | Bind (`0` = ephemeral) |
 | `Listener.accept(listener, io)` | Accept one connection |
 | `Listener.localPort(listener)` | Actual bound port |
 | `Listener.close(listener, io)` | Close listener |
@@ -60,12 +60,12 @@ std.debug.print("{s}\n", .{buf[0..n]});
 | `PermissionDenied` | Operation not permitted |
 | `Unexpected` | Unmapped platform error |
 
-## UDP (`httpx.socket.udp`)
+## UDP (`httpx.udp`)
 
 Connectionless datagrams (used by DNS/QUIC/custom protocols).
 
 ```zig
-var sock = try httpx.socket.udp.init(allocator, io, .{});
+var sock = try httpx.udp.init(allocator, io, .{});
 defer sock.close();
 try sock.sendTo(&dest, "ping");
 const msg = try sock.receive(&buf);

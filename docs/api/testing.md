@@ -40,12 +40,19 @@ defer server.deinit();
 `run` forward directly to the production server. Signatures and validation are
 unchanged.
 
-## `httpx.testing.Config`
+## Testing configuration
 
-Same schema as `httpx.Server.Config` except `.host = "127.0.0.1"` and
-`.port = 0`. All other defaults, types, validation, and feature dependencies are
-shared with production. `httpx.Server.Config`, `httpx.testing.Config`, and the
-production/testing schema types remain structurally compatible.
+`httpx.testing.Server.init` accepts the same fields as `httpx.Server.init`
+except `.host = "127.0.0.1"` and `.port = 0`. All other defaults, validation, and
+feature dependencies are shared with production. Option types are not exported;
+pass the values inline:
+
+```zig
+var server = try httpx.testing.Server.init(allocator, io, .{
+    .maxBody = 64 * 1024,
+    .signals = .{ .enabled = false },
+});
+```
 
 ## `httpx.testing.RouteOptions`
 
@@ -86,8 +93,8 @@ production configuration validation. Duplicate method+path registration returns
 |---|---|
 | `enabled` | `true` |
 | `maxEntries` | `256` |
-| `maxBodyBytes` | `65536` |
-| `maxHeaderBytes` | `16384` |
+| `maxBody` | `65536` |
+| `maxHeader` | `16384` |
 
 `httpx.testing.CapturedRequest` exposes:
 
@@ -97,7 +104,7 @@ production configuration validation. Duplicate method+path registration returns
 | `path` | Clean request path, owned. |
 | `query` | Raw query string without `?`, owned. |
 | `headers` | Owned header copies. |
-| `body` | Copied body, truncated at `maxBodyBytes`. |
+| `body` | Copied body, truncated at `maxBody`. |
 | `bodySize` | Full body length before truncation. |
 | `bodyTruncated` / `headersTruncated` | `bool` flags. |
 | `header(name)` | Case-insensitive lookup. |

@@ -2,7 +2,9 @@
 
 Httpx.zig uses explicit allocators and `std.Io`. Configuration is passed as a
 Zig struct literal. Use `.{}` when the type's documented defaults are wanted;
-set only the fields that need to change.
+set only the fields that need to change. Option and configuration types are
+implementation details and are not exported: write the literal inline, and let
+the constructor's parameter type do the coercion.
 
 Every configuration type is a [zigantic](https://github.com/DonIsaac/zigantic)
 schema: the field defaults, the value ranges, and the required/optional
@@ -31,6 +33,11 @@ defer server.deinit();
 |---|---|---|
 | HTTP client | `httpx.Client.init(allocator, io, options)` | `httpx.Client.init(allocator, io, .{})` |
 | HTTP server | `httpx.Server.init(allocator, io, options)` | `httpx.Server.init(allocator, io, .{})` |
+| WebSocket client | `httpx.websocket.Client.init(allocator, io, options)` | `...init(allocator, io, .{}).connect(url)` |
+| WebSocket server | `httpx.websocket.accept(ctx, options)` | `httpx.websocket.accept(ctx, .{})` |
+| TCP listener | `httpx.tcp.listen(allocator, io, options)` | `httpx.tcp.listen(allocator, io, .{})` |
+| UDP socket | `httpx.udp.init(allocator, io, options)` | `httpx.udp.init(allocator, io, .{})` |
+| Signal subscription | `httpx.signals.register(context, notifyFn, mask)` | `httpx.signals.register(ctx, fn, .{})` |
 | Document parser | `httpx.parsing.init(allocator, io, options)` | `httpx.parsing.init(allocator, io, .{})` |
 | Connection pool | `httpx.client.pool.init(allocator, io, options)` | `...init(allocator, io, .{})` |
 | Cookie jar | `httpx.client.jar.init(allocator, io, .{})` | `.{}` keeps the defaults |
@@ -103,7 +110,7 @@ the [Server API](/api/server) and [Router API](/api/router).
 | `src/common` | `httpx.common`, `httpx.headers`, `httpx.uri`, `httpx.errors` | [Core](/api/core), [Headers](/api/headers), [Utilities](/api/utils) |
 | `src/compression` | `httpx.compression` | [Compression](/api/compression) |
 | `src/concurrency` | `httpx.concurrency` | [Concurrency](/api/concurrency) |
-| `src/net` | `httpx.net`, `httpx.socket.tcp`, `httpx.socket.udp` | [Network](/api/net), [DNS](/api/dns) |
+| `src/net` | `httpx.net`, `httpx.tcp`, `httpx.udp` | [Network](/api/net), [DNS](/api/dns) |
 | `src/parsing` | `httpx.parsing` | [Parsing](/api/parsing) |
 | `src/protocols` | `httpx.http1`, `httpx.http2`, `httpx.http3`, `httpx.quic`, `httpx.tls`, `httpx.protocols.ftp` | [Protocols](/api/protocol), [TLS](/api/tls), [FTP](/api/ftp) |
 | `src/server` | `httpx.Server` | [Server](/api/server) |

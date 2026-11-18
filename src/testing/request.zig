@@ -16,9 +16,9 @@ const CaptureConfigSchema = z.objectOf(.{
     .maxEntries = z.withDefault(z.nonNegativeInt(usize, .{}), 256),
     // Maximum body bytes copied per request. Larger bodies are truncated
     // while `bodySize` still reports the full body length.
-    .maxBodyBytes = z.withDefault(z.nonNegativeInt(usize, .{}), 64 * 1024),
+    .maxBody = z.withDefault(z.nonNegativeInt(usize, .{}), 64 * 1024),
     // Maximum header bytes copied per request (names plus values).
-    .maxHeaderBytes = z.withDefault(z.nonNegativeInt(usize, .{}), 16 * 1024),
+    .maxHeader = z.withDefault(z.nonNegativeInt(usize, .{}), 16 * 1024),
 }, .{});
 
 /// Validated capture limits. Use `.{}` for bounded defaults.
@@ -205,7 +205,7 @@ fn cloneContext(allocator: Allocator, ctx: *const common.Context, config: Captur
     const query = try allocator.dupe(u8, ctx.query);
     errdefer allocator.free(query);
 
-    var headerBudget = config.maxHeaderBytes;
+    var headerBudget = config.maxHeader;
     var headersTruncated = false;
     var headerList = std.ArrayList(common.Header).empty;
     errdefer {
@@ -231,7 +231,7 @@ fn cloneContext(allocator: Allocator, ctx: *const common.Context, config: Captur
     const headers = try headerList.toOwnedSlice(allocator);
     errdefer common.freeHeaders(allocator, headers);
 
-    const bodyLen = @min(ctx.body.len, config.maxBodyBytes);
+    const bodyLen = @min(ctx.body.len, config.maxBody);
     const body = try allocator.dupe(u8, ctx.body[0..bodyLen]);
     errdefer allocator.free(body);
 
@@ -273,7 +273,7 @@ fn cloneEntry(allocator: Allocator, source: *const CapturedRequest) !CapturedReq
 test "capture headers are bounded and can be disabled" {
     const allocator = std.testing.allocator;
     var capture = try Capture.init(allocator, std.Io.Threaded.global_single_threaded.io(), .{
-        .maxHeaderBytes = 8,
+        .maxHeader = 8,
     });
     defer capture.deinit();
 
@@ -300,7 +300,7 @@ test "capture headers are bounded and can be disabled" {
 
 test "capture copies requests, bounds bodies, and evicts oldest" {
     const allocator = std.testing.allocator;
-    var capture = try Capture.init(allocator, std.Io.Threaded.global_single_threaded.io(), .{ .maxEntries = 2, .maxBodyBytes = 4 });
+    var capture = try Capture.init(allocator, std.Io.Threaded.global_single_threaded.io(), .{ .maxEntries = 2, .maxBody = 4 });
     defer capture.deinit();
 
     const headers = [_]common.Header{.{ .name = "x-test", .value = "one" }};

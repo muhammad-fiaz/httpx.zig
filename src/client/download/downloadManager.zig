@@ -233,7 +233,7 @@ const DownloadOptionsSchema = z.objectOf(.{
     .headers = z.withDefault(z.array(req.HeaderSchema, .{}), &.{}),
     .timeoutMs = z.optional(z.integer(u64, .{})),
     .maxRetries = z.withDefault(z.integer(u32, .{}), 3),
-    .retryDelayMs = z.withDefault(z.integer(u64, .{}), 500),
+    .retryMs = z.withDefault(z.integer(u64, .{}), 500),
     .followRedirects = z.withDefault(z.boolean(.{}), true),
     .maxRedirects = z.withDefault(z.integer(u8, .{}), 10),
     .existing = z.withDefault(z.enumType(ExistingFilePolicy, .{}), .overwrite),
@@ -870,7 +870,7 @@ pub const Downloader = struct {
                     }
                     return err;
                 }
-                clock.sleepMillis(self.client.io, options.retryDelayMs * (@as(u64, 1) << @intCast(@min(attempt, 4))));
+                clock.sleepMillis(self.client.io, options.retryMs * (@as(u64, 1) << @intCast(@min(attempt, 4))));
             }
         }
 

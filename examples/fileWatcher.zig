@@ -31,7 +31,7 @@ pub fn main() !void {
     var watcher = try httpx.Watcher.init(allocator, io, .{
         .dirPath = ".",
         .debounceMs = 50,
-        .pollIntervalMs = 50,
+        .pollMs = 50,
         .onChange = onFileChanged,
     });
     defer watcher.deinit();
