@@ -13,7 +13,7 @@ This guide covers all supported installation methods for `httpx.zig`.
 
 ## Platform Support
 
-httpx.zig supports Linux, Windows, and macOS across 32-bit and 64-bit builds:
+httpx.zig supports 32-bit and 64-bit Linux and Windows builds, plus 64-bit macOS builds. Zig 0.17 does not provide a working 32-bit macOS target, so `x86-macos` is not supported.
 
 ### Operating Systems
 
@@ -29,7 +29,7 @@ httpx.zig supports Linux, Windows, and macOS across 32-bit and 64-bit builds:
 |--------------|-------|---------|-------|
 | x86_64 (64-bit) | Yes | Yes | Yes |
 | aarch64 (ARM64) | Yes | Yes | Yes |
-| x86 (32-bit) | Yes | Yes | Yes |
+| x86 (32-bit) | Yes | Yes | No |
 
 ::: tip Cross-Compilation
 Zig makes cross-compilation easy. You can build for any supported target from any host:

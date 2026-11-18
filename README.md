@@ -165,7 +165,10 @@
 |----------|-----------------|-----------------|--------------|
 | **Linux** | Yes | Yes | Yes |
 | **Windows** | Yes | Yes | Yes |
-| **macOS** | Yes | Yes (Apple Silicon) | Yes |
+| **macOS** | Yes | Yes (Apple Silicon) | No |
+
+32-bit macOS (`x86-macos`) is not supported because Zig 0.17's standard library
+does not implement that target. Use `x86_64-macos` or `aarch64-macos`.
 
 ### Cross-Compilation
 

@@ -622,12 +622,12 @@ test "error taxonomy: every known winsock code maps to a named error" {
 
 test "error taxonomy: posix errno mapping" {
     if (!isWindows and builtin.link_libc) {
-        try std.testing.expectEqual(Error.WouldBlock, posixC.mapErrno(11));
-        try std.testing.expectEqual(Error.ConnectionReset, posixC.mapErrno(104));
-        try std.testing.expectEqual(Error.TimedOut, posixC.mapErrno(110));
-        try std.testing.expectEqual(Error.ConnectionRefused, posixC.mapErrno(111));
-        try std.testing.expectEqual(Error.AddressInUse, posixC.mapErrno(98));
-        try std.testing.expectEqual(Error.AddressNotAvailable, posixC.mapErrno(99));
+        try std.testing.expectEqual(Error.WouldBlock, posixC.mapErrno(@backingInt(std.c.E.AGAIN)));
+        try std.testing.expectEqual(Error.ConnectionReset, posixC.mapErrno(@backingInt(std.c.E.CONNRESET)));
+        try std.testing.expectEqual(Error.TimedOut, posixC.mapErrno(@backingInt(std.c.E.TIMEDOUT)));
+        try std.testing.expectEqual(Error.ConnectionRefused, posixC.mapErrno(@backingInt(std.c.E.CONNREFUSED)));
+        try std.testing.expectEqual(Error.AddressInUse, posixC.mapErrno(@backingInt(std.c.E.ADDRINUSE)));
+        try std.testing.expectEqual(Error.AddressNotAvailable, posixC.mapErrno(@backingInt(std.c.E.ADDRNOTAVAIL)));
         try std.testing.expectEqual(Error.Unknown, posixC.mapErrno(999999));
     }
 }
