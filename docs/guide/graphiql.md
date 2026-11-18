@@ -6,7 +6,7 @@ completion, variables, and query execution.
 ## Default route
 
 The default route is `/graphiql`. The default GraphQL endpoint is
-`/graphql`. GraphiQL’s bundled editor scripts and Monaco worker files are
+`/graphql`. GraphiQL's bundled editor scripts and Monaco worker files are
 served beneath the configured route.
 
 ## Configure GraphiQL

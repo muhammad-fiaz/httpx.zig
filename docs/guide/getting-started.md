@@ -1,6 +1,6 @@
 # Getting Started
 
-`httpx.zig` is a modern, feature-rich HTTP library for the Zig programming language. It is under active development, supporting robust client and server implementations with focus on performance and developer experience.
+`httpx.zig` is an HTTP library for the Zig programming language, supporting client and server implementations with focus on performance, safety, and protocol compliance.
 
 ## Features
 

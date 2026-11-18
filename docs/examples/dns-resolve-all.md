@@ -4,7 +4,7 @@ Demonstrates candidate address resolution for dual-stack hostnames and IP litera
 
 ## Unified Candidate Resolution
 
-In HTTPX, a single canonical method — `client.resolve(host, .{ .port = 443 })` — resolves and returns all candidate addresses in system preference order (RFC 3484). There is no need for separate `resolve` vs `resolveAll` functions:
+In HTTPX, a single canonical method - `client.resolve(host, .{ .port = 443 })` - resolves and returns all candidate addresses in system preference order (RFC 3484). There is no need for separate `resolve` vs `resolveAll` functions:
 
 * Access the primary address: `addresses.first()`
 * Access all candidate addresses: `addresses.items` or `addresses.slice()`

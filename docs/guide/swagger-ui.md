@@ -1,7 +1,7 @@
 # Swagger UI
 
 Swagger UI provides an interactive OpenAPI explorer with parameter inputs and
-“Try it out” request execution.
+"Try it out" request execution.
 
 ## Default route
 
@@ -46,7 +46,7 @@ defer server.deinit();
 | `displayRequestDuration` | `bool` | `false` | Show request timings |
 | `filter` | `bool` | `false` | Show the operation filter box |
 | `persistAuthorization` | `bool` | `false` | Keep auth data across reloads |
-| `tryItOutEnabled` | `bool` | `false` | Expand “Try it out” by default |
+| `tryItOutEnabled` | `bool` | `false` | Expand "Try it out" by default |
 | `showExtensions` | `bool` | `false` | Show vendor extensions |
 | `showCommonExtensions` | `bool` | `false` | Show common extensions |
 | `showMutatedRequest` | `bool` | `true` | Show the mutated request |

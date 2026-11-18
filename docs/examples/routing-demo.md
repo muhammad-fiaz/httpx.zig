@@ -7,7 +7,7 @@ Demonstrates framework routing in HTTPX: typed path parameters, slugs, wildcard 
 ```zig
 //! Framework routing demo: typed parameters, slugs, catch-all paths,
 //! route groups, mounted routers, named routes + reversing, struct binding,
-//! 404/405 handling — all verified live over loopback.
+//! 404/405 handling - all verified live over loopback.
 //!
 //! Run with: `zig build run-routing-demo`
 

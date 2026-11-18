@@ -9,7 +9,7 @@ introspection, so GraphiQL, ReDoc, and Scalar render the complete schema:
 
 | Kind | Declaration |
 |---|---|
-| Object | `Type("User", .{ … })` (struct-driven) or `Object("User", &.{ … })` (string-named) |
+| Object | `Type("User", .{ ... })` (struct-driven) or `Object("User", &.{ ... })` (string-named) |
 | Scalar | `Scalar.string`, `.int`, `.float`, `.boolean`, `.id` |
 | Enum | `Enum("Role", Role)` |
 | Input object | `Input("UserFilter", .{ .role = RoleEnum })` |
@@ -18,7 +18,7 @@ introspection, so GraphiQL, ReDoc, and Scalar render the complete schema:
 | Modifiers | `.list = true`, `.nonNull = true` on a field or argument |
 
 Objects opt into interfaces with `implements(Type(...), &.{Node})`. A field's
-arguments are declared with `.args = .{ … }`; each argument may carry `.list`,
+arguments are declared with `.args = .{ ... }`; each argument may carry `.list`,
 `.nonNull`, and a GraphQL `.default` literal.
 
 ```zig

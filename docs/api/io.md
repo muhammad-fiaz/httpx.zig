@@ -13,9 +13,9 @@ Do not create a new context per request or per connection.
 
 `httpx.clock` wraps the `std.Io` clock:
 
-- `millisNow(io)` — milliseconds since the Unix epoch (`i64`)
-- `monotonicMillis(io)` — monotonic milliseconds (`i64`)
-- `sleepMillis(io, ms)` — sleep on the supplied `std.Io` (returns `void`)
+- `millisNow(io)` - milliseconds since the Unix epoch (`i64`)
+- `monotonicMillis(io)` - monotonic milliseconds (`i64`)
+- `sleepMillis(io, ms)` - sleep on the supplied `std.Io` (returns `void`)
 
 ```zig
 httpx.clock.sleepMillis(ctx.io, 10);
@@ -25,12 +25,12 @@ httpx.clock.sleepMillis(ctx.io, 10);
 
 `httpx.uri` provides RFC 3986 URI parsing and percent-encoding helpers:
 
-- `parse(input)` — parse into a `Uri` whose fields reference `input`
-- `httpx.uri.authority(uri, buf)` — format `host[:port]`, with IPv6 brackets
-- `httpx.uri.effectivePort(uri)` / `httpx.uri.defaultPort(scheme)` — resolve the default service port
-- `percentDecode(buf, input)` — decode into a caller buffer; malformed escapes are copied verbatim
-- `percentEncode(buf, input)` — encode into a caller buffer, keeping RFC 3986 unreserved bytes
-- `hasPathTraversal(decodedPath)` — reject `.`/`..`, NUL, and drive/UNC prefixes
+- `parse(input)` - parse into a `Uri` whose fields reference `input`
+- `httpx.uri.authority(uri, buf)` - format `host[:port]`, with IPv6 brackets
+- `httpx.uri.effectivePort(uri)` / `httpx.uri.defaultPort(scheme)` - resolve the default service port
+- `percentDecode(buf, input)` - decode into a caller buffer; malformed escapes are copied verbatim
+- `percentEncode(buf, input)` - encode into a caller buffer, keeping RFC 3986 unreserved bytes
+- `hasPathTraversal(decodedPath)` - reject `.`/`..`, NUL, and drive/UNC prefixes
 
 ```zig
 var buf: [64]u8 = undefined;

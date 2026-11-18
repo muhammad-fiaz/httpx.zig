@@ -52,13 +52,13 @@ Always prefer `server.http3.port()` over `server.localPort()` when dialling HTTP
 
 ### Connection handling
 
-- **QPACK** — RFC 9204 static and dynamic tables with encoder/decoder stream prefixes, insert-count acknowledgments, and blocked-section retry.
-- **QUIC framing** — STREAM, CRYPTO, ACK, HANDSHAKE_DONE, RESET_STREAM/STOP_SENDING, transport parameters, PTO/loss recovery, and NewReno congestion control.
-- **Varints** — QUIC variable-length integer encoding/decoding.
-- **Connection IDs** — generation and peer table.
-- **Flow control** — MAX_DATA and MAX_STREAM_DATA with connection-level and per-stream windows.
-- **GOAWAY / CONNECTION_CLOSE** — graceful shutdown and close handling.
-- **Stream cancellation** — RESET_STREAM and STOP_SENDING codecs.
+- **QPACK** - RFC 9204 static and dynamic tables with encoder/decoder stream prefixes, insert-count acknowledgments, and blocked-section retry.
+- **QUIC framing** - STREAM, CRYPTO, ACK, HANDSHAKE_DONE, RESET_STREAM/STOP_SENDING, transport parameters, PTO/loss recovery, and NewReno congestion control.
+- **Varints** - QUIC variable-length integer encoding/decoding.
+- **Connection IDs** - generation and peer table.
+- **Flow control** - MAX_DATA and MAX_STREAM_DATA with connection-level and per-stream windows.
+- **GOAWAY / CONNECTION_CLOSE** - graceful shutdown and close handling.
+- **Stream cancellation** - RESET_STREAM and STOP_SENDING codecs.
 
 ### Operational Notes
 
@@ -484,7 +484,7 @@ const params = httpx.quic.transportParameters.Params{
 The same limits are what the live QUIC connection advertises and
 enforces. They are validated at `Connection.init` (`error.InvalidConfig`
 for impossible windows, too many streams, or a UDP payload outside
-1200–65527 bytes). Protocol defaults are secure and need no manual
+1200-65527 bytes). Protocol defaults are secure and need no manual
 construction.
 
 Client applications tune them through the client initialization options,

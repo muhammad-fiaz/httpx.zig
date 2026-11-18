@@ -187,5 +187,5 @@ Client-to-server frames must be masked; server-to-client frames must not be.
 
 ## References
 
-* RFC 6455 — The WebSocket Protocol
-* RFC 7692 — Compression Extensions for WebSocket
+* RFC 6455 - The WebSocket Protocol
+* RFC 7692 - Compression Extensions for WebSocket

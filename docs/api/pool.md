@@ -82,5 +82,5 @@ pool.sweepExpired();
 
 ## See Also
 
-- [Client API](client.md) — High-level client with built-in pooling
-- [Pooling Guide](/guide/pooling) — Pooling configuration patterns
+- [Client API](client.md) - High-level client with built-in pooling
+- [Pooling Guide](/guide/pooling) - Pooling configuration patterns

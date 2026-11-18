@@ -52,7 +52,7 @@ When files within `liveReload.watchDir` are created, modified, deleted, or renam
 3. **Range Support (206)**: Handles `Range: bytes=start-end` for audio/video seeking and resumable downloads; returns `416 Range Not Satisfiable` for invalid bounds.
 4. **Conditional Requests (304)**: Supports `If-None-Match` (strong/weak ETags) and `If-Modified-Since` (IMF-fixdate parsing) for client cache revalidation.
 5. **Path Traversal Protection**: Rejects encoded traversal sequences (`../`, `%2e%2e/`, Windows drive letters, null bytes) ensuring requests cannot escape the configured document root.
-6. **Controlled SPA Integration**: Seamlessly delegates unmatched application routes to SPA entry points while guarding API routes and asset 404s.
+6. **Controlled SPA Integration**: Delegates unmatched application routes to SPA entry points while guarding API routes and asset 404s.
 
 ## Related
 

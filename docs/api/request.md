@@ -42,7 +42,7 @@ builder API.
 
 | Field | Type | Description |
 |---|---|---|
-| *(not an option)* | — | The URL is the **first argument** of every client method (`client.get(url, .{ ... })`). `url` is a field of the low-level `httpx.client.request` struct only. |
+| *(not an option)* | - | The URL is the **first argument** of every client method (`client.get(url, .{ ... })`). `url` is a field of the low-level `httpx.client.request` struct only. |
 | `method` | `?Method` | Explicit method for generic `request`; convenience methods choose the method |
 | `headers` | `[]const Header` | Slice of request header name/value pairs |
 | `query` | `[]const Header` | URL query parameters automatically encoded |

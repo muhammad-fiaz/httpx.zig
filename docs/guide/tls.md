@@ -19,7 +19,7 @@ across Linux, Windows, and macOS.
   rejected loudly with `UnsupportedSignatureScheme` instead of emitting a
   broken handshake.
 * **Session resumption** (TLS 1.3 PSK, `psk_dhe_ke`): the native client
-  offers cached sessions and the native server issues stateless tickets —
+  offers cached sessions and the native server issues stateless tickets - 
   see [Session Resumption](#session-resumption-psk--tickets) below.
   Resumption covers the native paths (HTTP/2 over TLS always; HTTPS/1.1
   when already native via client certificates). Plain HTTPS/1.1 runs on
@@ -56,13 +56,13 @@ With `.required`, a missing certificate fails the handshake: the client
 observes `error.ClientCertificateRequired` (its native handshake refuses
 to continue cert-less) while the server side only ever sees the
 connection vanish mid-flight (`error.IoError` / `error.TlsHandshakeFailed`)
-— there is no server-side policy error to assert on. Presented chains
+ -  there is no server-side policy error to assert on. Presented chains
 must anchor in `clientCaPem` with valid signatures
 (`error.ClientCertificateInvalid` otherwise). `.optional` lets cert-less
 clients through while still verifying any presented chain. See
 `[TLS mTLS](/examples/tls-mtls)` for a runnable loopback demo.
 
-A client presents its certificate through the high-level API — no
+A client presents its certificate through the high-level API - no
 engine calls needed:
 
 ```zig
@@ -89,7 +89,7 @@ handshakes: no Certificate/CertificateVerify flight, authentication via
 the PSK binder, forward secrecy preserved (`psk_dhe_ke` always performs
 fresh ECDHE alongside the PSK).
 
-Server — opt in with ticket keys (stateless; no per-client storage):
+Server - opt in with ticket keys (stateless; no per-client storage):
 
 ```zig
 var server = try httpx.Server.init(allocator, io, .{
@@ -105,9 +105,9 @@ var server = try httpx.Server.init(allocator, io, .{
 
 Rotate with `keys.rotate(next)`; outstanding tickets stay valid through
 one rotation via the previous-key slot, then fail closed (clients fall
-back to full handshakes — never an alert storm).
+back to full handshakes - never an alert storm).
 
-Client — automatic on the native paths: `httpx.Client` keeps an
+Client - automatic on the native paths: `httpx.Client` keeps an
 origin-keyed session cache, offers usable tickets, captures new ones
 from `NewSessionTicket` messages during reads, and resumes
 transparently. No API changes needed.
@@ -115,7 +115,7 @@ transparently. No API changes needed.
 Rules that keep resumption honest:
 
 - Any ticket problem (unknown/expired/corrupt ticket, binder mismatch,
-  suite mismatch) silently falls back to a full handshake — the client
+  suite mismatch) silently falls back to a full handshake - the client
   cannot distinguish either way.
 - Resumption is disabled under mutual TLS: an abbreviated flight carries
   no `CertificateRequest`, so resumed connections would bypass client
@@ -215,7 +215,7 @@ When TLS is active on the server port, HTTPX peeks at the initial connection byt
 
   The plain HTTP request was sent to HTTPS port
   ```
-* If `allowPlainHttp = true`, HTTPX seamlessly routes cleartext HTTP requests on the same port (dual HTTP/HTTPS mode, ideal for local testing).
+* When `allowPlainHttp = true`, HTTPX routes cleartext HTTP requests on the same port (dual HTTP/HTTPS mode, ideal for local testing).
 
 ### ALPN Protocol Negotiation
 

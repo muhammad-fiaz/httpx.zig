@@ -1,6 +1,6 @@
 # DNS Resolution Protocol & Architecture
 
-HTTPX features a centralized, robust DNS resolution subsystem supporting IPv4 (A records), IPv6 (AAAA records), RFC 1035 packet encoding/decoding, TTL-aware caching, and Happy Eyeballs address ordering.
+HTTPX features a centralized DNS resolution subsystem supporting IPv4 (A records), IPv6 (AAAA records), RFC 1035 packet encoding/decoding, TTL-aware caching, and Happy Eyeballs address ordering.
 
 ## Resolution Pipeline
 

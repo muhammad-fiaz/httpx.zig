@@ -2,7 +2,7 @@
 
 > **X25519MLKEM768 is implemented for both roles, as RFC 10024.** We offer the
 > hybrid group first as a client and accept it as a server, so a client that
-> offers only the hybrid — the default for OpenSSL 3.5+ — completes the
+> offers only the hybrid - the default for OpenSSL 3.5+ - completes the
 > handshake. Note that `X25519MLKEM768` names a key-share encoding, not a
 > shared-secret rule: Zig's std `MlKem768X25519` is X-Wing, which encodes it
 > identically and produces a different secret.

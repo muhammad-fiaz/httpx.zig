@@ -13,10 +13,10 @@ and records automatically; use the API below for custom instrumentation.
 | Method | Description |
 |--------|-------------|
 | `recordRequest()` | Increment total requests (+1 in-flight) |
-| `recordRequestMethod(method)` | Count by method (`GET`, `POST`, …) |
+| `recordRequestMethod(method)` | Count by method (`GET`, `POST`, ...) |
 | `recordResponse(bytes)` | Increment responses, decrement in-flight, add bytes out |
 | `recordResponseFull(status, durationNs, bytes)` | Response + status class + latency sample |
-| `recordStatus(status)` | Bucket a status code (`status2xx`…`status5xx`) |
+| `recordStatus(status)` | Bucket a status code (`status2xx`...`status5xx`) |
 | `recordError()` | Increment errors (decrements in-flight) |
 | `recordBytesIn(n)` / `recordBytesOut(n)` | Byte counters |
 | `recordTimeout()` | Increment timeouts |

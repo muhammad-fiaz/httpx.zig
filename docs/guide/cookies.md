@@ -66,7 +66,7 @@ fn visitHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
 
 * **`Secure`**: Cookie is only sent over encrypted HTTPS connections.
 * **`HttpOnly`**: Cookie cannot be accessed by client-side JavaScript (mitigates XSS token theft).
-* **`SameSite=Strict`**: Cookie is never sent on cross-site requests, providing robust CSRF defense.
+* **`SameSite=Strict`**: Cookie is never sent on cross-site requests, preventing cross-site request forgery (CSRF).
 
 ## Related
 

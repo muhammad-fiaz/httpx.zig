@@ -7,8 +7,8 @@ MIME types, multipart form data, encoding, and JSON.
 `httpx.mime` (`src/common/mime.zig`) is the single MIME implementation shared
 by static files, embedded assets, templates, and downloads:
 
-- `httpx.mime.fromPath(path)` — Resolve a best-effort MIME type from the file extension (always returns a valid content type, defaulting to `application/octet-stream`)
-- `httpx.mime.octetStream` — `"application/octet-stream"` fallback constant
+- `httpx.mime.fromPath(path)` - Resolve a best-effort MIME type from the file extension (always returns a valid content type, defaulting to `application/octet-stream`)
+- `httpx.mime.octetStream` - `"application/octet-stream"` fallback constant
 
 ## Multipart Form Data
 

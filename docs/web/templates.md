@@ -402,7 +402,7 @@ whitespace control, and autoescaping. Deliberate boundaries:
 * `{% extends %}` paths must be string literals (no dynamic parents).
 * `{% include %}` accepts a literal path or a context expression.
 * Zig values convert structurally (structs, slices, arrays, optionals);
-  Zig functions are not callable from templates — expose behavior
+  Zig functions are not callable from templates - expose behavior
   through `addGlobal` instead.
 * `format` supports `%s %d %i %u %f %c %x %X %o %%` with width,
   precision, and flags; `%e/%g` reject explicit precision.

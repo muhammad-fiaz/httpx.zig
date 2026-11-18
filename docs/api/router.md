@@ -1,7 +1,7 @@
 # Router API
 
 The Router provides method-based route registration, typed parameters,
-groups, mounting, named routes, URL reversing, and 404/405 dispatch —
+groups, mounting, named routes, URL reversing, and 404/405 dispatch - 
 one canonical matcher for HTTP, WebSocket, and SSE routes.
 
 ## Overview

@@ -37,8 +37,8 @@ escaped inside inline scripts. There is no string-based option passthrough.
 
 | Field | Type | Default | Swagger UI option |
 |---|---|---|---|
-| `enabled` | `bool` | `true` | — |
-| `route` | `[]const u8` | `"/docs"` | — |
+| `enabled` | `bool` | `true` | - |
+| `route` | `[]const u8` | `"/docs"` | - |
 | `title` | `[]const u8` | `"Swagger UI"` | HTML document title |
 | `docExpansion` | `DocExpansion` | `.list` | `docExpansion` (`list`, `full`, `none`) |
 | `defaultModelRendering` | `DefaultModelRendering` | `.example` | `defaultModelRendering` (`example`, `model`) |
@@ -67,8 +67,8 @@ escaped inside inline scripts. There is no string-based option passthrough.
 
 | Field | Type | Default | ReDoc option |
 |---|---|---|---|
-| `enabled` | `bool` | `true` | — |
-| `route` | `[]const u8` | `"/redoc"` | — |
+| `enabled` | `bool` | `true` | - |
+| `route` | `[]const u8` | `"/redoc"` | - |
 | `title` | `[]const u8` | `"ReDoc"` | HTML document title |
 | `hideHostname` | `bool` | `false` | `hideHostname` |
 | `hideDownloadButton` | `bool` | `false` | `hideDownloadButton` |
@@ -94,10 +94,10 @@ escaped inside inline scripts. There is no string-based option passthrough.
 
 | Field | Type | Default | Scalar option |
 |---|---|---|---|
-| `enabled` | `bool` | `true` | — |
-| `route` | `[]const u8` | `"/scalar"` | — |
+| `enabled` | `bool` | `true` | - |
+| `route` | `[]const u8` | `"/scalar"` | - |
 | `title` | `[]const u8` | `"Scalar API Reference"` | HTML document title |
-| `theme` | `[]const u8` | `"default"` | `theme` (`default`, `alternate`, `moon`, `purple`, `solarized`, …) |
+| `theme` | `[]const u8` | `"default"` | `theme` (`default`, `alternate`, `moon`, `purple`, `solarized`, ...) |
 | `darkMode` | `bool` | `false` | `darkMode` |
 | `hideModels` | `bool` | `false` | `hideModels` |
 | `hideDownloadButton` | `bool` | `false` | `hideDownloadButton` |
@@ -118,8 +118,8 @@ escaped inside inline scripts. There is no string-based option passthrough.
 
 | Field | Type | Default | GraphiQL option |
 |---|---|---|---|
-| `enabled` | `bool` | `true` | — |
-| `route` | `[]const u8` | `"/graphiql"` | — |
+| `enabled` | `bool` | `true` | - |
+| `route` | `[]const u8` | `"/graphiql"` | - |
 | `graphqlEndpoint` | `[]const u8` | `"/graphql"` | Request endpoint |
 | `title` | `[]const u8` | `"GraphiQL IDE"` | HTML document title |
 | `defaultQuery` | `[]const u8` | `""` | Query pre-filled in the editor |

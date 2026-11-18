@@ -6,7 +6,7 @@ HTTPX follows a strict zero-print architecture: the core library never invokes `
 
 1. **Zero Unexpected I/O**: Library code never pollutes stdout/stderr.
 2. **Redaction of Secrets**: Sensitive headers (`Authorization`, `Cookie`, `Set-Cookie`, `Proxy-Authorization`) and private keys are never logged by default.
-3. **Plug-and-Play Loggers**: Integrate seamlessly with standard `std.log` or custom structured JSON logging libraries.
+3. **Logger Integration**: Supports standard `std.log` or custom structured JSON logging libraries.
 
 ## Server Event Logging
 

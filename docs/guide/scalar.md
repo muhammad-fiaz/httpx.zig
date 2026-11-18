@@ -6,7 +6,7 @@ samples.
 
 ## Default route
 
-The default route is `/scalar`. Scalar’s bundled `standalone.js` is served
+The default route is `/scalar`. Scalar's bundled `standalone.js` is served
 under the configured route.
 
 ## Configure Scalar
@@ -34,11 +34,11 @@ defer server.deinit();
 | `enabled` | `bool` | `true` | Register the page and bundle |
 | `route` | `[]const u8` | `"/scalar"` | Page and asset prefix |
 | `title` | `[]const u8` | `"Scalar API Reference"` | HTML document title |
-| `theme` | `[]const u8` | `"default"` | `default`, `alternate`, `moon`, `purple`, `solarized`, … |
+| `theme` | `[]const u8` | `"default"` | `default`, `alternate`, `moon`, `purple`, `solarized`, ... |
 | `darkMode` | `bool` | `false` | Force the dark palette |
 | `hideModels` | `bool` | `false` | Hide the models section |
 | `hideDownloadButton` | `bool` | `false` | Hide the download button |
-| `hideTestRequestButton` | `bool` | `false` | Hide the “Test request” button |
+| `hideTestRequestButton` | `bool` | `false` | Hide the "Test request" button |
 | `hideClientButton` | `bool` | `false` | Hide the client button |
 | `isEditable` | `bool` | `false` | Allow editing the OpenAPI document |
 | `showSidebar` | `bool` | `true` | Show the sidebar navigation |

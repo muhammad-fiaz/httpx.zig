@@ -27,11 +27,11 @@ const File  = httpx.multipart.File;
 
 ---
 
-## Client-Side Upload — `.multipart` Option
+## Client-Side Upload - `.multipart` Option
 
 Pass `.multipart` to any `client.post / put / patch / request` call.
 All options work with `.{}` default configs; only override what you need.
-The `allocator` and `io` are taken from the `Client` you initialised — no need to pass them again.
+The `allocator` and `io` are taken from the `Client` you initialised - no need to pass them again.
 
 ### Fields + Files
 
@@ -127,7 +127,7 @@ const contentType = encoder.contentType(&ctBuf);
 
 ## Streaming Encoder
 
-Memory-bounded chunked streaming — no need to buffer the full body:
+Memory-bounded chunked streaming - no need to buffer the full body:
 
 ```zig
 var output: std.ArrayList(u8) = .empty;
@@ -155,7 +155,7 @@ Inside a route handler parse an incoming multipart body:
 ```zig
 pub fn handleUpload(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     var form = try ctx.multipart(.{
-        .maxMemoryBytes = 16 * 1024 * 1024, // optional — defaults to 32 MB
+        .maxMemoryBytes = 16 * 1024 * 1024, // optional - defaults to 32 MB
     });
     defer form.deinit();
 
@@ -202,8 +202,8 @@ All boundary helpers live under `httpx.multipart.Boundary`:
 | Function | Description |
 |---|---|
 | `Boundary.extract(contentType)` | Extract boundary from `Content-Type` header value |
-| `Boundary.subtype(contentType)` | Detect multipart subtype (`"form-data"`, `"mixed"`, …) |
-| `Boundary.validate(boundary)` | Validate a boundary per RFC 2046 §5.1.1 |
+| `Boundary.subtype(contentType)` | Detect multipart subtype (`"form-data"`, `"mixed"`, ...) |
+| `Boundary.validate(boundary)` | Validate a boundary per RFC 2046 Section 5.1.1 |
 | `Boundary.generate(&buf)` | Generate a unique 32-char hex boundary |
 
 ```zig
@@ -248,7 +248,7 @@ while (offset < total_bytes.len) {
 
 ## Limits (server-side)
 
-All fields have safe production defaults — `.{}` works out of the box:
+All fields have safe production defaults - `.{}` works out of the box:
 
 ```zig
 pub const Limits = struct {

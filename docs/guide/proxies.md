@@ -39,7 +39,7 @@ Plain `http://host:port` tunnels via `CONNECT host:port`, keeping the
 tunneled request in origin-form (`GET /path`, never an absolute URI).
 
 Credentials in the proxy URL become `Proxy-Authorization: Basic` on
-the CONNECT request only — they are never forwarded to the origin:
+the CONNECT request only - they are never forwarded to the origin:
 
 ```zig
 var resp = try client.get("http://internal/", .{
@@ -71,6 +71,6 @@ supported the same way; SOCKS4 has no authentication and no IPv6.
 ## Server-side Middleware
 
 Apply standard middleware to a server with `server.use(mw)` (CORS,
-security headers, logging, rate limiting — see `/guide/middleware`).
+security headers, logging, rate limiting - see `/guide/middleware`).
 There is no built-in reverse-proxy middleware; proxy *servers* are
 outside the scope of this guide.

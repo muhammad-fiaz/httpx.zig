@@ -69,18 +69,18 @@ Latency figures move between runs; they are not a contract. On the machine used 
 | `basic_auth_encode` | Security | 24.44 ns/op | **40924567 ops/sec** |
 | `basic_auth_decode` | Security | 14.63 ns/op | **68358774 ops/sec** |
 | `bearer_token_parse` | Security | 1.09 ns/op | **913634162 ops/sec** |
-| `gzip_compress` | Compression | 14.88 -µs/op | **67217 ops/sec** |
-| `gzip_decompress` | Compression | 4.13 -µs/op | **242071 ops/sec** |
-| `deflate_compress` | Compression | 13.47 -µs/op | **74248 ops/sec** |
-| `deflate_decompress` | Compression | 4.06 -µs/op | **246455 ops/sec** |
-| `html_parse` | Parsing | 11.55 -µs/op | **86583 ops/sec** |
-| `template_parse` | Parsing | 2.39 -µs/op | **418704 ops/sec** |
-| `template_render` | Parsing | 1.33 -µs/op | **754289 ops/sec** |
-| `template_incremental` | Parsing | 18.69 -µs/op | **53508 ops/sec** |
-| `json_feed_parse` | Parsing | 3.24 -µs/op | **308669 ops/sec** |
+| `gzip_compress` | Compression | 14.88 -us/op | **67217 ops/sec** |
+| `gzip_decompress` | Compression | 4.13 -us/op | **242071 ops/sec** |
+| `deflate_compress` | Compression | 13.47 -us/op | **74248 ops/sec** |
+| `deflate_decompress` | Compression | 4.06 -us/op | **246455 ops/sec** |
+| `html_parse` | Parsing | 11.55 -us/op | **86583 ops/sec** |
+| `template_parse` | Parsing | 2.39 -us/op | **418704 ops/sec** |
+| `template_render` | Parsing | 1.33 -us/op | **754289 ops/sec** |
+| `template_incremental` | Parsing | 18.69 -us/op | **53508 ops/sec** |
+| `json_feed_parse` | Parsing | 3.24 -us/op | **308669 ops/sec** |
 | `live_reload_inject` | Parsing | 231.07 ns/op | **4327662 ops/sec** |
-| `watcher_scan` | Watcher | 657.92 -µs/op | **1519 ops/sec** |
-| `watcher_deps` | Watcher | 3.18 -µs/op | **314606 ops/sec** |
+| `watcher_scan` | Watcher | 657.92 -us/op | **1519 ops/sec** |
+| `watcher_deps` | Watcher | 3.18 -us/op | **314606 ops/sec** |
 | `static_safe_join` | Static Files | 95.81 ns/op | **10437803 ops/sec** |
 | `spa_fallback_policy` | SPA | 92.54 ns/op | **10806489 ops/sec** |
 | `worker_pool_submit` | Concurrency | 198.00 ns/op | **5050484 ops/sec** |
@@ -94,10 +94,10 @@ Latency figures move between runs; they are not a contract. On the machine used 
 | `h3_frame_header` | Protocols | 2.43 ns/op | **411815819 ops/sec** |
 | `h3_varint_encode` | Protocols | 3.42 ns/op | **292106408 ops/sec** |
 | `h3_varint_decode` | Protocols | 3.22 ns/op | **310161190 ops/sec** |
-| `tls_record_seal` | TLS | 1.11 -µs/op | **899435 ops/sec** |
+| `tls_record_seal` | TLS | 1.11 -us/op | **899435 ops/sec** |
 | `tls_cert_parse` | TLS | 974.69 ns/op | **1025963 ops/sec** |
-| `client_server_get` | Network | 81.44 -µs/op | **12279 req/sec** |
-| `h2_pooled_get` | Network | 52.93 -µs/op | **18894 req/sec** |
+| `client_server_get` | Network | 81.44 -us/op | **12279 req/sec** |
+| `h2_pooled_get` | Network | 52.93 -us/op | **18894 req/sec** |
 | `h3_get` | Network | 203.29 ms/op | **4 req/sec** |
 | `tls_full_handshake` | TLS | 3.26 ms/op | **307 ops/sec** |
 | `tls_resumed_handshake` | TLS | 2.65 ms/op | **377 ops/sec**
@@ -128,7 +128,7 @@ Measured against a 10-route table mixing static, `{param}`, and typed `{id:int}`
 ### Serialization, Feeds & Live Reload
 - **JSON stringify**: ~188 ns (~5.3 million ops/sec) for a 6-field struct.
 - **JSON parse**: ~264 ns (~3.8 million ops/sec) into a typed Zig struct.
-- **JSON Feed parse**: ~3.34 µs for a 3-item feed on `std.json`. Feed documents go through `std.json` rather than a Tree-sitter grammar, so the whole parse is one allocator-backed pass instead of a syntax tree plus a manual tree walk.
+- **JSON Feed parse**: ~3.34 us for a 3-item feed on `std.json`. Feed documents go through `std.json` rather than a Tree-sitter grammar, so the whole parse is one allocator-backed pass instead of a syntax tree plus a manual tree walk.
 - **Live-reload injection**: ~240 ns to append the SSE client script to an HTML page, idempotently, before `</body>`.
 
 ### Authentication
@@ -137,20 +137,20 @@ Measured against a 10-route table mixing static, `{param}`, and typed `{id:int}`
 - **Bearer token parse**: ~1.1 ns (~932 million ops/sec).
 
 ### Compression & Decompression (1 KiB JSON payload)
-- **Gzip compress**: ~14.65 µs (~68,000 ops/sec).
-- **Gzip decompress**: ~4.08 µs (~245,000 ops/sec).
-- **Deflate compress**: ~13.36 µs (~75,000 ops/sec).
-- **Deflate decompress**: ~4.15 µs (~241,000 ops/sec).
+- **Gzip compress**: ~14.65 us (~68,000 ops/sec).
+- **Gzip decompress**: ~4.08 us (~245,000 ops/sec).
+- **Deflate compress**: ~13.36 us (~75,000 ops/sec).
+- **Deflate decompress**: ~4.15 us (~241,000 ops/sec).
 
 Compression is ~2.6x more expensive than decompression, which is the usual shape for these codecs and the reason the client negotiates encoding once per connection instead of per response.
 
 ### Web & Document Parsing
-- **HTML parse**: ~12.2 µs for a small document, Tree-sitter tokenisation plus DOM construction.
-- **Template parse**: ~2.42 µs.
-- **Template render**: ~1.36 µs, faster than parsing because the AST is cached and reused.
-- **Template incremental reparse**: ~19.3 µs when the source is unchanged; this is the same-work comparison, and it shows the incremental path is not yet cheaper than a fresh parse on identical input.
-- **Watcher scan**: ~646 µs for a full stat-walk of the template tree. The walk prunes ignored directories, so this cost is proportional to the files you actually watch, not to the repository around them.
-- **Watcher dependency graph**: ~3.23 µs to resolve the affected set across 64 edges.
+- **HTML parse**: ~12.2 us for a small document, Tree-sitter tokenisation plus DOM construction.
+- **Template parse**: ~2.42 us.
+- **Template render**: ~1.36 us, faster than parsing because the AST is cached and reused.
+- **Template incremental reparse**: ~19.3 us when the source is unchanged; this is the same-work comparison, and it shows the incremental path is not yet cheaper than a fresh parse on identical input.
+- **Watcher scan**: ~646 us for a full stat-walk of the template tree. The walk prunes ignored directories, so this cost is proportional to the files you actually watch, not to the repository around them.
+- **Watcher dependency graph**: ~3.23 us to resolve the affected set across 64 edges.
 
 ### Concurrency & DNS Caching
 - **Bounded MPMC queue**: push then pop in ~21.5 ns (~46 million ops/sec).
@@ -165,14 +165,14 @@ Compression is ~2.6x more expensive than decompression, which is the usual shape
 These are the cheapest operations in the suite, as expected: fixed-size header arithmetic with no branching on content.
 
 ### TLS
-- **Record seal**: ChaCha20-Poly1305 AEAD seal of a 1 KiB record in ~1.08 µs (~925,000 ops/sec).
-- **Certificate parse**: PEM decode plus DER parse of a P-256 chain in ~1.02 µs (~983,000 ops/sec).
+- **Record seal**: ChaCha20-Poly1305 AEAD seal of a 1 KiB record in ~1.08 us (~925,000 ops/sec).
+- **Certificate parse**: PEM decode plus DER parse of a P-256 chain in ~1.02 us (~983,000 ops/sec).
 - **Full handshake**: ~3.26 ms per handshake over loopback (~306/sec).
 - **Resumed handshake**: ~2.67 ms per handshake (~374/sec), about 18% faster than a full handshake. The gap is narrower than TLS 1.3 0-RTT would suggest because the benchmark measures a full TCP connect and a PSK resumption over loopback, where connection setup and record-layer work dominate rather than key agreement.
 
 ### End-to-End Loopback Requests
-- **HTTP/1.1 keep-alive GET** (`client_server_get`): ~80.4 µs per request, ~12,442 req/sec, between a live `httpx.Client` and a live `httpx.Server` on `127.0.0.1`, single-threaded and synchronous.
-- **HTTP/2 pooled GET** (`h2_pooled_get`): ~54.1 µs, ~18,492 req/sec. One h2c connection is reused, so a request costs a frame exchange instead of a new connection.
+- **HTTP/1.1 keep-alive GET** (`client_server_get`): ~80.4 us per request, ~12,442 req/sec, between a live `httpx.Client` and a live `httpx.Server` on `127.0.0.1`, single-threaded and synchronous.
+- **HTTP/2 pooled GET** (`h2_pooled_get`): ~54.1 us, ~18,492 req/sec. One h2c connection is reused, so a request costs a frame exchange instead of a new connection.
 - **HTTP/3 GET** (`h3_get`): ~203.0 ms per request, ~4 req/sec, because each operation performs a fresh QUIC plus TLS 1.3 handshake rather than reusing a session. This is a deliberate worst case, not a steady-state HTTP/3 number.
 
 ---

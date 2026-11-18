@@ -98,7 +98,7 @@ std.debug.print("version={s} status={d}\n", .{ res.version.wireNameResolved(), r
 Explicit `.http2` for an `https://` URL runs the native TLS client:
 it offers `h2` via ALPN, verifies the server chain and hostname, and
 fails loudly with `AlpnNegotiationFailed` when the server does not
-select `h2` — never silently downgraded. The std TLS wrapper (no ALPN
+select `h2` - never silently downgraded. The std TLS wrapper (no ALPN
 hook) remains the transport for plain HTTPS/1.1 requests.
 :::
 
@@ -248,7 +248,7 @@ try stream.onRecvData(true);
 
 PRIORITY data travels in `httpx.http2.frame.Priority`
 (`exclusive`, `streamDep`, `weight`); HEADERS frames can also carry it
-(see `httpx.http2.frame.Headers`). Priority is advisory — the runtime
+(see `httpx.http2.frame.Headers`). Priority is advisory - the runtime
 currently favors correctness (fair delivery) over strict weighted scheduling:
 
 ```zig
@@ -333,7 +333,7 @@ HTTP/2 uses flow control to prevent overwhelming receivers.
 Per-stream windows live on `httpx.http2.Stream`
 (`sendWindow`/`recvWindow`, default 65535 per RFC 9113); the connection-level
 window lives on `httpx.http2.Session`. The runtime enforces them
-automatically — the snippet below shows the accounting shape:
+automatically - the snippet below shows the accounting shape:
 
 ```zig
 // Default window size: 65535 bytes (RFC 9113)
@@ -375,7 +375,7 @@ HTTP/2 defines error codes for RST_STREAM and GOAWAY frames:
 When header blocks exceed `MAX_FRAME_SIZE`, `httpx.http2.Session`
 automatically splits them across HEADERS + CONTINUATION frames on send
 (`sendHeaders`/`sendHeaderBlock`) and reassembles them on receipt before
-invoking the header callback — applications only ever see complete blocks.
+invoking the header callback - applications only ever see complete blocks.
 
 ## SETTINGS Enforcement
 
@@ -441,7 +441,7 @@ HTTP/2 trailers (HEADERS after DATA with `END_STREAM`) are parsed by
 `END_STREAM` is a `PROTOCOL_ERROR`, not a second header block.
 
 The high-level `httpx.Server`/`httpx.Client` one-shot API does not yet surface
-trailers — use the `httpx.http2.transport` stream APIs directly if you need
+trailers - use the `httpx.http2.transport` stream APIs directly if you need
 them (see `examples/http2Multiplex.zig` for the runtime path).
 
 ## Connection Preface Timeout

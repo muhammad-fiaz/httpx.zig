@@ -706,7 +706,7 @@ gtag('config', '${GA_ID}');`,
 
     footer: {
       message: "Released under the MIT License.",
-      copyright: "Copyright © 2026 Muhammad Fiaz",
+      copyright: "Copyright (c) 2026 Muhammad Fiaz",
     },
 
     search: {

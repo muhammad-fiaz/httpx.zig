@@ -9,7 +9,7 @@ Demonstrates building typed REST APIs in HTTPX with automatic JSON schema valida
 //!
 //! Demonstrates the whole explicit surface:
 //!
-//! * lowercase verb registration — `server.post("/users", .{ .handler, … })`
+//! * lowercase verb registration - `server.post("/users", .{ .handler, ... })`
 //! * `httpx.router.Result(T)` struct-literal responses: `.status` (default
 //!   `200 OK`), `.body`, `.headers`, `.mediaType`
 //! * Single-document JSON media types on input (standard and any valid `+json` type)

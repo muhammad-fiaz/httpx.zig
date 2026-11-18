@@ -1,6 +1,6 @@
 # Server API
 
-The `httpx.zig` server module provides a robust HTTP server with middleware support, routing, and proper context handling. The high-level runtime supports HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3.
+The `httpx.zig` server module provides an HTTP server with middleware support, routing, and context handling. The high-level runtime supports HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3.
 
 ## Protocol Support
 
@@ -92,7 +92,7 @@ defer env_server.deinit();
 | `http3Options.initialMaxStreamDataUni` | `u64` | `65535` | Receive window for peer-initiated unidirectional streams. |
 | `http3Options.maxStreamsBidi` | `u64` | `128` | Concurrent bidirectional streams a client may open. |
 | `http3Options.maxStreamsUni` | `u64` | `128` | Concurrent unidirectional streams a client may open. |
-| `http3Options.maxUdpPayload` | `usize` | `1472` | Advertised QUIC max UDP payload (validated 1200–65527 bytes). |
+| `http3Options.maxUdpPayload` | `usize` | `1472` | Advertised QUIC max UDP payload (validated 1200-65527 bytes). |
 | `logging` | `LoggingOptions` | `{}` | Event callback + level (silent by default). |
 | `liveReload.watch` | `bool` | `false` | Watch a directory and broadcast changes. |
 | `liveReload.watchDir` | `[]const u8` | `"."` | Directory to watch when `liveReload.watch` is enabled. |
@@ -301,7 +301,7 @@ Omit `.logging.callback` (the default) for fully silent operation.
 | `metrics(path)` | Mount the Prometheus endpoint |
 | `setStatusHandler(code, handler)` | Custom handler per status code |
 
-### `httpx.Server` — Typed REST
+### `httpx.Server` - Typed REST
 
 `httpx.Server` is the inbound owner. Create it and the outbound client
 separately, both from the same allocator and `std.Io`:
@@ -325,20 +325,20 @@ literal as the second.
 
 The handler's return type selects the mode automatically:
 
-- `!httpx.router.Result(T)` ’ typed REST endpoint (JSON body decoding plus OpenAPI 3.1).
-- `!httpx.router.Response` ’ raw `HandlerFn` route with the same metadata fields.
+- `!httpx.router.Result(T)`: typed REST endpoint (JSON body decoding plus OpenAPI 3.1).
+- `!httpx.router.Response`: raw `HandlerFn` route with the same metadata fields.
 
 | Method | Description |
 |--------|-------------|
 | `server.get(path, .{ .handler, ... })` | GET |
-| `server.post(path, .{ .handler, ... })` | POST — typed handlers decode the JSON body |
+| `server.post(path, .{ .handler, ... })` | POST - typed handlers decode the JSON body |
 | `server.put(path, ...)` / `server.patch(path, ...)` | PUT / PATCH |
 | `server.delete(path, ...)` | DELETE |
 | `server.head(path, ...)` / `server.options(path, ...)` | HEAD / OPTIONS |
 | `server.add(.METHOD, path, .{ .handler, ... })` | Explicit method dispatch |
 
 A bare handler is also accepted: `server.get("/ping", ping)`. Options are anonymous
-struct literals — all fields are optional:
+struct literals - all fields are optional:
 
 ```zig
 try server.post("/users", .{
@@ -416,7 +416,7 @@ fn createUser(ctx: *httpx.router.Context, req: CreateUser) !httpx.router.Result(
 ```
 
 `Result(T)` is a struct with `.status` (default `.ok`), `.body`
-(default `null`), `.headers`, and `.mediaType` — all optional
+(default `null`), `.headers`, and `.mediaType` - all optional
 fields, so bare `.{ .body = user }` is a complete 200 response.
 For bodiless responses use `!httpx.router.Result(void)` and `.status =
 .noContent`; for arbitrary statuses use `.status =
@@ -440,7 +440,7 @@ JSON envelope `{"error": ..., "status": ...}`.
 
 #### Keys that are not Zig identifiers
 
-JSON keys are arbitrary strings and are preserved exactly — nothing in the
+JSON keys are arbitrary strings and are preserved exactly - nothing in the
 library restricts them to Zig identifier rules. Declare them as quoted fields:
 
 ```zig

@@ -44,9 +44,9 @@ zig build run-tls-get
 
 For full request/response verification over local TLS, see:
 
-- `[TLS mTLS](/examples/tls-mtls)` — mutual-TLS HTTP (`run-tls-mtls`):
+- `[TLS mTLS](/examples/tls-mtls)` - mutual-TLS HTTP (`run-tls-mtls`):
   trusted client served, cert-less client rejected.
-- `[HTTP/2 over TLS](/examples/http2-example)` — ALPN `h2` with chain
+- `[HTTP/2 over TLS](/examples/http2-example)` - ALPN `h2` with chain
   verification (`run-http2-tls`).
 - External HTTPS endpoints work via the high-level client:
 

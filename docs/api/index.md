@@ -20,22 +20,22 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 ### Client Lifecycle
 
 - `httpx.Client.init(allocator, io, .{})` - initialize a client with secure defaults and optional client-wide settings
-- `client.close()` — purge the connection pool; `client.reset()` — close + clear DNS cache
+- `client.close()` - purge the connection pool; `client.reset()` - close + clear DNS cache
 
 ### Server Lifecycle
 
-- `httpx.Server.init(allocator, io, config)` — initialize server with allocator, io, and configuration (or `.{}` for defaults)
-- `server.run()` — blocking loop; `server.start()` — background thread
+- `httpx.Server.init(allocator, io, config)` - initialize server with allocator, io, and configuration (or `.{}` for defaults)
+- `server.run()` - blocking loop; `server.start()` - background thread
 - `server.requestShutdown()` / `server.stop()` / `server.shutdown()` / `server.pause()` / `server.resumeAccepting()`
-- `server.localPort()` — actual bound port
-- `.signals = .{}` — automatic Ctrl+C / `SIGTERM` handling with a bounded drain deadline; `.signals = .{ .enabled = false }` transfers ownership to the application
+- `server.localPort()` - actual bound port
+- `.signals = .{}` - automatic Ctrl+C / `SIGTERM` handling with a bounded drain deadline; `.signals = .{ .enabled = false }` transfers ownership to the application
 
 ### Inline Configuration
 
 - Client settings: passed as the final `.{}` argument to `httpx.Client.init` (protocols, timeouts, redirects, retries, pool, proxy, TLS, DNS cache)
 - Server settings: passed as the final `.{}` argument to `httpx.Server.init` (host, port, strategy, body limits, protocols, docs, TLS, watcher, templates, logging)
 - Per-request settings: passed as the final `.{}` argument to request methods (headers, query, body/json/form/text, auth, timeouts, proxy, TLS)
-- `httpx.HttpVersion` — protocol version (`.auto`, `.http10`, `.http11`, `.http2`, `.http3`)
+- `httpx.HttpVersion` - protocol version (`.auto`, `.http10`, `.http11`, `.http2`, `.http3`)
 - `portStrategy` accepts `.incremental`, `.strict`, or `.exit`
 
 ### Server Types
@@ -55,11 +55,11 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 
 ### Utility Aliases
 
-- `httpx.mime.fromPath(path)` — extension-based MIME lookup
-- `httpx.clock.millisNow(io)` / `monotonicMillis(io)` / `sleepMillis(io, ms)` — wall-clock, monotonic, and sleep helpers
-- `httpx.Uri.parse(...)` — RFC 3986 URI parsing
-- `httpx.quic.varint` — QUIC variable-length integers
-- `httpx.env` — process environment and `.env` helpers
+- `httpx.mime.fromPath(path)` - extension-based MIME lookup
+- `httpx.clock.millisNow(io)` / `monotonicMillis(io)` / `sleepMillis(io, ms)` - wall-clock, monotonic, and sleep helpers
+- `httpx.Uri.parse(...)` - RFC 3986 URI parsing
+- `httpx.quic.varint` - QUIC variable-length integers
+- `httpx.env` - process environment and `.env` helpers
 
 ### DNS Cache
 
@@ -68,7 +68,7 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 ### WebSocket
 
 - `httpx.websocket.connect(allocator, io, url, .{})` / `httpx.websocket.Client.init(allocator, io, .{}).connect(url)`
-- `httpx.websocket.accept(ctx, .{})` — server upgrade + session takeover
+- `httpx.websocket.accept(ctx, .{})` - server upgrade + session takeover
 - `httpx.websocket.Session.sendText / sendBinary / receiveText / receiveBinary / ping / pong / close`
 - `httpx.websocket.protocol.Handshake.computeAccept / buildUpgradeRequest / validateUpgradeResponse`
 - `httpx.websocket.protocol.Frame.parseFrameHeader / buildFrameHeader / applyMask / generateKey`

@@ -62,8 +62,8 @@ tls.zig              -- Client/Server owners, Session, Certificate, TrustStore
 +-- errors.zig       -- Unified TLS error set and alert conversion
 ```
 
-The public API is two owners — `httpx.tls.Client` and
-`httpx.tls.Server` — plus value types (`Session`, `Certificate`,
+The public API is two owners - `httpx.tls.Client` and
+`httpx.tls.Server` - plus value types (`Session`, `Certificate`,
 `TrustStore`). The handshake engine, records, and transports are
 implementation details selected internally per connection.
 
@@ -108,7 +108,7 @@ pub const TlsOptions = struct {
 var res = try client.get("https://127.0.0.1:8443/", .{ .tls = .{ .verify = .none } });
 ```
 
-Mutual TLS through the high-level API — setting the pair routes the
+Mutual TLS through the high-level API - setting the pair routes the
 request through the native TLS 1.3 client (ALPN `http/1.1`, or `h2`
 with `.httpVersion = .http2`):
 
@@ -198,7 +198,7 @@ The server automatically loads the certificate chain and private key on the firs
 
 ## Connection
 
-Client connections flow through the high-level client (`client.get("https://…")`),
+Client connections flow through the high-level client (`client.get("https://...")`),
 which performs the handshake, ALPN negotiation, hostname verification, and
 record-layer encryption internally. Server connections are accepted via
 `Server.tls` and dispatched to HTTP/1 or HTTP/2 handlers based on the

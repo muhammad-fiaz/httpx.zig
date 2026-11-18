@@ -389,9 +389,9 @@ var resp = try client.post("https://example.com/upload", .{
 defer resp.deinit();
 ```
 
-> **Windows — buffer limit (issue #26)**
+> **Windows - buffer limit (issue #26)**
 >
-> On Windows the Winsock kernel send buffer is typically 8–64 KB. When sending
+> On Windows the Winsock kernel send buffer is typically 8-64 KB. When sending
 > large multipart data as a single body, `winsock.send()` may stall.
 >
 > The client caps individual socket writes, but it currently assembles the full

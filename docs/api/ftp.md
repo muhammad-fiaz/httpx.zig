@@ -1,6 +1,6 @@
 # API: FTP
 
-The `httpx.protocols.ftp` namespace provides a robust File Transfer Protocol client and server supporting standard RFC 959 commands, multiline reply parsing, active/passive data transfers (EPSV preferred, PASV fallback), directory navigation, and file transfers with streaming callbacks or high-level downloads.
+The `httpx.protocols.ftp` namespace provides File Transfer Protocol client and server implementations supporting standard RFC 959 commands, multiline reply parsing, active/passive data transfers (EPSV preferred, PASV fallback), directory navigation, and file transfers with streaming callbacks or high-level downloads.
 
 ## Overview
 

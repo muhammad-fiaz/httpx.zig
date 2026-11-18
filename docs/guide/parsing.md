@@ -64,11 +64,11 @@ native parsers.
 | S-expressions | Yes (reference) | None | No s-expression input in HTTPX |
 | JSON | Yes | Feed (JSON Feed syntax layer) | Only shipped grammar with an HTTPX consumer; value decoding stays `std.json` |
 | Outline (indent demo) | Yes (reference) | None | Reference only |
-| HTML | **No** | — | Native parser retained |
+| HTML | **No** | - | Native parser retained |
 | Templates (<code v-pre>{{ }}</code>, `{% %}`, `{# #}`) | HTTPX-defined (`templateLanguage`) | Templates (syntax layer) | Tree-sitter tokenizes; nesting/AST stays in HTTPX |
-| CSS selectors | **No** | — | Native parser retained |
-| GraphQL | **No** | — | Native spec-driven parser retained |
-| OpenAPI/YAML | **No** | — | Generation from router metadata + `std.json`; retained |
+| CSS selectors | **No** | - | Native parser retained |
+| GraphQL | **No** | - | Native spec-driven parser retained |
+| OpenAPI/YAML | **No** | - | Generation from router metadata + `std.json`; retained |
 
 ## Parser decision matrix
 

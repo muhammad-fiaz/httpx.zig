@@ -88,8 +88,8 @@ surface the flag, so truncated datagrams are still returned there.
 ## Address Utilities (`httpx.Address`)
 
 - `Address.loopback4(port)` / `loopback6(port)` / `unspecified4(port)` / `unspecified6(port)`
-- `Address.parse(text, defaultPort)` — split `host[:port]`
-- `Address.parseIp(text)` — IP-literal to `Address` (no instance needed)
+- `Address.parse(text, defaultPort)` - split `host[:port]`
+- `Address.parseIp(text)` - IP-literal to `Address` (no instance needed)
 - `format` / `formatBuf` / `formatWithPort` / `toString` / `toStd` / `fromStd`
 
 DNS resolution goes through `client.resolve(...)`, `httpx.net.resolve.Resolver`,

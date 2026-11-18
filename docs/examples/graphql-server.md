@@ -11,7 +11,7 @@ Renders typed GraphQL queries through the full type system (`Type`, `Enum`,
 //! Demonstrates:
 //! - The full type system: objects, enums, input objects, arguments, lists
 //! - Typed resolvers with a shared `httpx.graphql.Context`
-//! - One `httpx.Server.init(allocator, io, …)` owning the listener, router,
+//! - One `httpx.Server.init(allocator, io, ...)` owning the listener, router,
 //!   and GraphQL mount
 //! - REST routes through `server.get(...)`
 //! - GraphQL mounted with `server.graphql(.{ ... })`, torn down by `deinit`

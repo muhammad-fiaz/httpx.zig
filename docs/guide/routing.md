@@ -20,7 +20,7 @@ try server.router.get("/users/{id:int}", getUserHandler, .{
 
 ## Canonical syntax
 
-One grammar — `{...}` only (no `:id` legacy form):
+One grammar - `{...}` only (no `:id` legacy form):
 
 ```zig
 /users                // static
@@ -45,7 +45,7 @@ fn getUser(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     // ...use id: i64...
 }
 
-// Optional struct binding (Level 2) — plain param() stays simple:
+// Optional struct binding (Level 2) - plain param() stays simple:
 const Params = struct { userId: u64, postId: u64 };
 const p = try ctx.bindParams(Params); // MissingParam / InvalidParamValue
 ```
@@ -86,7 +86,7 @@ const url = try server.router.url("user", .{ .id = 42 }); // "/users/42"
 defer allocator.free(url);
 ```
 
-Missing, unknown, or invalid values are errors — never silent bad URLs.
+Missing, unknown, or invalid values are errors - never silent bad URLs.
 
 ## Compile-Time Route Validation
 
@@ -202,7 +202,7 @@ server.run();
 ```
 
 Handler signatures are `(*Context)` or `(*Context, RequestType)`, returning
-`!httpx.router.Result(T)` — a plain struct literal, no constructor:
+`!httpx.router.Result(T)` - a plain struct literal, no constructor:
 
 ```zig
 const User = struct {
@@ -267,6 +267,6 @@ response derived from the return type, `.request` documents the JSON body, and
 
 ## WebSocket and SSE
 
-WebSocket (`/ws/{roomId}`) and SSE endpoints are plain router routes —
+WebSocket (`/ws/{roomId}`) and SSE endpoints are plain router routes - 
 no separate routing engine exists.
 

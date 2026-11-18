@@ -138,7 +138,7 @@ pub fn build(b: *std.Build) void {
 ```
 
 > [!NOTE]
-> If the build fails with `file exists in modules 'X' and 'X0'`, a dependency on the client side is being resolved twice with different options — usually a transitive dependency the project also declares directly. Resolve shared dependencies with empty options (`.{}`) instead of re-passing `.target`/`.optimize`, so every importer shares one module instance. See https://codeberg.org/ziglang/zig/issues/36694.
+> If the build fails with `file exists in modules 'X' and 'X0'`, a dependency on the client side is being resolved twice with different options - usually a transitive dependency the project also declares directly. Resolve shared dependencies with empty options (`.{}`) instead of re-passing `.target`/`.optimize`, so every importer shares one module instance. See https://codeberg.org/ziglang/zig/issues/36694.
 
 ## Import in your code
 

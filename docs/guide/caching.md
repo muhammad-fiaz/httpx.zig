@@ -16,7 +16,7 @@ Key mechanisms supported:
 ## Client-Side Caching
 
 HTTPX does not yet implement an HTTP response cache (RFC 9111 client cache):
-there is no `enable_cache` option on `Client.init` — the client exposes DNS
+there is no `enable_cache` option on `Client.init` - the client exposes DNS
 caching only (`.dnsCache` in the `Client.init` options). Send conditional headers (`If-None-Match`,
 `If-Modified-Since`) explicitly per request and handle `304` responses in the
 caller:

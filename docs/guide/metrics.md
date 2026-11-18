@@ -81,7 +81,7 @@ All `Metrics` methods use `.monotonic` atomic operations:
 ## Prometheus exposition
 
 `reg.render(writer)` emits Prometheus 0.0.4 text with standard snake_case wire
-names (`http_requests_total`, `http_request_duration_seconds_bucket`, …).
+names (`http_requests_total`, `http_request_duration_seconds_bucket`, ...).
 See [Observability: Metrics](/observability/metrics).
 
 ## Full working example

@@ -146,7 +146,7 @@ defer server.deinit();
 
 Presented chains are verified with
 `verifyCertificateChain` (expiry, CA-ness, anchor match; no hostname
-check — client certificates identify a principal, not a host), the
+check - client certificates identify a principal, not a host), the
 `CertificateVerify` P-256 signature is checked over the live transcript,
 and the client `Finished` MAC binds everything. Malformed DER fails
 closed via structural validation, never a panic.

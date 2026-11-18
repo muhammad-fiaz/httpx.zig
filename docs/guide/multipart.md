@@ -11,10 +11,10 @@ send both text fields and binary data in the same request. Each part has its own
 
 ---
 
-## Client Upload — Zero Boilerplate
+## Client Upload - Zero Boilerplate
 
 Pass `.multipart` directly to any `client.post / put / patch` call.
-The `allocator` and `io` are taken from the `Client` you initialised — no need to pass them again.
+The `allocator` and `io` are taken from the `Client` you initialised - no need to pass them again.
 All configs use `.{}` default values; only override what you need.
 
 ### Fields + Files
@@ -140,7 +140,7 @@ Inside a router handler, parse an incoming `multipart/form-data` body:
 ```zig
 pub fn handleUpload(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     var form = try ctx.multipart(.{
-        .maxMemoryBytes = 16 * 1024 * 1024, // optional — defaults to 32 MB
+        .maxMemoryBytes = 16 * 1024 * 1024, // optional - defaults to 32 MB
     });
     defer form.deinit();
 
